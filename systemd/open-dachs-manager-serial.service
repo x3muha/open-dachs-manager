@@ -1,0 +1,23 @@
+[Unit]
+Description=Open Dachs Manager Serialworker
+After=local-fs.target
+
+[Service]
+Type=simple
+User=open-dachs
+Group=open-dachs
+EnvironmentFile=-/etc/open-dachs-manager/open-dachs-manager.env
+ExecStart=/opt/open-dachs-manager/venv/bin/open-dachs-serial-worker
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=open-dachs-manager
+RuntimeDirectoryMode=0750
+UMask=0007
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/run/open-dachs-manager
+
+[Install]
+WantedBy=multi-user.target

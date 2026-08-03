@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-dachs-manager"
+version = "0.9.0"
+description = "Lokaler serieller Web-, CLI- und TUI-Manager für Dachs-MSR2-Systeme"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+dependencies = ["pyserial>=3.5", "reportlab>=4.2"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Home Automation",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+open-dachs = "open_dachs_manager.cli:main"
+open-dachs-manager = "open_dachs_manager.cli:main"
+open-dachs-web = "open_dachs_manager.web:main"
+open-dachs-serial-worker = "open_dachs_manager.serial_worker:main"
+
+[project.urls]
+Repository = "https://github.com/x3muha/open-dachs-manager"
+Issues = "https://github.com/x3muha/open-dachs-manager/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+open_dachs_manager = ["data/*.json", "data/*.properties", "web/*.html", "web/*.css", "web/*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,6 @@
+{
+  "schema": "dachs-msr2-write-allowlist/v3",
+  "mode": "all",
+  "keys": [],
+  "note": "All mapped fields may be edited/written in the intentional v3 TUI/CLI write flow. Runtime still requires --write-enabled, a granted auth level, positive ACK and byte-exact readback."
+}

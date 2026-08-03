@@ -1,0 +1,1926 @@
+{
+  "formats": {
+    "Adresse1.aHausnr": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Adresse1.aName1": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Adresse1.aName2": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Adresse1.aPLZ": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Adresse1.aStrasse": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Adresse2.aEmail": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Adresse2.aOrt": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Adresse2.bLand": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Adresse3.aPLZ": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Adresse3.aServiceTel1": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Adresse3.aServiceTel2": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "BD3112.Hka_Bd.ulAnzahlStarts": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "BD3112.Hka_Bd.ulArbeitElektr": {
+      "divisor": 1000.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} kWh",
+      "unit": "kWh",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "BD3112.Hka_Bd.ulArbeitThermHka": {
+      "divisor": 1000.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} kWh",
+      "unit": "kWh",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "BD3112.Hka_Bd.ulArbeitThermKon": {
+      "divisor": 1000.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} kWh",
+      "unit": "kWh",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "BD3112.Hka_Bd.ulBetriebssekunden": {
+      "divisor": 3600.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} h",
+      "unit": "h",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "BD3112.Ww_Bd.ulWwMengepA": {
+      "divisor": 1000000.0,
+      "adder": 0.0,
+      "format": "{0,number,#.##} m³",
+      "unit": "m³",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Brenner_Bd.UBrenner_Anf.usAnforderung": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Brenner_Bd.UBrenner_Frei.bFreigabe": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Brenner_Bd.bIstStatus": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Brenner_Bd.bSollStatus": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Brenner_Bd.bWarnung": {
+      "divisor": 1.0,
+      "adder": 600.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [
+        "0"
+      ],
+      "invaliddisplay": "0"
+    },
+    "Brenner_Bd.ulAnzahlStarts": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Brenner_Bd.ulBetriebssekunden": {
+      "divisor": 3600.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} h",
+      "unit": "h",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Brenner_Bd.usAnzahlWarnungen": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Bd.sbVorlSollHk1": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Bd.sbVorlSollHk2": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis1.Heizkurve.bObereHeizkBegr": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis1.Heizkurve.bSollVorlauft_TAM10": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis1.Heizkurve.bSollVorlauft_TAP15": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis1.Heizkurve.bUntereHeizkBegr": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis1.Heizkurve.sbNachtversteller": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis1.Heizkurve.sbTagversteller": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis1.bMischerlaufzeit": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} s",
+      "unit": "s",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis1.bPartyEndeZeit": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis1.bVorlaufanstieg": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis2.Heizkurve.bObereHeizkBegr": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis2.Heizkurve.bSollVorlauft_TAM10": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis2.Heizkurve.bSollVorlauft_TAP15": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis2.Heizkurve.bUntereHeizkBegr": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis2.Heizkurve.sbNachtversteller": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis2.Heizkurve.sbTagversteller": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis2.bMischerlaufzeit": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} s",
+      "unit": "s",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis2.bPartyEndeZeit": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.Heizkreis2.bVorlaufanstieg": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hk_Ew.fHkObjekt": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.Anforderung.ModulAnzahl": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.Anforderung.UStromF_Anf.bFlagSF": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.Anforderung.bDauer": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} min",
+      "unit": "min",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sAbgasHKA": {
+      "divisor": 10.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sAbgasMotor": {
+      "divisor": 10.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sKapsel": {
+      "divisor": 10.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbAussen": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbFreigabeModul": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbFuehler1": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbFuehler2": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbGen": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbMotor": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbRegler": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbVorlauf": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbZS_Fuehler3": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbZS_Fuehler4": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbZS_Vorlauf1": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbZS_Vorlauf2": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.MaxTemp.sbZS_Warmwasser": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.UBrenner_Frei.bFreigabe": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.UHka_Anf.usAnforderung": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.UHka_Frei.usFreigabe": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.UStromF_Frei.bFreigabe": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.bCountNetzausfall": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.bStoerung": {
+      "divisor": 1.0,
+      "adder": 100.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [
+        "0"
+      ],
+      "invaliddisplay": "0"
+    },
+    "Hka_Bd.bWarnung": {
+      "divisor": 1.0,
+      "adder": 600.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [
+        "0"
+      ],
+      "invaliddisplay": "0"
+    },
+    "Hka_Bd.ulAnzahlStarts": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.ulArbeitElektr": {
+      "divisor": 1000.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} kWh",
+      "unit": "kWh",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.ulArbeitThermHka": {
+      "divisor": 1000.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} kWh",
+      "unit": "kWh",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.ulArbeitThermKon": {
+      "divisor": 1000.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} kWh",
+      "unit": "kWh",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.ulBetriebssekunden": {
+      "divisor": 3600.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} h",
+      "unit": "h",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.ulBetriebssekundenLetzteStoerung": {
+      "divisor": 3600.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} h",
+      "unit": "h",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.usAnzahlStoerungenHka": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd.usAnzahlWarnungen": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd_Stat.bSoftwareVersionMessen": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd_Stat.bSoftwareVersionRegler": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd_Stat.bSoftwareVersionUeberw": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd_Stat.uchSeriennummer": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd_Stat.uchTeilenummer": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Bd_Stat.ulInbetriebnahmedatum": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.HydraulikNr.b2_Waermeerzeuger": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.HydraulikNr.bMehrmodul": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.HydraulikNr.bSpeicherArt": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.HydraulikNr.bWW_Art": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.bFuehlerAbgasMotorTyp": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.bFuehrungHKA": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.bMaxRuecklaufTempHKA": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.bMaxlaufzeit": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.bMindestlaufzeit": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} min",
+      "unit": "min",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.sbFuehlerAbgasMotorKor": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.uchProgrammwahl": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.ulSystemTime": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.usAufstellhoehe": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} m",
+      "unit": "m",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.usFuehlerAbgasMotorBasisRegelung": {
+      "divisor": 10.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.usSollGenerator": {
+      "divisor": 1000.0,
+      "adder": 0.0,
+      "format": "{0,number,#.#} kW",
+      "unit": "kW",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Ew.usSprache": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Aktor.bWwPumpe": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Aktor.sStellmotorGas": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Aktor.sStellmotorOel": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Bivschalt.bBivUmschaltTemperatur": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Bivschalt.bZeitBisUmschaltung": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} min",
+      "unit": "min",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Regel_Temp.sZS_Vorlauf1": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Regel_Temp.sZS_Vorlauf2": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Solltemp.sbRuecklauf": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Solltemp.sbVorlauf": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sAbgasHKA": {
+      "divisor": 10.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sAbgasMotor": {
+      "divisor": 10.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sKapsel": {
+      "divisor": 10.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbAussen": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbFreigabeModul": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbFuehler1": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbFuehler2": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbGen": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbMotor": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbRegler": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbRuecklauf": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbVorlauf": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbZS_Fuehler3": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbZS_Fuehler4": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbZS_Vorlauf1": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbZS_Vorlauf2": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.Temp.sbZS_Warmwasser": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} °C",
+      "unit": "°C",
+      "invalidvals": [
+        "127"
+      ],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.bMotorStatus": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.bZusatzplatinen": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.sWirkleistung": {
+      "divisor": 1000.0,
+      "adder": 0.0,
+      "format": "{0,number,#.##} kW",
+      "unit": "kW",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.ulMotorlaufsekunden": {
+      "divisor": 3600.0,
+      "adder": 0.0,
+      "format": "{0,number,#.##} h",
+      "unit": "h",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw1.usDrehzahl": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} U/min",
+      "unit": "U/min",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw2.Hka_UC.ausCurrent1": {
+      "divisor": 100.0,
+      "adder": 0.0,
+      "format": "{0,number,0.0} A",
+      "unit": "A",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw2.Hka_UC.ausImpedanz": {
+      "divisor": 1000.0,
+      "adder": 0.0,
+      "format": "{0,number,0.00} Ohm",
+      "unit": "Ohm",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw2.Hka_UC.ausVoltage1": {
+      "divisor": 100.0,
+      "adder": 0.0,
+      "format": "{0,number,0.0} V",
+      "unit": "V",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Hka_Mw2.Hka_UC.usFrequency1": {
+      "divisor": 1000.0,
+      "adder": 0.0,
+      "format": "{0,number,0.0} Hz",
+      "unit": "Hz",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Laufraster15Min_aktTag.bDoppelstunde": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "MeldeHIST.ulZeitstempel": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm.ModulDaten.bDeltaBh": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} h",
+      "unit": "h",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm.ModulDaten.bDeltaTage": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm.ModulDaten.bStoerung": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm.ModulDaten.bWarnung": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm.ModulDaten.usLaufSeitStart_min": {
+      "divisor": 60.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} h",
+      "unit": "h",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm_MinMax.ModulBhMax.bModulNr": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm_MinMax.ModulBhMax.ulWert": {
+      "divisor": 3600.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} h",
+      "unit": "h",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm_MinMax.ModulBhMin.bModulNr": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm_MinMax.ModulBhMin.ulWert": {
+      "divisor": 3600.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} h",
+      "unit": "h",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm_MinMax.ModulStartMax.bModulNr": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm_MinMax.ModulStartMax.ulWert": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm_MinMax.ModulStartMin.bModulNr": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm_MinMax.ModulStartMin.ulWert": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm_MinMax.bModulBhMaxWart": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm_MinMax.bModulBhMinWart": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm_MinMax.sBhMaxWart": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} h",
+      "unit": "h",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Mm_MinMax.sBhMinWart": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} h",
+      "unit": "h",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.HT_NT.bBezugsPreisHT": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.HT_NT.bBezugsPreisNT": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.HT_NT.bLieferPreisHT": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.HT_NT.bLieferPreisNT": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.HT_NT.bWerktagNT_ZeitAus": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.HT_NT.bWerktagNT_ZeitEin": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.HT_NT.bWochenendeNT_ZeitEin": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.LastExtern.bDauer": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} min",
+      "unit": "min",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.LastZaehler1.bImpulseProKW": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.LastZaehler1.bMinKWDauer": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.LastZaehler1.usAnBeiMinKW": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.LastZaehler2.bImpulseProKW": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.LastZaehler2.bMinKWDauer": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.LastZaehler2.usAnBeiMinKW": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.MaxStromBezug.bKWVerbraucher": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.MaxStromBezug.bSollKWDauer": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.MaxStromBezug.bSollKWMaxAbschaltung": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.MaxStromBezug.bStrombezugZ1": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.ZusWWAbnahme.sbSollTempAus": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Stromf_Ew.ZusWWAbnahme.sbSollTempEin": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.FreigWaermeerz.bBivUmschaltzeit": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} min",
+      "unit": "min",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.FreigWaermeerz.bBivUmschaltzeitWw": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} min",
+      "unit": "min",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.FreigWaermeerz.bMindestlaufzeit": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} min",
+      "unit": "min",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.FreigWaermeerz.bSollTempSchnelleUmschaltung": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.FreigWaermeerz.bSollTempSchnelleUmschaltungWw": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.Heizkurve.bObereHeizkBegr": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.Heizkurve.bSollVorlauft_TAM10": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.Heizkurve.bSollVorlauft_TAP15": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.Heizkurve.bUntereHeizkBegr": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.Heizkurve.sbNachtversteller": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.Heizkurve.sbTagversteller": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.SoWi.UmschaltzeitSoWiF.usDatum": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.SoWi.UmschaltzeitSoWiS.usDatum": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.SoWi.UmschaltzeitWiSoF.usDatum": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.SoWi.UmschaltzeitWiSoS.usDatum": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.SoWi.bTempWiBetriebbeiNacht": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.SoWi.bTempWiBetriebbeiTag": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.Urlaub.Beginn.usDatum": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.Urlaub.Ende.usDatum": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.Urlaub.sbHeizkurvenabsenkung": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.bEinschalttemp": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Waermef_Ew.bSolltempRuecklaufHoch": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Cache.ulBetriebssekundenBei": {
+      "divisor": 3600.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} Bh",
+      "unit": "Bh",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Cache.ulZeitstempel": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "unix",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Cache.usIntervall": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} Bh",
+      "unit": "Bh",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.LetzteWIntvall.bOelverbrauch": {
+      "divisor": 10.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} l/1000Bh",
+      "unit": "l/1000Bh",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.LetzteWIntvall.usAvVerschleiss": {
+      "divisor": 10000.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} mm/1000Bh",
+      "unit": "mm/1000Bh",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.Nachher.bAbgasgegendruck": {
+      "divisor": 0.2,
+      "adder": 0.0,
+      "format": "",
+      "unit": "mbar",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.Nachher.bAvSpiel": {
+      "divisor": 100.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.Nachher.bAvVentilplatte": {
+      "divisor": 20.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.Nachher.bEvSpiel": {
+      "divisor": 100.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.Nachher.bEvVentilplatte": {
+      "divisor": 20.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.Nachher.bOelstand": {
+      "divisor": 10.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.VorLetzteWIntvall.bOelverbrauch": {
+      "divisor": 10.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} l/1000Bh",
+      "unit": "l/1000Bh",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.VorLetzteWIntvall.usAvVerschleiss": {
+      "divisor": 10000.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} mm/1000Bh",
+      "unit": "mm/1000Bh",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.Vorher.bAbgasgegendruck": {
+      "divisor": 0.2,
+      "adder": 0.0,
+      "format": "",
+      "unit": "mbar",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.Vorher.bAvSpiel": {
+      "divisor": 100.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.Vorher.bAvVentilplatte": {
+      "divisor": 20.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.Vorher.bEvSpiel": {
+      "divisor": 100.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.Vorher.bEvVentilplatte": {
+      "divisor": 20.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew1.Vorher.bOelstand": {
+      "divisor": 10.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew2.aNachfuellOel.bMenge": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew2.aNachfuellOel.ulBetriebssekundenBei": {
+      "divisor": 3600.0,
+      "adder": 0.0,
+      "format": "{0,number,integer} h",
+      "unit": "h",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Wartung_Ew2.aNachfuellOel.ulZeitstempel": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Ww_Bd.sbWwSollTemp": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Ww_Bd.ulWwMengepA": {
+      "divisor": 1000000.0,
+      "adder": 0.0,
+      "format": "{0,number,#.##} m³",
+      "unit": "m³",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Ww_Bd.usWwDurchfluss": {
+      "divisor": 1000.0,
+      "adder": 0.0,
+      "format": "{0,number,#.#} l/min",
+      "unit": "l/min",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Ww_Ew.Legionellen.bBeginn": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Ww_Ew.Legionellen.bLegioDauer": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} min",
+      "unit": "min",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Ww_Ew.Legionellen.bLegioSollTemp": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Ww_Ew.bWwSollTemp": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Ww_Ew.sbWwHysterese": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Ww_Ew.sbZirkHysterese": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "{0} °C",
+      "unit": "°C",
+      "invalidvals": [],
+      "invaliddisplay": ""
+    },
+    "Adresse2.bZeitzonenIndex": {
+      "divisor": 1.0,
+      "adder": 0.0,
+      "format": "integer",
+      "unit": "",
+      "invalidvals": [],
+      "invaliddisplay": "",
+      "value_map": {
+        "1": "Berlin"
+      }
+    }
+  },
+  "Hka_Mw2.Hka_UC.ubFehlerCodeMc1": {
+    "value_map": {
+      "25": "Inselnetzerkennung (Impedanzsprung > 1 Ohm)",
+      "33": "Spannungssteigerungsschutz U> (10-Min-Mittelwert > 253 V)",
+      "37": "Wirkleistungsreduktion Überfrequenz",
+      "38": "Spannungssteigerungsschutz U>> (Spannung > 264 V)",
+      "39": "Spannungsrückgangsschutz U< (Spannung < 184 V)",
+      "40": "Frequenzsteigerungsschutz f> (Frequenz > 51,5 Hz)",
+      "41": "Frequenzrückgangsschutz f< (Frequenz < 47,5 Hz)"
+    }
+  },
+  "Hka_Mw2.Hka_UC.ubFehlerCodeMc2": {
+    "value_map": {
+      "25": "Inselnetzerkennung (Impedanzsprung > 1 Ohm)",
+      "33": "Spannungssteigerungsschutz U> (10-Min-Mittelwert > 253 V)",
+      "37": "Wirkleistungsreduktion Überfrequenz",
+      "38": "Spannungssteigerungsschutz U>> (Spannung > 264 V)",
+      "39": "Spannungsrückgangsschutz U< (Spannung < 184 V)",
+      "40": "Frequenzsteigerungsschutz f> (Frequenz > 51,5 Hz)",
+      "41": "Frequenzrückgangsschutz f< (Frequenz < 47,5 Hz)"
+    }
+  },
+  "Hka_Mw2.Hka_UC.ubSchutzartMc1": {
+    "value_map": {
+      "25": "Inselnetzerkennung (Impedanzsprung > 1 Ohm)",
+      "33": "Spannungssteigerungsschutz U> (10-Min-Mittelwert > 253 V)",
+      "37": "Wirkleistungsreduktion Überfrequenz",
+      "38": "Spannungssteigerungsschutz U>> (Spannung > 264 V)",
+      "39": "Spannungsrückgangsschutz U< (Spannung < 184 V)",
+      "40": "Frequenzsteigerungsschutz f> (Frequenz > 51,5 Hz)",
+      "41": "Frequenzrückgangsschutz f< (Frequenz < 47,5 Hz)"
+    }
+  },
+  "Hka_Mw2.Hka_UC.ubSchutzartMc2": {
+    "value_map": {
+      "25": "Inselnetzerkennung (Impedanzsprung > 1 Ohm)",
+      "33": "Spannungssteigerungsschutz U> (10-Min-Mittelwert > 253 V)",
+      "37": "Wirkleistungsreduktion Überfrequenz",
+      "38": "Spannungssteigerungsschutz U>> (Spannung > 264 V)",
+      "39": "Spannungsrückgangsschutz U< (Spannung < 184 V)",
+      "40": "Frequenzsteigerungsschutz f> (Frequenz > 51,5 Hz)",
+      "41": "Frequenzrückgangsschutz f< (Frequenz < 47,5 Hz)"
+    }
+  },
+  "schema": "dachs-msr2-formats/v1"
+}

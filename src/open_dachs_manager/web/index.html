@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Open Dachs Manager</title>
+  <link rel="stylesheet" href="/static/style.css?v=16">
+</head>
+<body>
+  <div id="loginView" class="login-shell">
+    <div class="login-card">
+      <p class="eyebrow">OPEN · LOCAL · SERIAL · V3 0.9.0</p>
+      <h1>Open Dachs Manager</h1>
+      <p class="muted">Lokale Überwachung und geschützte Einstellungen.</p>
+      <form id="loginForm">
+        <label>Benutzername<input id="loginUsername" autocomplete="username" required></label>
+        <label>Passwort<input id="loginPassword" type="password" autocomplete="current-password" required></label>
+        <button class="primary wide" type="submit">Anmelden</button>
+        <p id="loginError" class="error-text"></p>
+      </form>
+    </div>
+  </div>
+
+  <div id="appView" hidden>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <p class="eyebrow">MSR2 · SERIAL · V3 0.9.0</p>
+          <h1>Open Dachs Manager</h1>
+        </div>
+        <nav class="main-tabs" aria-label="Bereiche">
+          <button class="tab-button active" data-view="overviewView">Übersicht</button>
+          <button class="tab-button" data-view="monitorView">Überwachung</button>
+          <button class="tab-button" data-view="maintenanceView">Wartung</button>
+          <button class="tab-button" data-view="settingsView">Einstellungen</button>
+          <button class="tab-button" data-view="auditView">Audit</button>
+        </nav>
+        <div class="topbar-status">
+          <span id="connectionSummary" class="status-pill neutral">Initialisiere …</span>
+          <span id="userBadge" class="user-badge"></span>
+          <button id="logoutButton" class="icon-button" title="Abmelden">↪</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section id="overviewView" class="app-view">
+        <header class="page-head">
+          <div><p class="eyebrow">LIVE-ANLAGE</p><h2>Dachs MSR2 · technische Übersicht</h2></div>
+          <div class="page-head-actions"><span id="lastUpdate" class="muted">Noch keine Messung</span><button data-action="refresh-live">Aktualisieren</button></div>
+        </header>
+        <div id="overviewCards" class="metric-grid"></div>
+        <section id="maintenanceDashboard" class="panel maintenance-dashboard maintenance-unknown">
+          <div class="maintenance-light" aria-hidden="true"><i></i></div>
+          <div><p class="eyebrow">WARTUNGSSTATUS</p><h3 id="maintenanceDashboardTitle">Wartungsstatus noch nicht gelesen</h3><p id="maintenanceDashboardDetails" class="muted">Block 104 wird im langsamen Zyklus gelesen.</p></div>
+          <button type="button" data-view-target="maintenanceView">Wartung öffnen</button>
+        </section>
+        <section class="panel power-overview-panel">
+          <div class="section-head">
+            <div><p class="eyebrow">GENERATORLEISTUNG</p><h3>Wirkleistung Ist / Soll</h3><p class="muted">Istwert aus Block 24 · Sollwert aus Block 50, <code>Hka_Ew.usSollGenerator</code> · Offset 8</p></div>
+            <span id="overviewPowerMode" class="status-pill neutral">Nur Anzeige</span>
+          </div>
+          <div class="power-overview-grid">
+            <article class="power-value-card">
+              <span>Wirkleistung Ist</span>
+              <strong id="overviewPowerActual">—</strong>
+              <small>Block 24 · aktueller Messwert</small>
+            </article>
+            <article class="power-value-card power-target-card">
+              <span>Wirkleistung Soll</span>
+              <strong id="overviewPowerTargetRead">—</strong>
+              <form id="overviewPowerTargetForm" class="power-target-form" hidden>
+                <label for="overviewPowerTargetInput">Sollwert eingeben</label>
+                <div class="power-target-input"><input id="overviewPowerTargetInput" inputmode="decimal" autocomplete="off" aria-label="Wirkleistung Soll in Kilowatt"><span>kW</span><button id="overviewPowerTargetApply" class="primary" type="submit">Prüfen</button></div>
+              </form>
+              <small id="overviewPowerTargetNote">Gastzugang: nur lesbar</small>
+            </article>
+          </div>
+        </section>
+        <section class="panel schematic-panel">
+          <div class="section-head"><div><p class="eyebrow">ANLAGENBILD</p><h3>Dachs-Anlagenbild</h3></div><div class="schematic-toolbar"><span class="muted">Livewerte direkt an der Anlage</span><div class="schematic-switch" role="group" aria-label="Darstellung wählen"><button type="button" class="active" data-schematic-mode="compact">Kompakt</button><button type="button" data-schematic-mode="detail">Technisch</button></div></div></div>
+          <div id="schematicStage" class="schematic-stage">
+          <svg class="plant-schematic compact-schematic" viewBox="0 0 1180 600" role="img" aria-label="Technisches Schema mit Dachs, Vorlauf, Rücklauf, Abgas und Steuerung">
+            <defs>
+              <marker id="arrowCompactHot" markerUnits="userSpaceOnUse" markerWidth="18" markerHeight="18" refX="16" refY="9" orient="auto"><path d="M0,0 L18,9 L0,18 z"></path></marker>
+              <marker id="arrowCompactReturn" markerUnits="userSpaceOnUse" markerWidth="18" markerHeight="18" refX="16" refY="9" orient="auto"><path d="M0,0 L18,9 L0,18 z"></path></marker>
+              <linearGradient id="compactGasMetal" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#111516"></stop><stop offset=".24" stop-color="#879091"></stop><stop offset=".5" stop-color="#e1e5e4"></stop><stop offset=".75" stop-color="#707a7b"></stop><stop offset="1" stop-color="#161b1c"></stop></linearGradient>
+            </defs>
+            <rect class="compact-background" x="0" y="0" width="1180" height="600"></rect>
+            <rect class="compact-frame" x="26" y="24" width="1128" height="552"></rect>
+            <text class="compact-diagram-title" x="54" y="58">Open Dachs Manager · Anlagenbild</text>
+            <text class="compact-diagram-note" x="1125" y="58" text-anchor="end">LIVE · SERIELL</text>
+            <g class="compact-pipes" aria-hidden="true">
+              <path class="compact-pipe compact-hot" marker-end="url(#arrowCompactHot)" d="M220 220 H96"></path>
+              <path class="compact-pipe compact-return" marker-end="url(#arrowCompactReturn)" d="M78 430 H204"></path>
+            </g>
+            <g class="compact-hydraulic-labels">
+              <text class="compact-pipe-label compact-hot-label" x="78" y="172">VORLAUF · KÜHLWASSER MOTOR</text>
+              <text id="compact-value-kuehlwasser" class="compact-pipe-value compact-hot-text" x="78" y="197">—</text>
+              <text class="compact-pipe-label compact-return-label" x="78" y="382">RÜCKLAUF · DACHS-EINTRITT</text>
+              <text id="compact-value-dachs-eintritt" class="compact-pipe-value compact-return-text" x="78" y="407">—</text>
+            </g>
+            <g class="compact-unit compact-dachs-unit">
+              <rect class="compact-dachs-body" x="220" y="100" width="560" height="470"></rect>
+              <rect class="compact-dachs-head" x="220" y="100" width="560" height="70"></rect>
+              <circle class="compact-status-lamp" cx="252" cy="135" r="8"></circle>
+              <text class="compact-unit-title" x="275" y="143">Dachs MSR2</text>
+              <text class="compact-unit-subtitle" x="505" y="124" text-anchor="middle">BETRIEBSSTUNDEN</text>
+              <text id="compact-value-betriebsstunden-gesamt" class="compact-head-value" x="505" y="151" text-anchor="middle">—</text>
+              <text class="compact-unit-subtitle" x="650" y="124" text-anchor="middle">STARTS</text>
+              <text id="compact-value-starts" class="compact-head-value" x="650" y="151" text-anchor="middle">—</text>
+              <line class="compact-unit-rule" x1="360" y1="192" x2="740" y2="192"></line>
+              <text class="compact-unit-label" x="360" y="230">Status</text>
+              <text id="compact-value-motorstatus" class="compact-unit-value compact-status" x="740" y="230" text-anchor="end">—</text>
+              <text class="compact-unit-label" x="360" y="265">Drehzahl</text>
+              <text id="compact-value-drehzahl" class="compact-unit-value" x="740" y="265" text-anchor="end">—</text>
+              <text class="compact-unit-label" x="360" y="300">Wirkleistung Ist</text>
+              <text id="compact-value-wirkleistung" class="compact-unit-value" x="740" y="300" text-anchor="end">—</text>
+              <text class="compact-unit-label compact-long-label" x="360" y="335">Motorabgastemperatur</text>
+              <text id="compact-value-abgas-motor" class="compact-unit-value" x="740" y="335" text-anchor="end">—</text>
+              <text class="compact-unit-label" x="360" y="370">Kapseltemperatur</text>
+              <text id="compact-value-kapsel" class="compact-unit-value" x="740" y="370" text-anchor="end">—</text>
+              <text class="compact-unit-label" x="360" y="405">Kühlwasser Motor</text>
+              <text id="compact-value-kuehlwasser-box" class="compact-unit-value" x="740" y="405" text-anchor="end">—</text>
+              <text class="compact-unit-label" x="360" y="440">Reglerfühler MSR2</text>
+              <text id="compact-value-regler" class="compact-unit-value" x="740" y="440" text-anchor="end">—</text>
+              <text class="compact-unit-label" x="360" y="475">Aktueller Fehlercode</text>
+              <text id="compact-value-servicecode" class="compact-unit-value compact-status" x="740" y="475" text-anchor="end">—</text>
+              <text class="compact-unit-label" x="360" y="510">Laufzeit seit Start</text>
+              <text id="compact-value-betriebsstunden" class="compact-unit-value" x="740" y="510" text-anchor="end">—</text>
+            </g>
+            <g class="compact-exhaust" aria-label="Abgasweg">
+              <path class="compact-gas-pipe-outer" d="M780 220 H1110"></path>
+              <path class="compact-gas-pipe-inner" d="M780 220 H1110"></path>
+              <text class="compact-gas-label" x="850" y="164">ABGAS · DACHS-ABGAS</text>
+              <text id="compact-value-abgas-hka" class="compact-gas-value" x="850" y="190">—</text>
+            </g>
+            <g class="compact-control-panel" aria-label="Steuerung und Netzwerte">
+              <rect class="compact-control-body" x="835" y="275" width="300" height="205"></rect>
+              <rect class="compact-control-head" x="835" y="275" width="300" height="44"></rect>
+              <text class="compact-control-title" x="855" y="303">STEUERUNG / NETZ</text>
+              <text class="compact-control-subtitle" x="1115" y="303" text-anchor="end">BLOCK 26 · 10 s</text>
+              <text class="compact-control-label" x="855" y="350">Spannung</text><text id="compact-value-voltage" class="compact-control-value" x="1115" y="350" text-anchor="end">—</text>
+              <text class="compact-control-label" x="855" y="382">Strom</text><text id="compact-value-current" class="compact-control-value" x="1115" y="382" text-anchor="end">—</text>
+              <text class="compact-control-label" x="855" y="414">Impedanz</text><text id="compact-value-impedance" class="compact-control-value" x="1115" y="414" text-anchor="end">—</text>
+              <text class="compact-control-label" x="855" y="446">Frequenz</text><text id="compact-value-frequency" class="compact-control-value" x="1115" y="446" text-anchor="end">—</text>
+            </g>
+            <g class="compact-regler-sensor">
+              <rect x="58" y="270" width="122" height="78"></rect>
+              <text x="72" y="294">REGLER</text><text x="72" y="316">MSR2-FÜHLER</text>
+              <text id="compact-value-regler-side" x="72" y="338">—</text>
+            </g>
+          </svg>
+          <svg class="plant-schematic technical-schematic" viewBox="0 0 1360 620" role="img" aria-label="Technisches Schema von Dachs, Steuerung und Abgasweg">
+            <defs>
+              <marker id="arrowTechHot" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" refX="13" refY="7" orient="auto"><path d="M0,0 L14,7 L0,14 z"></path></marker>
+              <marker id="arrowTechReturn" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" refX="13" refY="7" orient="auto"><path d="M0,0 L14,7 L0,14 z"></path></marker>
+              <marker id="arrowTechCool" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" refX="13" refY="7" orient="auto"><path d="M0,0 L14,7 L0,14 z"></path></marker>
+              <marker id="arrowTechGas" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" refX="13" refY="7" orient="auto"><path d="M0,0 L14,7 L0,14 z"></path></marker>
+            </defs>
+
+            <g class="tech-grid" aria-hidden="true">
+              <path d="M20 40 H1340 M20 80 H1340 M20 120 H1340 M20 160 H1340 M20 200 H1340 M20 240 H1340 M20 280 H1340 M20 320 H1340 M20 360 H1340 M20 400 H1340 M20 440 H1340 M20 480 H1340 M20 520 H1340 M20 560 H1340"></path>
+              <path d="M40 20 V580 M80 20 V580 M120 20 V580 M160 20 V580 M200 20 V580 M240 20 V580 M280 20 V580 M320 20 V580 M360 20 V580 M400 20 V580 M440 20 V580 M480 20 V580 M520 20 V580 M560 20 V580 M600 20 V580 M640 20 V580 M680 20 V580 M720 20 V580 M760 20 V580 M800 20 V580 M840 20 V580 M880 20 V580 M920 20 V580 M960 20 V580 M1000 20 V580 M1040 20 V580 M1080 20 V580 M1120 20 V580 M1160 20 V580 M1200 20 V580 M1240 20 V580 M1280 20 V580 M1320 20 V580"></path>
+            </g>
+
+            <g class="technical-edges" aria-hidden="true">
+              <path class="technical-pipe pipe-gas" marker-end="url(#arrowTechGas)" d="M370 178 H505"></path>
+              <path class="technical-pipe pipe-gas" marker-end="url(#arrowTechGas)" d="M835 178 H905"></path>
+              <path class="technical-pipe pipe-gas" marker-end="url(#arrowTechGas)" d="M1035 178 H1190 V105"></path>
+              <path class="technical-pipe pipe-hot" marker-end="url(#arrowTechHot)" d="M370 312 H505"></path>
+              <path class="technical-pipe pipe-hot" marker-end="url(#arrowTechHot)" d="M835 312 H1015"></path>
+              <path class="technical-pipe pipe-hot" d="M1165 312 H1260 V360"></path>
+              <path class="technical-pipe pipe-return" marker-end="url(#arrowTechReturn)" d="M1015 485 H835"></path>
+              <path class="technical-pipe pipe-return" marker-end="url(#arrowTechReturn)" d="M505 485 H370"></path>
+              <path class="technical-pipe pipe-cool" marker-end="url(#arrowTechCool)" d="M370 414 H505"></path>
+              <path class="technical-pipe pipe-cool" marker-end="url(#arrowTechCool)" d="M835 414 H930 V485 H1015"></path>
+              <path class="technical-pipe pipe-return" d="M1015 535 H945 V485"></path>
+            </g>
+
+            <g class="technical-unit dachs-technical">
+              <rect class="unit-frame" x="70" y="105" width="300" height="460" rx="5"></rect>
+              <rect class="unit-top" x="70" y="105" width="300" height="42" rx="5"></rect>
+              <circle class="unit-lamp" cx="95" cy="126" r="7"></circle>
+              <text class="unit-headline" x="113" y="132">DACHS MSR2</text>
+              <text class="unit-subline" x="348" y="132" text-anchor="end">MSR2</text>
+              <rect class="engine-block" x="105" y="177" width="230" height="155" rx="3"></rect>
+              <path class="engine-detail" d="M135 222 H305 M135 245 H305 M135 268 H305"></path>
+              <path class="engine-detail" d="M156 200 V292 M188 200 V292 M220 200 V292 M252 200 V292 M284 200 V292"></path>
+              <circle class="generator-symbol" cx="220" cy="307" r="24"></circle>
+              <path class="generator-detail" d="M205 307 H235 M220 292 V322"></path>
+              <text class="unit-caption" x="220" y="355" text-anchor="middle">Motor / Generator</text>
+              <line class="unit-rule" x1="95" y1="372" x2="345" y2="372"></line>
+              <text class="unit-label" x="100" y="399">Drehzahl</text>
+              <text id="value-drehzahl" class="unit-value" x="340" y="399" text-anchor="end">—</text>
+              <text class="unit-label" x="100" y="427">Wirkleistung Ist</text>
+              <text id="value-wirkleistung" class="unit-value" x="340" y="427" text-anchor="end">—</text>
+              <text class="unit-label" x="100" y="455">Betriebszustand</text>
+              <text id="value-motorstatus" class="unit-value status-value" x="340" y="455" text-anchor="end">—</text>
+              <text class="unit-label" x="100" y="485">Kühlwasser Motor</text>
+              <text id="value-tech-kuehlwasser" class="unit-value" x="340" y="485" text-anchor="end">—</text>
+              <text class="unit-label" x="100" y="513">Motorabgas</text>
+              <text id="value-tech-abgas-motor" class="unit-value" x="340" y="513" text-anchor="end">—</text>
+              <text class="unit-label" x="100" y="541">Kapsel</text>
+              <text id="value-tech-kapsel" class="unit-value" x="340" y="541" text-anchor="end">—</text>
+            </g>
+
+            <g class="technical-unit condenser-technical">
+              <rect class="unit-frame" x="505" y="105" width="330" height="380" rx="5"></rect>
+              <rect class="unit-top" x="505" y="105" width="330" height="42" rx="5"></rect>
+              <circle class="unit-lamp condenser-lamp" cx="530" cy="126" r="7"></circle>
+              <text class="unit-headline" x="548" y="132">KONDENSER</text>
+              <text class="unit-subline" x="813" y="132" text-anchor="end">WÄRMETAUSCHER</text>
+              <rect class="condenser-core" x="565" y="177" width="210" height="170" rx="3"></rect>
+              <path class="heat-exchanger" d="M590 200 H750 L590 230 H750 L590 260 H750 L590 290 H750 L590 320 H750"></path>
+              <path class="condenser-divider" d="M675 188 V336"></path>
+              <text class="condenser-caption" x="620" y="365" text-anchor="middle">Abgas</text>
+              <text class="condenser-caption" x="728" y="365" text-anchor="middle">Heizwasser</text>
+              <line class="unit-rule" x1="530" y1="382" x2="810" y2="382"></line>
+              <text class="unit-label" x="535" y="409">Kühlwasser</text>
+              <text id="value-kuehlwasser" class="unit-value" x="800" y="409" text-anchor="end">—</text>
+              <text class="unit-label" x="535" y="437">Abgas vor Rußfilter</text>
+              <text id="value-abgas-motor" class="unit-value" x="800" y="437" text-anchor="end">—</text>
+              <text class="unit-label" x="535" y="465">Abgas nach Rußfilter</text>
+              <text id="value-abgas-hka" class="unit-value" x="800" y="465" text-anchor="end">—</text>
+            </g>
+
+            <g class="technical-unit filter-technical">
+              <rect class="filter-frame" x="905" y="105" width="130" height="235" rx="5"></rect>
+              <rect class="filter-top" x="905" y="105" width="130" height="42" rx="5"></rect>
+              <text class="unit-headline small-headline" x="970" y="132" text-anchor="middle">ABGAS</text>
+              <rect class="filter-core" x="933" y="178" width="74" height="115" rx="2"></rect>
+              <path class="filter-mesh" d="M940 190 H1000 M940 205 H1000 M940 220 H1000 M940 235 H1000 M940 250 H1000 M940 265 H1000 M940 280 H1000 M948 183 V288 M963 183 V288 M978 183 V288 M993 183 V288"></path>
+              <text class="filter-caption" x="970" y="316" text-anchor="middle">Rußfilter</text>
+            </g>
+
+            <g class="chimney-technical">
+              <path class="chimney-body" d="M1190 105 H1240 L1228 245 H1202 Z"></path>
+              <path class="chimney-cap" d="M1182 105 H1248"></path>
+              <text class="chimney-label" x="1215" y="270" text-anchor="middle">Kamin</text>
+            </g>
+
+            <g class="hydraulic-technical">
+              <path class="buffer-body" d="M1015 360 H1165 V520 H1015 Z"></path>
+              <ellipse class="buffer-top" cx="1090" cy="360" rx="75" ry="16"></ellipse>
+              <ellipse class="buffer-bottom" cx="1090" cy="520" rx="75" ry="16"></ellipse>
+              <path class="buffer-level" d="M1035 445 H1145"></path>
+              <text class="buffer-label" x="1090" y="432" text-anchor="middle">PUFFER</text>
+              <text class="buffer-label" x="1090" y="463" text-anchor="middle">Heizkreis</text>
+              <text class="buffer-note" x="1090" y="490" text-anchor="middle">Vorlauf / Rücklauf</text>
+              <g class="pump-symbol" transform="translate(965 312)"><circle r="20"></circle><path d="M-8 -7 L10 0 L-8 7 Z"></path></g>
+              <text class="pump-label" x="965" y="350" text-anchor="middle">Pumpe HK</text>
+              <g class="pump-symbol return-pump" transform="translate(900 485)"><circle r="20"></circle><path d="M8 -7 L-10 0 L8 7 Z"></path></g>
+              <text class="pump-label" x="900" y="523" text-anchor="middle">Pumpe RL</text>
+            </g>
+
+            <g class="sensor-box sensor-af"><rect x="26" y="58" width="98" height="38" rx="2"></rect><text x="39" y="75">AF</text><text x="39" y="89">Außenfühler</text></g>
+            <g class="sensor-box sensor-vf"><rect x="395" y="276" width="92" height="52" rx="2"></rect><text x="409" y="296">VF</text><text id="value-vorlauf" x="409" y="317">—</text></g>
+            <g class="sensor-box sensor-rf"><rect x="395" y="458" width="92" height="52" rx="2"></rect><text x="409" y="478">RF</text><text id="value-ruecklauf" x="409" y="499">—</text></g>
+            <g class="sensor-box sensor-f1"><rect x="430" y="535" width="92" height="38" rx="2"></rect><text x="444" y="559">F1 · Reserve</text></g>
+            <g class="sensor-box sensor-ag"><rect x="846" y="150" width="76" height="50" rx="2"></rect><text x="858" y="170">AG1</text><text x="858" y="190">Abgas</text></g>
+
+            <g class="technical-legend">
+              <line class="legend-hot" x1="42" y1="587" x2="78" y2="587"></line><text x="86" y="591">Heizwasser / Vorlauf</text>
+              <line class="legend-return" x1="250" y1="587" x2="286" y2="587"></line><text x="294" y="591">Rücklauf</text>
+              <line class="legend-cool" x1="400" y1="587" x2="436" y2="587"></line><text x="444" y="591">Kühlwasser</text>
+              <line class="legend-gas" x1="560" y1="587" x2="596" y2="587"></line><text x="604" y="591">Abgas</text>
+              <rect class="legend-sensor" x="700" y="577" width="20" height="20"></rect><text x="728" y="591">Messstelle / Sensor</text>
+              <text class="diagram-note" x="1320" y="591" text-anchor="end">Schema · nicht maßstäblich</text>
+            </g>
+            <g class="technical-simple-edges" aria-hidden="true">
+              <path class="technical-pipe pipe-hot" d="M70 312 H48"></path>
+              <path class="technical-pipe pipe-return" d="M42 485 H56"></path>
+              <path class="technical-pipe pipe-gas" d="M370 178 H1220"></path>
+            </g>
+            <g class="technical-simple-labels">
+              <text class="simple-pipe-label simple-hot-label" x="42" y="286">VORLAUF · KÜHLWASSER MOTOR</text>
+              <text id="tech-value-kuehlwasser" class="simple-pipe-value simple-hot-value" x="42" y="305">—</text>
+              <text class="simple-pipe-label simple-return-label" x="42" y="459">RÜCKLAUF · DACHS-EINTRITT</text>
+              <text id="tech-value-dachs-eintritt" class="simple-pipe-value simple-return-value" x="42" y="478">—</text>
+              <text class="simple-gas-label" x="640" y="150">ABGAS · DACHS-ABGAS</text>
+              <text id="tech-value-abgas-hka" class="simple-gas-value" x="640" y="170">—</text>
+            </g>
+            <g class="technical-simple-regler">
+              <rect x="28" y="365" width="120" height="64" rx="2"></rect>
+              <text x="42" y="389">REGLER</text><text x="42" y="408">MSR2-FÜHLER</text>
+              <text id="tech-value-regler" x="42" y="423">—</text>
+            </g>
+            <g class="technical-control-panel" aria-label="Steuerung und Netzwerte">
+              <rect x="540" y="105" width="420" height="390" rx="5"></rect>
+              <rect class="technical-control-head" x="540" y="105" width="420" height="46" rx="5"></rect>
+              <text class="technical-control-title" x="565" y="134">STEUERUNG / NETZ</text>
+              <text class="technical-control-subtitle" x="935" y="134" text-anchor="end">BLOCK 26 · 10 s</text>
+              <text class="technical-control-label" x="565" y="190">Spannung L1 / L2 / L3</text><text id="tech-value-voltage" class="technical-control-value" x="935" y="190" text-anchor="end">—</text>
+              <text class="technical-control-label" x="565" y="226">Strom L1 / L2 / L3</text><text id="tech-value-current" class="technical-control-value" x="935" y="226" text-anchor="end">—</text>
+              <text class="technical-control-label" x="565" y="262">Impedanz L1 / L2 / L3</text><text id="tech-value-impedance" class="technical-control-value" x="935" y="262" text-anchor="end">—</text>
+              <text class="technical-control-label" x="565" y="298">Frequenz</text><text id="tech-value-frequency" class="technical-control-value" x="935" y="298" text-anchor="end">—</text>
+              <line class="technical-control-rule" x1="565" y1="326" x2="935" y2="326"></line>
+              <text class="technical-control-label" x="565" y="362">Betriebsstunden gesamt</text><text id="tech-value-betriebsstunden-gesamt" class="technical-control-value" x="935" y="362" text-anchor="end">—</text>
+              <text class="technical-control-label" x="565" y="398">Anzahl Starts</text><text id="tech-value-starts" class="technical-control-value" x="935" y="398" text-anchor="end">—</text>
+              <text class="technical-control-label" x="565" y="434">Aktueller Fehlercode</text><text id="tech-value-servicecode" class="technical-control-value" x="935" y="434" text-anchor="end">—</text>
+              <text class="technical-control-note" x="565" y="472">L1 / L2 / L3 · Werte werden langsam nachgeladen</text>
+            </g>
+          </svg>
+          </div>
+        </section>
+        <div class="two-column">
+          <section class="panel"><div class="section-head"><div><p class="eyebrow">MOTOR</p><h3>Leistungszustand</h3></div></div><div id="motorStateCards" class="detail-grid"></div></section>
+          <section class="panel"><div class="section-head"><div><p class="eyebrow">SYSTEM</p><h3>Status und Meldungen</h3></div></div><div id="systemStateCards" class="detail-grid"></div></section>
+        </div>
+      </section>
+
+      <section id="monitorView" class="app-view" hidden>
+        <header class="page-head"><div><p class="eyebrow">ZEITREIHEN</p><h2>Schnellüberwachung</h2><p class="muted">Lesender Poller über den gemeinsamen Serialworker, Speicherung in SQLite.</p></div><div class="page-head-actions"><span id="monitorStatus" class="status-pill neutral">—</span><button id="monitorToggle" data-action="toggle-monitor">Überwachung stoppen</button><button id="serialToggle" class="danger" data-action="toggle-serial">Web-Serialzugriff pausieren</button></div></header>
+        <div id="monitorStats" class="metric-grid compact"></div>
+        <section class="panel history-controls"><div><p class="eyebrow">ZEITRAUM</p><h3>Historischen Zeitraum anzeigen</h3><p class="muted">Ohne Datumsauswahl werden die letzten 24 Stunden geladen. Nur Start gesetzt = 24 Stunden ab Start.</p></div><div class="history-control-grid"><label>Schnellbereich<select id="temperatureRange"><option value="1">1 Stunde</option><option value="6">6 Stunden</option><option value="24" selected>24 Stunden</option><option value="168">7 Tage</option><option value="720">30 Tage</option></select></label><label>Startdatum/-zeit<input id="historyStart" type="datetime-local"></label><label>Enddatum/-zeit<input id="historyEnd" type="datetime-local"></label><div class="history-actions"><button id="applyHistoryRange" class="primary" type="button">Zeitraum laden</button><button id="resetHistoryRange" type="button">Letzte 24 Stunden</button></div></div><div id="historyRangeStatus" class="history-range-status muted">Aktiv: letzte 24 Stunden</div></section>
+        <section class="panel"><div class="section-head"><div><p class="eyebrow">TEMPERATUREN</p><h3>Dachs-Vorlauf, Dachs-Rücklauf, Kapsel und Regler</h3><p class="chart-help muted">Vorlauf = Kühlwasser Motor · Rücklauf = Dachs-Eintritt · Maus zeigt Werte und Messpunkte · Bereich ziehen · Doppelklick setzt Zoom zurück · Farbe anklicken blendet Kurve aus</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="temperature" hidden>Zoom zurücksetzen</button></div></div><canvas id="temperatureChart" class="chart" height="320"></canvas><div id="temperatureLegend" class="chart-legend"></div></section>
+        <section class="panel"><div class="section-head"><div><p class="eyebrow">MOTOR / GENERATOR</p><h3>Wirkleistung und Umdrehungen</h3><p class="chart-help muted">Drehzahl links bis 3000 1/min · Leistung rechts bis 6 kW · Farbe anklicken blendet Kurve aus</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="motor" hidden>Zoom zurücksetzen</button></div></div><canvas id="motorChart" class="chart" height="280"></canvas><div id="motorLegend" class="chart-legend"></div></section>
+        <section class="panel"><div class="section-head"><div><p class="eyebrow">ABGAS</p><h3>Motorabgas und Dachsabgas</h3><p class="chart-help muted">Motorabgas links bis 600 °C · Dachsabgas rechts bis 200 °C · Farbe anklicken blendet Kurve aus</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="exhaust" hidden>Zoom zurücksetzen</button></div></div><canvas id="exhaustChart" class="chart" height="280"></canvas><div id="exhaustLegend" class="chart-legend"></div></section>
+      </section>
+
+      <section id="maintenanceView" class="app-view" hidden>
+        <header class="page-head">
+          <div><p class="eyebrow">WARTUNG &amp; ANLAGENBERICHT</p><h2>Geführte Dachs-Wartung</h2><p class="muted">Beim Wartungsstart wird der gesamte seriell adressierbare Anlagenzustand zusammenhängend gelesen und mit dem Online-Protokoll lokal archiviert.</p></div>
+          <div class="page-head-actions"><button id="maintenanceRefresh" type="button">Aktualisieren</button><button id="maintenanceCreate" class="primary maintenance-admin" type="button">Wartung starten &amp; Anlage einlesen</button></div>
+        </header>
+        <section id="maintenanceStatusPanel" class="panel maintenance-status-panel maintenance-unknown">
+          <div class="maintenance-light large" aria-hidden="true"><i></i></div>
+          <div><p class="eyebrow">LIVE · BLOCK 104</p><h3 id="maintenanceStatusTitle">Wartungsstatus noch nicht gelesen</h3><div id="maintenanceStatusMetrics" class="maintenance-status-metrics"></div></div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><div><p class="eyebrow">LOKALES ARCHIV AUF DEM PI</p><h3>Anlagen-Snapshots und Online-Wartungsprotokolle</h3><p class="muted">Jeder Wartungsstart erzeugt einen schreibfreien Gesamtzustand. Snapshot, Checkliste, Messwerte und Bemerkungen bleiben lokal in SQLite gespeichert.</p></div></div>
+          <div class="table-wrap"><table class="data-table"><thead><tr><th>Nr.</th><th>Erstellt</th><th>Status</th><th>Monteur</th><th>Betriebsstunden</th><th>Exporte</th></tr></thead><tbody id="maintenanceReportRows"><tr><td colspan="6" class="muted">Noch keine Berichte.</td></tr></tbody></table></div>
+        </section>
+        <section id="maintenanceEditor" class="panel maintenance-editor" hidden>
+          <div class="section-head"><div><p class="eyebrow">WARTUNGSPROTOKOLL <span id="maintenanceReportNumber"></span></p><h3 id="maintenanceReportTitle">Bericht bearbeiten</h3><p id="maintenanceReportMeta" class="muted"></p></div><div class="report-export-actions"><a id="maintenanceExportHtml" class="button-link" href="#">HTML</a><a id="maintenanceExportPdf" class="button-link" href="#">PDF</a><a id="maintenanceExportJson" class="button-link" href="#">JSON</a></div></div>
+          <div id="maintenanceComparison" class="maintenance-comparison"></div>
+          <form id="maintenanceForm">
+            <div class="maintenance-form-head"><label>Kraftstoffart<select id="maintenanceFuelType"><option value="gas">Gas</option><option value="oil">Heizöl</option></select></label><label>Monteur / Firma<input id="maintenanceTechnician" maxlength="19" autocomplete="name"></label><label class="maintenance-notes">Bemerkung<textarea id="maintenanceNotes" rows="3" maxlength="8000"></textarea></label></div>
+            <div class="maintenance-columns">
+              <section><h4>Regler-Checkliste</h4><div id="maintenanceChecklist" class="maintenance-checklist"></div></section>
+              <section><h4>Vorher-/Nachher-Werte</h4><div id="maintenanceMeasurements" class="maintenance-measurements"></div><h4 class="maintenance-subheading">Zusätzliche lokale Arbeitsliste</h4><p class="muted maintenance-local-note">Diese Punkte ergänzen den Bericht, werden aber niemals in den MSR2-Regler geschrieben.</p><div id="maintenanceSupplemental" class="maintenance-checklist maintenance-supplemental"></div></section>
+            </div>
+            <div class="maintenance-save-actions"><span id="maintenanceSaveHint" class="muted">Änderungen werden lokal auf dem Pi gespeichert.</span><button id="maintenanceSave" class="primary maintenance-admin" type="submit">Entwurf speichern</button></div>
+          </form>
+          <section id="maintenanceCompletion" class="maintenance-completion maintenance-admin">
+            <div><p id="maintenanceCompletionEyebrow" class="eyebrow">DEMOMODUS</p><h4 id="maintenanceCompletionTitle">Testlauf lokal abschließen</h4><p id="maintenanceCompletionDescription" class="muted">Validiert und archiviert das Protokoll ausschließlich auf dem Pi. Block 100, Block 104 und das Bestätigungsbit bleiben unverändert.</p></div>
+            <div class="maintenance-completion-fields"><label id="maintenanceAuthLevelField" hidden>Auth-Level<input id="maintenanceAuthLevel" type="number" min="0" max="255" value="4"></label><label id="maintenancePass4Field" hidden>PW4 / Passwort<input id="maintenancePass4" type="password" autocomplete="off"></label><label>Bestätigung<input id="maintenanceConfirmation" autocomplete="off" placeholder="DEMO ABSCHLIESSEN"></label><button id="maintenanceComplete" class="primary" type="button">Demolauf abschließen</button></div>
+          </section>
+        </section>
+      </section>
+
+      <section id="settingsView" class="app-view" hidden>
+        <header class="page-head"><div><p class="eyebrow">MSR2 REGISTER</p><h2>Einstellungen und Register</h2><p class="muted">Regler-CPU und beide Netzüberwachungs-CPUs besitzen getrennte Blockräume. Änderungen werden erst nach Admin-Login, Auth-Level und explizitem Hardware-Schalter geschrieben.</p></div><span id="settingsRoleHint" class="status-pill neutral"></span></header>
+        <section id="writeControls" class="panel write-controls" hidden>
+          <div class="write-intro"><p class="eyebrow">SCHREIBSCHUTZ</p><h3>Admin-Schreibfreigabe</h3><p class="muted">Ohne Haken bleibt der Vorgang ein Dry-Run. Beim echten Schreiben erfolgt Read → Validate → Auth → Write → Readback.</p></div>
+          <label>Auth-Level<input id="authLevel" type="number" min="0" max="255" value="4"></label>
+          <label>PW4 / Passwort-Override<input id="pass4" type="password" autocomplete="off" placeholder="leer = berechnete PW4 verwenden"></label>
+          <label class="check-label"><input id="writeEnabled" type="checkbox"> Hardware-Schreiben aktivieren</label>
+          <div id="writeGuardStatus" class="write-guard-status neutral">Dry-Run: Hardware bleibt unverändert.</div>
+          <div class="auth-preview">
+            <div class="auth-preview-head"><div><p class="eyebrow">MSR2-AUTHENTIFIZIERUNG</p><h3>PW4 aus der Anlage berechnen</h3><p class="muted">Die Seriennummer und Betriebsstunden werden lesend aus Block 20 und 22 geholt. Es wird dabei kein Register geschrieben.</p></div><button id="authPreviewButton" type="button">PW4 aus Anlage lesen</button></div>
+            <div class="auth-preview-values"><div><span>Seriennummer</span><strong id="authPreviewSerial">—</strong></div><div><span>Betriebsstunden</span><strong id="authPreviewHours">—</strong></div><div><span>Berechnete PW4</span><code id="authPreviewPw4">—</code></div><div><span>Status</span><strong id="authPreviewStatus" class="muted">Noch nicht berechnet</strong></div></div>
+            <div class="auth-preview-actions"><button id="authPreviewApply" type="button" disabled>Berechnete PW4 übernehmen</button><span id="authPreviewFormula" class="muted">Formel: letzte 4 Stellen des MSR2-Tagescodes</span></div>
+          </div>
+        </section>
+        <section id="accountControls" class="panel account-controls" hidden><div><p class="eyebrow">ADMIN-ZUGANG</p><h3>Eigenes Admin-Passwort ändern</h3><p class="muted">Mindestens 12 Zeichen. Danach wird die Admin-Sitzung beendet und eine neue Anmeldung verlangt.</p></div><form id="passwordForm" class="password-form"><label>Bisheriges Admin-Passwort<input id="currentWebPassword" type="password" autocomplete="current-password" required></label><label>Neues Admin-Passwort<input id="newWebPassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Admin-Passwort ändern</button></form></section>
+        <section id="guestAccountControls" class="panel account-controls" hidden><div><p class="eyebrow">GAST-ZUGANG</p><h3>Gastpasswort festlegen</h3><p class="muted">Das Gastkonto ist ausschließlich lesend und kann sein Passwort nicht selbst ändern. Eine Änderung beendet alle offenen Gastsitzungen.</p></div><form id="guestPasswordForm" class="password-form"><label>Aktuelles Admin-Passwort<input id="guestPasswordAdminCurrent" type="password" autocomplete="current-password" required></label><label>Neues Gastpasswort<input id="newGuestPassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Gastpasswort ändern</button></form></section>
+        <div id="settingsTabs" class="register-tabs" role="tablist"></div>
+        <section class="panel settings-panel"><div class="section-head"><div><p id="selectedBlockEyebrow" class="eyebrow">BLOCK</p><h3 id="selectedBlockTitle">Block auswählen</h3></div><div class="page-head-actions"><label class="check-label reserve-toggle"><input id="showReserved" type="checkbox"> Reservefelder anzeigen</label><span id="blockReadStatus" class="muted"></span><button data-action="reload-block">Block neu lesen</button><button id="saveBlockButton" class="primary" data-action="save-block">Änderungen anwenden</button></div></div><div id="settingsFields" class="register-grid"></div></section>
+      </section>
+
+      <section id="auditView" class="app-view" hidden>
+        <header class="page-head"><div><p class="eyebrow">NACHVOLLZIEHBARKEIT</p><h2>Schreib-Audit</h2><p class="muted">Jeder Dry-Run und jeder Hardware-Schreibversuch wird lokal protokolliert.</p></div><button data-action="refresh-audit">Aktualisieren</button></header>
+        <section class="panel table-wrap"><table class="data-table"><thead><tr><th>Zeit</th><th>Benutzer</th><th>Block</th><th>Ergebnis</th><th>Felder</th></tr></thead><tbody id="auditRows"></tbody></table></section>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js?v=25"></script>
+</body>
+</html>

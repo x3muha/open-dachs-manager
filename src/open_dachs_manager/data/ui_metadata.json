@@ -1,0 +1,746 @@
+{
+  "schema": 1,
+  "pack_rev": "50",
+  "summary": {
+    "blocks": 12,
+    "fields": 64,
+    "choice_fields": 18,
+    "range_fields": 46
+  },
+  "blocks": {
+    "20": {
+      "Hka_Bd_Stat.uchTeilenummer": {
+        "choices": [
+          {
+            "value": "X",
+            "label": "n.a."
+          },
+          {
+            "value": "4700043001",
+            "label": "4700.043.001 HKA-HR S2"
+          },
+          {
+            "value": "4700046004",
+            "label": "4700.046.004 HKA-G S2"
+          },
+          {
+            "value": "4700046005",
+            "label": "4700.046.005 HKA-G-5.5-S2.2"
+          },
+          {
+            "value": "4700047004",
+            "label": "4700.047.004 HKA-F S2"
+          },
+          {
+            "value": "4700047005",
+            "label": "4700.047.005 HKA-F-5.5-S2.2"
+          },
+          {
+            "value": "4700048004",
+            "label": "4700.048.004 HKA-G S2 low-NOx"
+          },
+          {
+            "value": "4700048005",
+            "label": "4700.048.005 HKA-G-5.0-S2.2 low-NOx"
+          },
+          {
+            "value": "4700049004",
+            "label": "4700.049.004 HKA-G S2 Sondergas"
+          },
+          {
+            "value": "4700050001",
+            "label": "4700.050.001 HKA-R S2"
+          },
+          {
+            "value": "4700050004",
+            "label": "4700.050.004 HKA-R S2"
+          },
+          {
+            "value": "4700051005",
+            "label": "4700.051.005 HKAI-WRA-F-S2.2"
+          },
+          {
+            "value": "4700107000",
+            "label": "4700.107.000 Dachs G 5.5"
+          },
+          {
+            "value": "4700186000",
+            "label": "4700.186.000 Dachs HR 5.3"
+          },
+          {
+            "value": "4700135000",
+            "label": "4700.135.000 Dachs F 5.5"
+          },
+          {
+            "value": "4700164000",
+            "label": "4700.164.000 Dachs G 5.0"
+          }
+        ]
+      }
+    },
+    "24": {
+      "Hka_Mw1.bMotorStatus": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "OK"
+          },
+          {
+            "value": 10,
+            "label": "Störabschaltung"
+          },
+          {
+            "value": 11,
+            "label": "Abschaltroutine 1"
+          },
+          {
+            "value": 12,
+            "label": "Abschaltroutine 2"
+          },
+          {
+            "value": 13,
+            "label": "Drehz. 200 U/min"
+          },
+          {
+            "value": 14,
+            "label": "Drehz 200 U/min NICHT erreicht"
+          },
+          {
+            "value": 15,
+            "label": "Dachs >1 Minute AUS"
+          },
+          {
+            "value": 16,
+            "label": "Dachs >4 Minuten AUS"
+          },
+          {
+            "value": 20,
+            "label": "Startvorbereitung"
+          },
+          {
+            "value": 21,
+            "label": "Starteinleitung"
+          },
+          {
+            "value": 22,
+            "label": "Anlasser ein"
+          },
+          {
+            "value": 23,
+            "label": "Anlasser läuft 1,5 Sekunden"
+          },
+          {
+            "value": 24,
+            "label": "Anlasser aus"
+          },
+          {
+            "value": 30,
+            "label": "Dachs läuft hoch"
+          },
+          {
+            "value": 31,
+            "label": "Dachs im / Synchrondrehzahlfenster"
+          },
+          {
+            "value": 32,
+            "label": "Generator am Netz"
+          },
+          {
+            "value": 33,
+            "label": "Stellmotorbewegung ZU"
+          },
+          {
+            "value": 34,
+            "label": "Stellmotorbewegung AUF"
+          },
+          {
+            "value": 35,
+            "label": "KEINE Stellmotorbewegung"
+          }
+        ]
+      },
+      "Hka_Mw1.Aktor.sStellmotorOel": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "Aus"
+          },
+          {
+            "value": 130,
+            "label": "Auf"
+          },
+          {
+            "value": -130,
+            "label": "Zu"
+          }
+        ]
+      },
+      "Hka_Mw1.bZusatzplatinen": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "keine"
+          },
+          {
+            "value": 5,
+            "label": "Netzersatz"
+          },
+          {
+            "value": 8,
+            "label": "SE-Platine"
+          }
+        ]
+      }
+    },
+    "46": {
+      "SM_Funk.Raumgeraet1": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "fehlt"
+          },
+          {
+            "value": 1,
+            "label": "betriebsbereit"
+          },
+          {
+            "value": 2,
+            "label": "kein Empfang"
+          },
+          {
+            "value": 3,
+            "label": "Batterie wechseln"
+          }
+        ]
+      },
+      "SM_Funk.Raumgeraet2": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "fehlt"
+          },
+          {
+            "value": 1,
+            "label": "betriebsbereit"
+          },
+          {
+            "value": 2,
+            "label": "kein Empfang"
+          },
+          {
+            "value": 3,
+            "label": "Batterie wechseln"
+          }
+        ]
+      },
+      "SM_Funk.Aussenfuehler": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "fehlt"
+          },
+          {
+            "value": 1,
+            "label": "betriebsbereit"
+          },
+          {
+            "value": 2,
+            "label": "kein Empfang"
+          },
+          {
+            "value": 3,
+            "label": "Batterie wechseln"
+          }
+        ]
+      },
+      "SM_Funk.Repeater": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "fehlt"
+          },
+          {
+            "value": 1,
+            "label": "betriebsbereit"
+          },
+          {
+            "value": 2,
+            "label": "kein Empfang"
+          },
+          {
+            "value": 3,
+            "label": "Batterie wechseln"
+          }
+        ]
+      }
+    },
+    "50": {
+      "Hka_Ew.uchProgrammwahl": {
+        "choices": [
+          {
+            "value": 65,
+            "label": "A"
+          },
+          {
+            "value": 66,
+            "label": "B"
+          },
+          {
+            "value": 83,
+            "label": "S"
+          },
+          {
+            "value": 69,
+            "label": "E"
+          }
+        ]
+      },
+      "Hka_Ew.bMindestlaufzeit": {
+        "min": 30,
+        "max": 180
+      },
+      "Hka_Ew.bMaxlaufzeit": {
+        "choices": [
+          {
+            "value": 1,
+            "label": "Ja"
+          },
+          {
+            "value": 0,
+            "label": "Nein"
+          }
+        ]
+      },
+      "Hka_Ew.bMaxRuecklaufTempHKA": {
+        "min": 50,
+        "max": 73
+      },
+      "Hka_Ew.bFuehrungHKA": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "Wärme"
+          },
+          {
+            "value": 1,
+            "label": "Strom"
+          },
+          {
+            "value": 2,
+            "label": "Wärme und Strom"
+          }
+        ]
+      },
+      "Hka_Ew.usAufstellhoehe": {
+        "min": 0,
+        "max": 3500,
+        "step": 100
+      },
+      "Hka_Ew.usSprache": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "deutsch"
+          },
+          {
+            "value": 1,
+            "label": "englisch"
+          }
+        ]
+      },
+      "Hka_Ew.bFuehlerAbgasMotorTyp": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "2005: SW13 d=3 l= 95"
+          },
+          {
+            "value": 1,
+            "label": "06/08: SW15 d=6 l=118"
+          }
+        ]
+      },
+      "Hka_Ew.sbFuehlerAbgasMotorKor": {
+        "min": -40,
+        "max": 10,
+        "step": 10
+      }
+    },
+    "60": {
+      "Waermef_Ew.bEinschalttemp": {
+        "min": 0,
+        "max": 99
+      },
+      "Waermef_Ew.bSolltempRuecklaufHoch": {
+        "min": 50,
+        "max": 70
+      },
+      "Waermef_Ew.SoWi.bTempWiBetriebbeiTag": {
+        "min": 5,
+        "max": 25
+      },
+      "Waermef_Ew.SoWi.bTempWiBetriebbeiNacht": {
+        "min": 5,
+        "max": 25
+      },
+      "Waermef_Ew.Urlaub.sbHeizkurvenabsenkung": {
+        "min": -64,
+        "max": 0
+      },
+      "Waermef_Ew.Heizkurve.bUntereHeizkBegr": {
+        "min": 20,
+        "max": 70
+      },
+      "Waermef_Ew.Heizkurve.bObereHeizkBegr": {
+        "min": 40,
+        "max": 90
+      },
+      "Waermef_Ew.Heizkurve.sbTagversteller": {
+        "min": -16,
+        "max": 16
+      },
+      "Waermef_Ew.Heizkurve.sbNachtversteller": {
+        "min": -64,
+        "max": 0
+      },
+      "Waermef_Ew.Heizkurve.bSollVorlauft_TAP15": {
+        "min": 20,
+        "max": 70
+      },
+      "Waermef_Ew.Heizkurve.bSollVorlauft_TAM10": {
+        "min": 40,
+        "max": 99
+      },
+      "Waermef_Ew.FreigWaermeerz.bBivUmschaltzeit": {
+        "min": 10,
+        "max": 180,
+        "step": 5
+      },
+      "Waermef_Ew.FreigWaermeerz.bBivUmschaltzeitWw": {
+        "min": 0,
+        "max": 180,
+        "step": 5
+      },
+      "Waermef_Ew.FreigWaermeerz.bSollTempSchnelleUmschaltung": {
+        "min": 10,
+        "max": 99
+      },
+      "Waermef_Ew.FreigWaermeerz.bSollTempSchnelleUmschaltungWw": {
+        "min": 10,
+        "max": 99
+      },
+      "Waermef_Ew.FreigWaermeerz.bMindestlaufzeit": {
+        "min": 5,
+        "max": 30
+      }
+    },
+    "62": {
+      "Brenner_Bd.bIstStatus": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "Aus"
+          },
+          {
+            "value": 1,
+            "label": "Ein"
+          }
+        ]
+      },
+      "Brenner_Bd.bSollStatus": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "Aus"
+          },
+          {
+            "value": 1,
+            "label": "Ein"
+          }
+        ]
+      }
+    },
+    "66": {
+      "Stromf_Ew.LastExtern.bDauer": {
+        "min": 0,
+        "max": 180,
+        "step": 10
+      },
+      "Stromf_Ew.LastZaehler1.usAnBeiMinKW": {
+        "min": 0,
+        "max": 99
+      },
+      "Stromf_Ew.ZusWWAbnahme.sbSollTempEin": {
+        "min": 30,
+        "max": 70
+      },
+      "Stromf_Ew.ZusWWAbnahme.sbSollTempAus": {
+        "min": 30,
+        "max": 70
+      },
+      "Stromf_Ew.MaxStromBezug.bStrombezugZ1": {
+        "min": 0,
+        "max": 100
+      },
+      "Stromf_Ew.Anforderung_GLT.bAktiv": {
+        "min": 0,
+        "max": 1
+      },
+      "Stromf_Ew.Anforderung_GLT.bAnzahlModule": {
+        "min": 0,
+        "max": 10
+      }
+    },
+    "70": {
+      "Hk_Ew.Heizkreis1.bVorlaufanstieg": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "minimal"
+          },
+          {
+            "value": 1,
+            "label": "langsam"
+          },
+          {
+            "value": 2,
+            "label": "normal"
+          },
+          {
+            "value": 3,
+            "label": "schnell"
+          },
+          {
+            "value": 4,
+            "label": "sofort"
+          }
+        ]
+      },
+      "Hk_Ew.Heizkreis1.Heizkurve.bUntereHeizkBegr": {
+        "min": 15,
+        "max": 70
+      },
+      "Hk_Ew.Heizkreis1.Heizkurve.bObereHeizkBegr": {
+        "min": 30,
+        "max": 90
+      },
+      "Hk_Ew.Heizkreis1.Heizkurve.sbTagversteller": {
+        "min": -16,
+        "max": 16
+      },
+      "Hk_Ew.Heizkreis1.Heizkurve.sbNachtversteller": {
+        "min": -64,
+        "max": 0
+      },
+      "Hk_Ew.Heizkreis1.Heizkurve.bSollVorlauft_TAP15": {
+        "min": 25,
+        "max": 70
+      },
+      "Hk_Ew.Heizkreis1.Heizkurve.bSollVorlauft_TAM10": {
+        "min": 25,
+        "max": 99
+      },
+      "Hk_Ew.Heizkreis1.bMischerlaufzeit": {
+        "min": 60,
+        "max": 240,
+        "step": 10
+      },
+      "Hk_Ew.fHkObjekt": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "gemischt"
+          },
+          {
+            "value": 1,
+            "label": "getrennt"
+          }
+        ]
+      }
+    },
+    "76": {
+      "Ww_Ew.Legionellen.bLegioSollTemp": {
+        "min": 55,
+        "max": 73
+      },
+      "Ww_Ew.Legionellen.bLegioDauer": {
+        "min": 10,
+        "max": 90
+      },
+      "Ww_Ew.sbZirkHysterese": {
+        "min": 0,
+        "max": 25
+      },
+      "Ww_Ew.bWwSollTemp": {
+        "min": 40,
+        "max": 65
+      },
+      "Ww_Ew.sbWwHysterese": {
+        "min": 2,
+        "max": 10
+      }
+    },
+    "100": {
+      "Wartung_Ew1.Vorher.bOelstand": {
+        "min": 0,
+        "max": 13
+      },
+      "Wartung_Ew1.Vorher.bAbgasgegendruck": {
+        "min": 0,
+        "max": 500
+      },
+      "Wartung_Ew1.Vorher.bAvSpiel": {
+        "min": 0,
+        "max": 1,
+        "step": 0.01
+      },
+      "Wartung_Ew1.Vorher.bAvVentilplatte": {
+        "min": 2,
+        "max": 6,
+        "step": 0.05
+      },
+      "Wartung_Ew1.Vorher.bEvSpiel": {
+        "min": 0,
+        "max": 1,
+        "step": 0.01
+      },
+      "Wartung_Ew1.Vorher.bEvVentilplatte": {
+        "min": 2,
+        "max": 6
+      }
+    },
+    "104": {
+      "Wartung_Cache.usIntervall": {
+        "min": 500,
+        "max": 3500,
+        "step": 100
+      }
+    },
+    "112": {
+      "Adresse2.bLand": {
+        "choices": [
+          {
+            "value": 0,
+            "label": "Keine Auswahl"
+          },
+          {
+            "value": 1,
+            "label": "AT"
+          },
+          {
+            "value": 2,
+            "label": "AU"
+          },
+          {
+            "value": 5,
+            "label": "BE"
+          },
+          {
+            "value": 7,
+            "label": "CA"
+          },
+          {
+            "value": 9,
+            "label": "CH"
+          },
+          {
+            "value": 10,
+            "label": "HR"
+          },
+          {
+            "value": 11,
+            "label": "CZ"
+          },
+          {
+            "value": 12,
+            "label": "DE"
+          },
+          {
+            "value": 13,
+            "label": "DK"
+          },
+          {
+            "value": 15,
+            "label": "ES"
+          },
+          {
+            "value": 18,
+            "label": "EE"
+          },
+          {
+            "value": 19,
+            "label": "FR"
+          },
+          {
+            "value": 22,
+            "label": "GR"
+          },
+          {
+            "value": 23,
+            "label": "HU"
+          },
+          {
+            "value": 25,
+            "label": "IT"
+          },
+          {
+            "value": 28,
+            "label": "IE"
+          },
+          {
+            "value": 29,
+            "label": "IR"
+          },
+          {
+            "value": 31,
+            "label": "LT"
+          },
+          {
+            "value": 33,
+            "label": "LU"
+          },
+          {
+            "value": 35,
+            "label": "NO"
+          },
+          {
+            "value": 37,
+            "label": "NL"
+          },
+          {
+            "value": 38,
+            "label": "PT"
+          },
+          {
+            "value": 39,
+            "label": "PL"
+          },
+          {
+            "value": 43,
+            "label": "RU"
+          },
+          {
+            "value": 44,
+            "label": "SE"
+          },
+          {
+            "value": 48,
+            "label": "SK"
+          },
+          {
+            "value": 50,
+            "label": "GB"
+          },
+          {
+            "value": 51,
+            "label": "US"
+          },
+          {
+            "value": 57,
+            "label": "Sonstige"
+          }
+        ]
+      }
+    }
+  }
+}

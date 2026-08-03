@@ -1,0 +1,22 @@
+[Unit]
+Description=Open Dachs Manager Weboberfläche
+Requires=open-dachs-manager-serial.service
+After=local-fs.target network.target open-dachs-manager-serial.service
+
+[Service]
+Type=simple
+User=open-dachs
+Group=open-dachs
+EnvironmentFile=-/etc/open-dachs-manager/open-dachs-manager.env
+ExecStart=/opt/open-dachs-manager/venv/bin/open-dachs-web
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/open-dachs-manager
+
+[Install]
+WantedBy=multi-user.target
