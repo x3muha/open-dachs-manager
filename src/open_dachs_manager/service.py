@@ -28,6 +28,8 @@ class WriteAudit:
     changed_keys: tuple[str, ...] = ()
     ack_positive: bool | None = None
     cpu: int = 0
+    readback_scope: str | None = None
+    readback_attempts: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -44,18 +46,23 @@ class WriteAudit:
             "changed_keys": list(self.changed_keys or ((self.key,) if self.key else ())),
             "changed": self.before_hex != self.after_hex,
             "ack_positive": self.ack_positive,
+            "readback_scope": self.readback_scope,
+            "readback_attempts": self.readback_attempts,
         }
 
 
 class DachsService:
     def __init__(self, port: str, baud: int, timeout: float, pack: PackRepository,
-                 serial_socket: str | Path | None = None, queue_timeout: float = 120.0):
+                 serial_socket: str | Path | None = None, queue_timeout: float = 120.0,
+                 readback_attempts: int = 4, readback_delay: float = 0.2):
         self.port = port
         self.baud = baud
         self.timeout = timeout
         self.pack = pack
         self.serial_socket = str(serial_socket or "")
         self.queue_timeout = float(queue_timeout)
+        self.readback_attempts = max(1, int(readback_attempts))
+        self.readback_delay = max(0.0, float(readback_delay))
 
     def session(self) -> SerialSession | SerialWorkerSession:
         if self.serial_socket:
@@ -76,6 +83,40 @@ class DachsService:
 
     def authentication_inputs(self, session: SerialSession) -> AuthInputs:
         return read_auth_inputs(session, self.pack, self.timeout)
+
+    def _changed_fields_match(
+        self,
+        block: int,
+        expected: bytes,
+        actual: bytes,
+        changed_keys: list[str],
+    ) -> bool:
+        """Verify only the mapped bits/bytes that the write was meant to change.
+
+        Some controller blocks contain live counters beside settings.  Requiring
+        the complete block to remain byte-identical after a write therefore
+        creates false failures even when the requested field was persisted.
+        """
+        if len(expected) != len(actual) or not changed_keys:
+            return False
+        fields = self.pack.field_map(block)
+        for key in changed_keys:
+            metadata = fields.get(key)
+            if metadata is None:
+                return False
+            offset = int(metadata["offset"])
+            size = int(metadata["size"])
+            if offset < 0 or offset + size > len(expected):
+                return False
+            if metadata.get("packed"):
+                bit_offset = int(metadata["bit_offset"])
+                bit_length = int(metadata["bit_length"])
+                mask = ((1 << bit_length) - 1) << bit_offset
+                if (expected[offset] & mask) != (actual[offset] & mask):
+                    return False
+            elif expected[offset:offset + size] != actual[offset:offset + size]:
+                return False
+        return True
 
     def write_payload(
         self,
@@ -132,6 +173,8 @@ class DachsService:
                 tuple(changed_keys),
                 cpu=cpu,
             )
+        ack_positive: bool | None = None
+        readback_attempts = 0
         try:
             current = self.read_block(session, block, cpu=cpu)
             if not current.ok or current.payload != before:
@@ -142,12 +185,27 @@ class DachsService:
                 )
             else:
                 response = session.write_block(block, after, packet=None, timeout=self.timeout)
-            if response.ack is None or not response.ack.positive:
+            ack_positive = bool(response.ack is not None and response.ack.positive)
+            if not ack_positive:
                 raise RuntimeError("write did not receive a positive ACK")
-            readback = self.read_block(session, block, cpu=cpu)
-            ok = readback.ok and readback.payload == after
-            if not ok:
-                raise RuntimeError("readback mismatch")
+            readback_scope = None
+            for attempt in range(1, self.readback_attempts + 1):
+                readback_attempts = attempt
+                readback = self.read_block(session, block, cpu=cpu)
+                if readback.ok and readback.payload == after:
+                    readback_scope = "block"
+                    break
+                if readback.ok and self._changed_fields_match(
+                    block, after, readback.payload, changed_keys
+                ):
+                    readback_scope = "changed-fields"
+                    break
+                if attempt < self.readback_attempts and self.readback_delay:
+                    time.sleep(self.readback_delay)
+            if readback_scope is None:
+                raise RuntimeError(
+                    f"readback mismatch after {readback_attempts} attempts"
+                )
             return WriteAudit(
                 changed_keys[0] if changed_keys else "",
                 block,
@@ -161,6 +219,8 @@ class DachsService:
                 tuple(changed_keys),
                 True,
                 cpu,
+                readback_scope,
+                readback_attempts,
             )
         except Exception as exc:
             return WriteAudit(
@@ -174,7 +234,9 @@ class DachsService:
                 now,
                 str(exc),
                 tuple(changed_keys),
+                ack_positive,
                 cpu=cpu,
+                readback_attempts=readback_attempts,
             )
 
     def backup(self, session: SerialSession, blocks: list[int], decode: bool = True) -> dict:

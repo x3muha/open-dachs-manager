@@ -1,6 +1,6 @@
 # Open Dachs Manager – Bedienungsanleitung
 
-Stand: 03.08.2026 · Version V3 0.9.0
+Stand: 09.08.2026 · Version V3 1.0
 
 Diese Anleitung beschreibt den täglichen Betrieb der Weboberfläche, CLI und
 TUI. Installation und Migration stehen ausführlich in
@@ -58,10 +58,24 @@ gespeichert.
 
 ### Übersicht
 
-Die Startseite zeigt Livewerte, Betriebszustand, Wartungsstatus,
-Generatorleistung und das Anlagenbild. Der Leistungs-Sollwert ist für Gäste
-nur lesbar. Ein Admin-Schreibvorgang benötigt weiterhin Authentifizierung,
+Die Startseite beginnt mit `Wirkleistung Ist / Soll`. Der Wartungsstatus steht
+oben neben `Seriell OK` als verbleibende Betriebsstunden und Tage; ein Klick
+öffnet direkt die Wartungsansicht. Der Leistungs-Sollwert ist für Gäste nur
+lesbar. Ein Admin-Schreibvorgang benötigt weiterhin Authentifizierung,
 Bestätigung und Readback.
+
+Admins können die Live-Kacheln über `Bearbeiten` frei sortieren, entfernen und
+mit `+` aus allen gemappten Werten ergänzen. Die Pfeile funktionieren auch auf
+Touch-Geräten. Die gemeinsame Auswahl wird lokal auf dem Pi gespeichert und
+gilt auch für den Gastzugang. Werte aus zusätzlichen Blöcken werden alle zehn
+Sekunden gelesen; sie vergrößern nicht automatisch die Zeitreihen-Datenbank.
+
+Die technische Anlagenansicht zeigt am Waben-Rußfilter links die
+Motorabgastemperatur und rechts die Dachs-Abgastemperatur nach dem Filter.
+Darunter steht ein ausdrücklich als Schätzung gekennzeichneter Füllstand. Die
+Standardkennlinie setzt 420 °C auf 0 % und 520 °C auf 100 %; dazwischen wird
+linear interpoliert. Unter `Einstellungen → Geschätzter Füllstand` kann der
+Admin beide Temperaturen lokal ändern. Die Anzeige schreibt nie in den Regler.
 
 ### Überwachung
 
@@ -79,16 +93,18 @@ Der daraus erzeugte Entwurf wird lokal gespeichert. Checkliste, zusätzliche
 lokale Arbeitsliste, Monteur, Messwerte und Bemerkungen lassen sich fortlaufend
 ergänzen. HTML-, dreiseitiger PDF-Bericht und JSON-Export stehen zur Verfügung.
 
-V3 0.9.0 wird zunächst im **Demomodus** ausgeliefert. Beim Abschluss verlangt
+V3 1.0 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
 die Oberfläche die exakte Eingabe `DEMO ABSCHLIESSEN`. Danach wird der Bericht
 lokal validiert, unveränderlich archiviert und deutlich als Demo gekennzeichnet.
 Der Abschluss öffnet keine Serialworker-Sitzung, schreibt weder Block 100 noch
 Block 104 und setzt kein Bestätigungsbit. Das gilt auch dann, wenn ein Browser
 manipulierte API-Daten sendet, weil der Schreibschutz serverseitig aktiv ist.
 
-Der spätere echte Hardwareabschluss ist bereits als kontrollierter Ablauf
-vorbereitet, aber in der normalen V3-0.9.0-Installation deaktiviert. Seine
-Freischaltung würde zusätzlich verlangen:
+Unter `Einstellungen → Testmodus` kann ausschließlich der Admin diesen Modus
+umschalten. Die Wahl wird lokal auf dem Pi gespeichert und überlebt Neustarts
+und Updates. Das Umschalten selbst öffnet keine Serialworker-Sitzung und
+schreibt nichts in den Regler. Bei deaktiviertem Testmodus verlangt der echte
+Hardwareabschluss weiterhin:
 
 - vollständig bewertete Checkliste
 - Adminrolle
@@ -101,7 +117,21 @@ Wartungswerte übertragen, zurückgelesen und danach das Bestätigungsbit separa
 gesetzt und nochmals gelesen. Freitext, Zusatzarbeiten und vollständige
 Historie verbleiben immer lokal.
 
+Admins können im lokalen Archiv sowohl offene Entwürfe als auch abgeschlossene
+Wartungen über `Löschen` entfernen. Vorher erscheint eine Sicherheitsabfrage.
+Gelöscht werden der lokale Snapshot, das Protokoll und seine Exporte. Ein
+bereits ausgeführter MSR2-Abschluss wird dadurch nicht rückgängig gemacht;
+vorhandene Schreib-Audits bleiben erhalten.
+
 ### Einstellungen und Register
+
+Der integrierte `Fehlerkatalog` löst bekannte Service- und Warncodes direkt in
+deutschen Klartext auf. Die Suche nimmt Code oder Text an; beispielsweise wird
+`SC 163` exakt als `Leistung zu klein` angezeigt. Aktive Meldungen im
+Anlagenbild sowie die Servicehistorie verwenden denselben Katalog. Eine
+optionale lokale Diagnosedatei kann Ursachen und Maßnahmen ergänzen. Für einen
+noch nicht zugeordneten Code bleibt die Nummer sichtbar und wird ausdrücklich
+als unbekannt gekennzeichnet.
 
 Die Registeransicht gruppiert alle adressierbaren Mapping-Felder nach Block.
 Auswahllisten und Wertebereiche sind Eingabehilfen; ein Rohwert-Fallback bleibt

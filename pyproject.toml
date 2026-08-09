@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "open-dachs-manager"
-version = "0.9.0"
+version = "1.0"
 description = "Lokaler serieller Web-, CLI- und TUI-Manager für Dachs-MSR2-Systeme"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
 dependencies = ["pyserial>=3.5", "reportlab>=4.2"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "License :: OSI Approved :: MIT License",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
@@ -36,7 +36,7 @@ Issues = "https://github.com/x3muha/open-dachs-manager/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-open_dachs_manager = ["data/*.json", "data/*.properties", "web/*.html", "web/*.css", "web/*.js"]
+open_dachs_manager = ["data/*.json", "data/*.properties", "web/*.html", "web/*.css", "web/*.js", "web/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import http.server
 import json
+import math
 import mimetypes
 import os
 from pathlib import Path
@@ -125,6 +126,75 @@ DEFAULT_DASHBOARD_SERIES = (
     ("impedanz_l3", "Impedanz L3", 26, "Hka_Mw2.Hka_UC.ausImpedanz[2]", "Ohm", "#7c3aed"),
     ("frequenz", "Netzfrequenz", 26, "Hka_Mw2.Hka_UC.usFrequency1", "Hz", "#059669"),
 )
+DEFAULT_OVERVIEW_SERIES_IDS = (
+    "kuehlwasser",
+    "dachs_eintritt",
+    "abgas_motor",
+    "abgas_hka",
+    "kapsel",
+    "regler",
+    "betriebsstunden_gesamt",
+    "betriebsstunden",
+    "starts",
+    "arbeit_elektr",
+    "arbeit_therm_hka",
+    "arbeit_therm_kon",
+    "servicecode",
+)
+MAX_DASHBOARD_CARDS = 24
+MAX_DASHBOARD_EXTRA_BLOCKS = 12
+SOOT_FILTER_SOURCE_KEY = "Hka_Mw1.Temp.sAbgasMotor"
+DEFAULT_SOOT_FILTER_ZERO_C = 420.0
+DEFAULT_SOOT_FILTER_FULL_C = 520.0
+
+
+def normalize_base_path(value: str | None) -> str:
+    """Return a safe external URL prefix such as ``/dachs`` or ``""``."""
+    text = str(value or "").strip()
+    if not text or text == "/":
+        return ""
+    text = "/" + text.strip("/")
+    if "//" in text or any(part in {"", ".", ".."} for part in text.split("/")[1:]):
+        raise ValueError("Base Path enthält ungültige Segmente")
+    if not re.fullmatch(r"/[A-Za-z0-9._~/-]+", text):
+        raise ValueError("Base Path darf nur URL-Pfadzeichen enthalten")
+    return text
+
+
+def soot_filter_estimate(
+    temperature_c: object,
+    zero_temperature_c: float = DEFAULT_SOOT_FILTER_ZERO_C,
+    full_temperature_c: float = DEFAULT_SOOT_FILTER_FULL_C,
+) -> dict:
+    """Estimate soot-filter loading from the configured motor-exhaust curve."""
+    try:
+        temperature = float(temperature_c)
+        zero = float(zero_temperature_c)
+        full = float(full_temperature_c)
+    except (TypeError, ValueError):
+        temperature = float("nan")
+        zero = float(zero_temperature_c)
+        full = float(full_temperature_c)
+    available = all(math.isfinite(item) for item in (temperature, zero, full)) and full > zero
+    if not available:
+        return {
+            "available": False,
+            "percent": None,
+            "level": "unknown",
+            "source_temperature_c": None,
+            "zero_temperature_c": zero,
+            "full_temperature_c": full,
+        }
+    percent = round(max(0.0, min(100.0, (temperature - zero) * 100.0 / (full - zero))))
+    level = "red" if percent >= 90 else "orange" if percent >= 60 else "green"
+    return {
+        "available": True,
+        "percent": int(percent),
+        "level": level,
+        "source_temperature_c": temperature,
+        "zero_temperature_c": zero,
+        "full_temperature_c": full,
+    }
 
 
 def _now() -> str:
@@ -505,6 +575,17 @@ class DachsStore:
             raise KeyError(f"Wartungsbericht {report_id} nicht gefunden")
         return self._maintenance_row(row, full=True)
 
+    def delete_maintenance_report(self, report_id: int) -> dict:
+        report_id = int(report_id)
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT id, status FROM maintenance_reports WHERE id=?", (report_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Wartungsbericht {report_id} nicht gefunden")
+            db.execute("DELETE FROM maintenance_reports WHERE id=?", (report_id,))
+        return {"id": report_id, "status": str(row["status"])}
+
     def update_maintenance_protocol(self, report_id: int, protocol: dict) -> dict:
         now = _now()
         with self.lock, self.database() as db:
@@ -568,10 +649,17 @@ class DachsWebApp:
         )
         self.store = DachsStore(self.data_dir / "dachs-web.db")
         self.interval = max(0.3, float(interval))
-        # Maintenance completion starts in an intentionally non-writing demo
-        # mode.  Enabling the later live workflow is a server-side operator
-        # decision; a browser request cannot bypass this guard.
-        self.maintenance_live_writes_enabled = bool(maintenance_live_writes)
+        self.maintenance_settings_path = self.data_dir / "maintenance_settings.json"
+        self.dashboard_settings_path = self.data_dir / "dashboard_settings.json"
+        self.soot_filter_settings_path = self.data_dir / "soot_filter_settings.json"
+        # The environment value is only the initial default. Once an admin
+        # changes the test mode in the web UI, the local setting survives
+        # service restarts and later package updates.
+        self.maintenance_live_writes_enabled = self._load_maintenance_live_writes(
+            bool(maintenance_live_writes)
+        )
+        self.dashboard_cards = self._load_dashboard_cards()
+        self.soot_filter_config = self._load_soot_filter_settings()
         self.slow_monitor_interval = DEFAULT_SLOW_MONITOR_INTERVAL
         self._last_slow_poll = 0.0
         # Do not run the first full-table retention scan during startup. The
@@ -621,6 +709,203 @@ class DachsWebApp:
         with suppress(OSError):
             temporary.chmod(0o600)
         os.replace(temporary, self.serial_state_path)
+
+    def _load_maintenance_live_writes(self, default: bool) -> bool:
+        try:
+            payload = json.loads(self.maintenance_settings_path.read_text(encoding="utf-8"))
+            test_mode = payload.get("test_mode")
+            if isinstance(test_mode, bool):
+                return not test_mode
+        except (OSError, ValueError, TypeError):
+            pass
+        return bool(default)
+
+    def _save_maintenance_test_mode(self, test_mode: bool) -> None:
+        temporary = self.maintenance_settings_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps({"version": 1, "test_mode": bool(test_mode)}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with suppress(OSError):
+            temporary.chmod(0o600)
+        os.replace(temporary, self.maintenance_settings_path)
+
+    def maintenance_settings(self) -> dict:
+        with self.state_lock:
+            live_writes_enabled = bool(self.maintenance_live_writes_enabled)
+        return {
+            "test_mode": not live_writes_enabled,
+            "maintenance_live_writes_enabled": live_writes_enabled,
+        }
+
+    def set_maintenance_test_mode(self, test_mode: bool) -> dict:
+        if not isinstance(test_mode, bool):
+            raise ValueError("test_mode muss true oder false sein")
+        with self.state_lock:
+            self._save_maintenance_test_mode(test_mode)
+            self.maintenance_live_writes_enabled = not test_mode
+        return self.maintenance_settings()
+
+    @staticmethod
+    def _normalize_soot_filter_settings(payload: object) -> dict:
+        if not isinstance(payload, dict):
+            raise ValueError("Rußfilter-Einstellungen müssen ein Objekt sein")
+        try:
+            zero = float(payload.get("zero_temperature_c"))
+            full = float(payload.get("full_temperature_c"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Rußfilter-Temperaturen müssen Zahlen sein") from exc
+        if not (math.isfinite(zero) and math.isfinite(full) and 100 <= zero <= 800 and 100 <= full <= 800):
+            raise ValueError("Rußfilter-Temperaturen müssen zwischen 100 und 800 °C liegen")
+        if full - zero < 10:
+            raise ValueError("100-%-Temperatur muss mindestens 10 °C über der 0-%-Temperatur liegen")
+        return {
+            "zero_temperature_c": int(zero) if zero.is_integer() else zero,
+            "full_temperature_c": int(full) if full.is_integer() else full,
+        }
+
+    def _load_soot_filter_settings(self) -> dict:
+        defaults = {
+            "zero_temperature_c": int(DEFAULT_SOOT_FILTER_ZERO_C),
+            "full_temperature_c": int(DEFAULT_SOOT_FILTER_FULL_C),
+        }
+        try:
+            return self._normalize_soot_filter_settings(
+                json.loads(self.soot_filter_settings_path.read_text(encoding="utf-8"))
+            )
+        except (OSError, ValueError, TypeError):
+            return defaults
+
+    def _save_soot_filter_settings(self, settings: dict) -> None:
+        temporary = self.soot_filter_settings_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps({"version": 1, **settings}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with suppress(OSError):
+            temporary.chmod(0o600)
+        os.replace(temporary, self.soot_filter_settings_path)
+
+    def soot_filter_settings(self) -> dict:
+        with self.state_lock:
+            settings = dict(self.soot_filter_config)
+        return {
+            **settings,
+            "source": "Motorabgastemperatur",
+            "source_key": SOOT_FILTER_SOURCE_KEY,
+            "green_below_percent": 60,
+            "red_from_percent": 90,
+        }
+
+    def set_soot_filter_settings(self, payload: object) -> dict:
+        settings = self._normalize_soot_filter_settings(payload)
+        self._save_soot_filter_settings(settings)
+        with self.state_lock:
+            self.soot_filter_config = settings
+        return self.soot_filter_settings()
+
+    @staticmethod
+    def _default_dashboard_cards() -> list[dict]:
+        wanted = set(DEFAULT_OVERVIEW_SERIES_IDS)
+        return [
+            {"block": int(block), "key": str(key)}
+            for series_id, _title, block, key, _unit, _color in DEFAULT_DASHBOARD_SERIES
+            if series_id in wanted
+        ]
+
+    def _dashboard_available_keys(self, block: int) -> set[str]:
+        block = int(block)
+        if block == 18 or block not in self.pack.addressable_blocks():
+            return set()
+        groups = self.pack.presentation_groups(block)
+        component_to_base = {
+            component: base
+            for base, group in groups.items()
+            for component in group["components"]
+        }
+        keys: set[str] = set()
+        for key, metadata in self.pack.field_map(block).items():
+            if not web_field_visible(block, key, metadata):
+                continue
+            base = component_to_base.get(key)
+            if base:
+                if key == groups[base]["components"][0]:
+                    keys.add(base)
+                continue
+            keys.add(key)
+        if block == 24:
+            keys.add("Hka_Mw1.Temp.DachsAustritt")
+        return keys
+
+    def _normalize_dashboard_cards(self, cards: object) -> list[dict]:
+        if not isinstance(cards, list):
+            raise ValueError("Dashboard-Karten müssen eine Liste sein")
+        if len(cards) > MAX_DASHBOARD_CARDS:
+            raise ValueError(f"höchstens {MAX_DASHBOARD_CARDS} Dashboard-Karten sind erlaubt")
+        normalized: list[dict] = []
+        seen: set[tuple[int, str]] = set()
+        addressable = set(self.pack.addressable_blocks())
+        for card in cards:
+            if not isinstance(card, dict):
+                raise ValueError("ungültige Dashboard-Karte")
+            try:
+                block = int(card.get("block"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Dashboard-Karte benötigt einen gültigen Block") from exc
+            key = str(card.get("key", "")).strip()
+            if block not in addressable or key not in self._dashboard_available_keys(block):
+                raise KeyError(f"unbekanntes Dashboard-Feld: Block {block} · {key}")
+            identity = (block, key)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            normalized.append({"block": block, "key": key})
+        extra_blocks = {card["block"] for card in normalized} - set(DEFAULT_MONITOR_BLOCKS)
+        if len(extra_blocks) > MAX_DASHBOARD_EXTRA_BLOCKS:
+            raise ValueError(
+                f"Dashboard darf höchstens {MAX_DASHBOARD_EXTRA_BLOCKS} zusätzliche Blöcke überwachen"
+            )
+        return normalized
+
+    def _load_dashboard_cards(self) -> list[dict]:
+        try:
+            payload = json.loads(self.dashboard_settings_path.read_text(encoding="utf-8"))
+            return self._normalize_dashboard_cards(payload.get("cards"))
+        except (OSError, ValueError, TypeError, KeyError):
+            return self._default_dashboard_cards()
+
+    def _save_dashboard_cards(self, cards: list[dict]) -> None:
+        temporary = self.dashboard_settings_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps({"version": 1, "cards": cards}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with suppress(OSError):
+            temporary.chmod(0o600)
+        os.replace(temporary, self.dashboard_settings_path)
+
+    def dashboard_settings(self) -> dict:
+        with self.state_lock:
+            cards = [dict(card) for card in self.dashboard_cards]
+        return {
+            "cards": cards,
+            "default_cards": self._default_dashboard_cards(),
+            "max_cards": MAX_DASHBOARD_CARDS,
+            "max_extra_blocks": MAX_DASHBOARD_EXTRA_BLOCKS,
+        }
+
+    def set_dashboard_settings(self, cards: object) -> dict:
+        normalized = self._normalize_dashboard_cards(cards)
+        self._save_dashboard_cards(normalized)
+        selected = {(card["block"], card["key"]) for card in normalized}
+        with self.state_lock:
+            self.dashboard_cards = normalized
+            for identity in list(self.live_values):
+                block, key = identity
+                default_visible = block in DEFAULT_MONITOR_BLOCKS and web_monitor_field_visible(block, key)
+                if not default_visible and identity not in selected:
+                    self.live_values.pop(identity, None)
+        return self.dashboard_settings()
 
     def start(self) -> None:
         if self.initial_credentials:
@@ -752,6 +1037,9 @@ class DachsWebApp:
             with self.state_lock:
                 serial_enabled = self.serial_enabled
                 enabled = self.monitor_enabled and serial_enabled
+                dashboard_cards = tuple(
+                    (int(card["block"]), str(card["key"])) for card in self.dashboard_cards
+                )
                 self.monitor_state["enabled"] = enabled
                 self.monitor_state["serial_enabled"] = serial_enabled
                 self.monitor_state["connection_state"] = "verbunden" if serial_enabled else "getrennt"
@@ -763,6 +1051,10 @@ class DachsWebApp:
             rows: list[dict] = []
             ok_blocks = failed_blocks = 0
             error_text = None
+            dashboard_fields = set(dashboard_cards)
+            dashboard_extra_blocks = {
+                block for block, _key in dashboard_fields if block not in DEFAULT_MONITOR_BLOCKS
+            }
             try:
                 with self.serial_lock:
                     with self.state_lock:
@@ -772,7 +1064,9 @@ class DachsWebApp:
                     now_mono = time.monotonic()
                     if now_mono - self._last_slow_poll >= self.slow_monitor_interval:
                         blocks.extend(DEFAULT_SLOW_MONITOR_BLOCKS)
+                        blocks.extend(sorted(dashboard_extra_blocks))
                         self._last_slow_poll = now_mono
+                    blocks = list(dict.fromkeys(blocks))
                     with self.service.session() as session:
                         for block in blocks:
                             try:
@@ -783,7 +1077,12 @@ class DachsWebApp:
                                     continue
                                 ok_blocks += 1
                                 for field in fields:
-                                    if not web_monitor_field_visible(block, field.key):
+                                    dashboard_selected = (block, field.key) in dashboard_fields
+                                    default_visible = (
+                                        block in DEFAULT_MONITOR_BLOCKS
+                                        and web_monitor_field_visible(block, field.key)
+                                    )
+                                    if not default_visible and not dashboard_selected:
                                         continue
                                     if not web_field_visible(block, field.key, field.metadata):
                                         continue
@@ -800,7 +1099,8 @@ class DachsWebApp:
                                         "rtt_ms": round(result.response.elapsed_ms, 1),
                                         "recorded_at": recorded_at,
                                     }
-                                    rows.append(row)
+                                    if default_visible:
+                                        rows.append(row)
                                     self.live_values[(block, field.key)] = row
                                 # DachsAustritt is a calculated transient value,
                                 # not a separate raw register:
@@ -848,7 +1148,7 @@ class DachsWebApp:
                                         }
                                         rows.append(flag_row)
                                         self.live_values[(104, key)] = flag_row
-                                if block in DEFAULT_SLOW_MONITOR_BLOCKS:
+                                if block in DEFAULT_SLOW_MONITOR_BLOCKS or block in dashboard_extra_blocks:
                                     with self.state_lock:
                                         self.monitor_state["last_slow_cycle"] = recorded_at
                             except Exception as exc:
@@ -885,13 +1185,32 @@ class DachsWebApp:
         with self.state_lock:
             state = dict(self.monitor_state)
             values = list(self.live_values.values())
+            soot_settings = dict(self.soot_filter_config)
         values.sort(key=lambda item: (int(item["block"]), str(item["key"])))
         cache_values = {
             str(item["key"]): item.get("value")
             for item in values
             if int(item["block"]) == 104
         }
-        return {"monitor": state, "values": values, "maintenance": maintenance_status(cache_values)}
+        motor_exhaust = next(
+            (
+                item.get("value")
+                for item in values
+                if int(item["block"]) == 24 and str(item["key"]) == SOOT_FILTER_SOURCE_KEY
+            ),
+            None,
+        )
+        soot_filter = soot_filter_estimate(
+            motor_exhaust,
+            soot_settings["zero_temperature_c"],
+            soot_settings["full_temperature_c"],
+        )
+        return {
+            "monitor": state,
+            "values": values,
+            "maintenance": maintenance_status(cache_values),
+            "soot_filter": soot_filter,
+        }
 
     def schema(self) -> dict:
         blocks = []
@@ -956,6 +1275,7 @@ class DachsWebApp:
         for series_id, title, block, key, unit, color in DEFAULT_DASHBOARD_SERIES:
             if key in self.pack.field_map(block) or key == "Hka_Mw1.Temp.DachsAustritt":
                 series.append({"id": series_id, "title": title, "block": block, "key": key, "unit": unit, "color": color})
+        service_catalog = self.pack.service_catalog(limit=1)
         return {
             "version": "dachs-msr2-web/v1",
             "pack_rev": self.pack.pack_rev,
@@ -964,6 +1284,16 @@ class DachsWebApp:
             "slow_monitor_blocks": list(DEFAULT_SLOW_MONITOR_BLOCKS),
             "slow_interval_seconds": self.slow_monitor_interval,
             "history_retention_days": HISTORY_RETENTION_DAYS,
+            "dashboard": {
+                "max_cards": MAX_DASHBOARD_CARDS,
+                "max_extra_blocks": MAX_DASHBOARD_EXTRA_BLOCKS,
+            },
+            "service_catalog": {
+                "available": bool(service_catalog["available"]),
+                "count": int(service_catalog["count"]),
+                "schema": service_catalog["schema"],
+                "details_available": bool(service_catalog["details_available"]),
+            },
             "blocks": blocks,
             "network_protection": [network_protection_schema(cpu) for cpu in NETWORK_PROTECTION_CPUS],
             "series": series,
@@ -1098,7 +1428,12 @@ class DachsWebApp:
 
     def maintenance_report(self, report_id: int) -> dict:
         item = self.store.maintenance_report(report_id)
-        live_writes_enabled = bool(getattr(self, "maintenance_live_writes_enabled", False))
+        settings_reader = getattr(self, "maintenance_settings", None)
+        live_writes_enabled = (
+            settings_reader()["maintenance_live_writes_enabled"]
+            if callable(settings_reader)
+            else bool(getattr(self, "maintenance_live_writes_enabled", False))
+        )
         previous = next(
             (candidate for candidate in self.store.maintenance_reports(200) if int(candidate["id"]) < int(report_id)),
             None,
@@ -1252,6 +1587,9 @@ class DachsWebApp:
         clean = validate_protocol(protocol)
         self.store.update_maintenance_protocol(report_id, clean)
         return self.maintenance_report(report_id)
+
+    def delete_maintenance_report(self, report_id: int) -> dict:
+        return self.store.delete_maintenance_report(report_id)
 
     def complete_maintenance(self, username: str, report_id: int, protocol: dict,
                              auth_level: int, pass4: str, confirmation: str,
@@ -1517,11 +1855,27 @@ class DachsWebApp:
 
 
 class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
-    server_version = "OpenDachsManager/0.9"
+    server_version = "OpenDachsManager/1.0"
 
     @property
     def app(self) -> DachsWebApp:
         return self.server.dachs_app  # type: ignore[attr-defined]
+
+    @property
+    def base_path(self) -> str:
+        return self.server.base_path  # type: ignore[attr-defined]
+
+    @property
+    def cookie_path(self) -> str:
+        return f"{self.base_path}/" if self.base_path else "/"
+
+    def _route_path(self, path: str) -> str | None:
+        if not self.base_path:
+            return path
+        prefix = self.base_path + "/"
+        if not path.startswith(prefix):
+            return None
+        return path[len(self.base_path):] or "/"
 
     def log_message(self, fmt, *args):
         return
@@ -1558,6 +1912,12 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
     def _error(self, status: int, message: str):
         self._json({"ok": False, "error": message}, status)
 
+    def _session_cookie(self, token: str, max_age: int) -> str:
+        return (
+            f"open_dachs_session={token}; Path={self.cookie_path}; Max-Age={max_age}; "
+            "HttpOnly; SameSite=Strict"
+        )
+
     def _require(self, admin: bool = False) -> dict | None:
         user = self._user()
         if user is None:
@@ -1580,8 +1940,19 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        path = parsed.path
+        if self.base_path and parsed.path == self.base_path:
+            return self._send(
+                308,
+                b"",
+                "text/plain; charset=utf-8",
+                headers={"Location": self.base_path + "/"},
+            )
+        path = self._route_path(parsed.path)
+        if path is None:
+            return self._error(404, "not found")
         try:
+            if path == "/healthz":
+                return self._json({"ok": True, "version": "1.0", "base_path": self.base_path})
             if path.startswith("/api/"):
                 user = self._require()
                 if user is None:
@@ -1596,6 +1967,19 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     return self._json(self.app.live()["monitor"])
                 if path == "/api/maintenance/status":
                     return self._json(self.app.live()["maintenance"])
+                if path == "/api/settings/maintenance":
+                    if user.get("role") != "admin":
+                        return self._error(403, "admin role required")
+                    return self._json(self.app.maintenance_settings())
+                if path == "/api/settings/dashboard":
+                    return self._json(self.app.dashboard_settings())
+                if path == "/api/settings/soot-filter":
+                    return self._json(self.app.soot_filter_settings())
+                if path == "/api/service-codes":
+                    query = parse_qs(parsed.query)
+                    search = query.get("q", [""])[0]
+                    limit = int(query.get("limit", ["250"])[0])
+                    return self._json(self.app.pack.service_catalog(search, limit))
                 if path == "/api/maintenance/reports":
                     return self._json(self.app.maintenance_reports())
                 export_match = re.fullmatch(r"/api/maintenance/reports/(\d+)/export/(html|pdf|json)", path)
@@ -1680,7 +2064,9 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        path = parsed.path
+        path = self._route_path(parsed.path)
+        if path is None:
+            return self._error(404, "not found")
         try:
             payload = self._body()
             if path == "/api/login":
@@ -1688,18 +2074,18 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                 if result is None:
                     return self._error(401, "Benutzername oder Passwort falsch")
                 token, role = result
-                cookie = f"open_dachs_session={token}; Path=/; Max-Age=43200; HttpOnly; SameSite=Strict"
+                cookie = self._session_cookie(token, 43200)
                 return self._json({"ok": True, "role": role}, cookies=[cookie])
             if path == "/api/logout":
                 self.app.logout(self._token())
-                return self._json({"ok": True}, cookies=["open_dachs_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"])
+                return self._json({"ok": True}, cookies=[self._session_cookie("", 0)])
             if path == "/api/password":
                 user = self._require(admin=True)
                 if user is None:
                     return
                 self.app.change_password(user["username"], str(payload.get("current_password", "")), str(payload.get("new_password", "")))
                 self.app.logout(self._token())
-                return self._json({"ok": True, "message": "Passwort geändert; bitte neu anmelden."}, cookies=["open_dachs_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"])
+                return self._json({"ok": True, "message": "Passwort geändert; bitte neu anmelden."}, cookies=[self._session_cookie("", 0)])
             if path == "/api/users/gast/password":
                 user = self._require(admin=True)
                 if user is None:
@@ -1710,6 +2096,21 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     str(payload.get("new_password", "")),
                 )
                 return self._json({"ok": True, "message": "Gastpasswort geändert."})
+            if path == "/api/settings/maintenance":
+                if self._require(admin=True) is None:
+                    return
+                test_mode = payload.get("test_mode")
+                if not isinstance(test_mode, bool):
+                    raise ValueError("test_mode muss true oder false sein")
+                return self._json(self.app.set_maintenance_test_mode(test_mode))
+            if path == "/api/settings/dashboard":
+                if self._require(admin=True) is None:
+                    return
+                return self._json(self.app.set_dashboard_settings(payload.get("cards")))
+            if path == "/api/settings/soot-filter":
+                if self._require(admin=True) is None:
+                    return
+                return self._json(self.app.set_soot_filter_settings(payload))
             if path == "/api/monitor":
                 if self._require(admin=True) is None:
                     return
@@ -1743,7 +2144,7 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     user["username"], int(completion_match.group(1)), dict(payload.get("protocol") or {}),
                     int(payload.get("auth_level", -1)), str(payload.get("pass4", "")),
                     str(payload.get("confirmation", "")),
-                    demo=not self.app.maintenance_live_writes_enabled,
+                    demo=self.app.maintenance_settings()["test_mode"],
                 )
                 return self._json(result)
             report_match = re.fullmatch(r"/api/maintenance/reports/(\d+)", path)
@@ -1785,6 +2186,25 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
         except Exception as exc:
             self._error(500, str(exc))
 
+    def do_DELETE(self):
+        path = self._route_path(urlparse(self.path).path)
+        if path is None:
+            return self._error(404, "not found")
+        try:
+            report_match = re.fullmatch(r"/api/maintenance/reports/(\d+)", path)
+            if report_match:
+                if self._require(admin=True) is None:
+                    return
+                deleted = self.app.delete_maintenance_report(int(report_match.group(1)))
+                return self._json({"ok": True, "deleted": deleted})
+            return self._error(404, "unknown API path")
+        except (ValueError, KeyError) as exc:
+            self._error(400, str(exc))
+        except PermissionError as exc:
+            self._error(403, str(exc))
+        except Exception as exc:
+            self._error(500, str(exc))
+
     def _static(self, path: str):
         relative = "index.html" if path in ("", "/") else path.removeprefix("/static/") if path.startswith("/static/") else ""
         if not relative or ".." in Path(relative).parts:
@@ -1793,15 +2213,19 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
         if WEB_DIR.resolve() not in target.parents or not target.is_file():
             return self._error(404, "not found")
         content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        self._send(200, target.read_bytes(), content_type + ("; charset=utf-8" if content_type.startswith("text/") or content_type == "application/javascript" else ""))
+        body = target.read_bytes()
+        if target.name == "index.html":
+            body = body.replace(b"__OPEN_DACHS_BASE_PATH__", self.base_path.encode("ascii"))
+        self._send(200, body, content_type + ("; charset=utf-8" if content_type.startswith("text/") or content_type == "application/javascript" else ""))
 
 
 class DachsHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, app: DachsWebApp):
+    def __init__(self, address, app: DachsWebApp, base_path: str = ""):
         self.dachs_app = app
+        self.base_path = normalize_base_path(base_path)
         super().__init__(address, DachsRequestHandler)
 
 
@@ -1821,6 +2245,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=float(os.environ.get("OPEN_DACHS_TIMEOUT", "0.9")))
     parser.add_argument("--pack-rev", default=os.environ.get("OPEN_DACHS_PACK_REV", "50"))
     parser.add_argument("--data-dir", default=os.environ.get("OPEN_DACHS_WEB_DATA_DIR", "/var/lib/open-dachs-manager"))
+    parser.add_argument(
+        "--base-path",
+        default=os.environ.get("OPEN_DACHS_BASE_PATH", ""),
+        help="external URL prefix, for example /dachs",
+    )
     parser.add_argument("--interval", type=float, default=float(os.environ.get("OPEN_DACHS_WEB_INTERVAL", "0.75")))
     parser.add_argument(
         "--maintenance-live-writes",
@@ -1843,9 +2272,10 @@ def main(argv: list[str] | None = None) -> int:
         serial_socket=args.serial_socket,
         maintenance_live_writes=args.maintenance_live_writes,
     )
-    server = DachsHTTPServer((args.host, args.web_port), app)
+    base_path = normalize_base_path(args.base_path)
+    server = DachsHTTPServer((args.host, args.web_port), app, base_path=base_path)
     app.start()
-    print(f"Open Dachs Manager: http://{args.host}:{args.web_port}", flush=True)
+    print(f"Open Dachs Manager: http://{args.host}:{args.web_port}{base_path or '/'}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

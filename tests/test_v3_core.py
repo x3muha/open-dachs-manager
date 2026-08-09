@@ -1,4 +1,5 @@
 import json
+import http.client
 import os
 import tempfile
 import threading
@@ -26,9 +27,12 @@ from open_dachs_manager.maintenance import (
 from open_dachs_manager.web import (
     DEFAULT_DASHBOARD_SERIES,
     DEFAULT_SLOW_MONITOR_BLOCKS,
+    DachsHTTPServer,
     DachsWebApp,
     DachsStore,
     init_users,
+    normalize_base_path,
+    soot_filter_estimate,
     web_monitor_field_visible,
 )
 from open_dachs_manager.transport import (
@@ -83,7 +87,7 @@ class NoisySerial(FakeSerial):
 
 class CoreTests(unittest.TestCase):
     def test_generator_target_is_a_slow_polled_writable_startpage_value(self):
-        pack = PackRepository()
+        pack = PackRepository(service_codes_file="")
         payload = bytearray(70)
         pack.encode_value(payload, "Hka_Ew.usSollGenerator", "5.2", block=50)
 
@@ -140,6 +144,185 @@ class CoreTests(unittest.TestCase):
             self.assertIsNone(app.session_user(guest_token))
             self.assertEqual(app.session_user(admin_token)["role"], "admin")
 
+    def test_maintenance_test_mode_is_safe_and_persistent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60, maintenance_live_writes=False)
+            self.assertEqual(app.maintenance_settings(), {
+                "test_mode": True,
+                "maintenance_live_writes_enabled": False,
+            })
+
+            enabled = app.set_maintenance_test_mode(False)
+            self.assertFalse(enabled["test_mode"])
+            self.assertTrue(enabled["maintenance_live_writes_enabled"])
+            saved = json.loads((Path(directory) / "maintenance_settings.json").read_text())
+            self.assertEqual(saved, {"version": 1, "test_mode": False})
+
+            restarted = DachsWebApp(data_dir=directory, interval=60, maintenance_live_writes=False)
+            self.assertFalse(restarted.maintenance_settings()["test_mode"])
+            restarted.set_maintenance_test_mode(True)
+
+            safe_restart = DachsWebApp(data_dir=directory, interval=60, maintenance_live_writes=True)
+            self.assertTrue(safe_restart.maintenance_settings()["test_mode"])
+            self.assertFalse(safe_restart.maintenance_settings()["maintenance_live_writes_enabled"])
+            with self.assertRaises(ValueError):
+                safe_restart.set_maintenance_test_mode("false")
+
+    def test_dashboard_cards_are_validated_and_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            defaults = app.dashboard_settings()["cards"]
+            self.assertGreater(len(defaults), 10)
+            self.assertIn({"block": 24, "key": "Hka_Mw1.Temp.sbMotor"}, defaults)
+
+            cards = [
+                {"block": 24, "key": "Hka_Mw1.sWirkleistung"},
+                {"block": 110, "key": next(iter(app._dashboard_available_keys(110)))},
+            ]
+            saved = app.set_dashboard_settings(cards)
+            self.assertEqual(saved["cards"], cards)
+            self.assertEqual(
+                json.loads((Path(directory) / "dashboard_settings.json").read_text())["cards"],
+                cards,
+            )
+            restarted = DachsWebApp(data_dir=directory, interval=60)
+            self.assertEqual(restarted.dashboard_settings()["cards"], cards)
+            with self.assertRaises(KeyError):
+                app.set_dashboard_settings([{"block": 24, "key": "Gibt.Es.Nicht"}])
+
+    def test_soot_filter_estimate_uses_requested_curve_and_colours(self):
+        self.assertEqual(soot_filter_estimate(419)["percent"], 0)
+        self.assertEqual(soot_filter_estimate(479)["level"], "green")
+        self.assertEqual(soot_filter_estimate(480), {
+            "available": True,
+            "percent": 60,
+            "level": "orange",
+            "source_temperature_c": 480.0,
+            "zero_temperature_c": 420.0,
+            "full_temperature_c": 520.0,
+        })
+        self.assertEqual(soot_filter_estimate(509)["level"], "orange")
+        self.assertEqual(soot_filter_estimate(510)["level"], "red")
+        self.assertEqual(soot_filter_estimate(521)["percent"], 100)
+        self.assertFalse(soot_filter_estimate(None)["available"])
+
+    def test_soot_filter_settings_are_safe_persistent_and_feed_live_estimate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            self.assertEqual(app.soot_filter_settings()["zero_temperature_c"], 420)
+            self.assertEqual(app.soot_filter_settings()["full_temperature_c"], 520)
+            app.live_values[(24, "Hka_Mw1.Temp.sAbgasMotor")] = {
+                "block": 24,
+                "key": "Hka_Mw1.Temp.sAbgasMotor",
+                "value": 470,
+            }
+            self.assertEqual(app.live()["soot_filter"]["percent"], 50)
+
+            saved = app.set_soot_filter_settings({
+                "zero_temperature_c": 400,
+                "full_temperature_c": 500,
+            })
+            self.assertEqual(saved["source"], "Motorabgastemperatur")
+            self.assertEqual(app.live()["soot_filter"]["percent"], 70)
+            self.assertEqual(app.live()["soot_filter"]["level"], "orange")
+            self.assertEqual(
+                json.loads((Path(directory) / "soot_filter_settings.json").read_text()),
+                {"version": 1, "zero_temperature_c": 400, "full_temperature_c": 500},
+            )
+            restarted = DachsWebApp(data_dir=directory, interval=60)
+            self.assertEqual(restarted.soot_filter_settings()["full_temperature_c"], 500)
+            with self.assertRaisesRegex(ValueError, "mindestens 10"):
+                restarted.set_soot_filter_settings({
+                    "zero_temperature_c": 500,
+                    "full_temperature_c": 505,
+                })
+
+    def test_external_service_catalog_resolves_code_163_with_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalogue = Path(directory) / "Servicecodes_de.properties"
+            catalogue.write_bytes(
+                "sc.163=Leistung zu klein\n"
+                "sc.163.uc=1028\n"
+                "uc.1028=Generatorleistung pruefen\n"
+                "uc.1028.mc=2001\n"
+                "mc.2001=Messung kontrollieren\n".encode("latin-1")
+            )
+            pack = PackRepository(service_codes_file=catalogue)
+            result = pack.service_catalog("163")
+            self.assertTrue(result["available"])
+            self.assertGreaterEqual(result["count"], 222)
+            self.assertTrue(result["details_available"])
+            self.assertEqual(result["items"][0]["text"], "Leistung zu klein")
+            self.assertEqual(result["items"][0]["causes"][0]["code"], "1028")
+            self.assertEqual(result["items"][0]["measures"][0]["code"], "2001")
+
+            payload = bytearray(70)
+            pack.encode_value(payload, "Hka_Bd.bStoerung", "163", block=22)
+            field = next(item for item in pack.decode(22, bytes(payload)) if item.key == "Hka_Bd.bStoerung")
+            self.assertIn("Leistung zu klein", str(field.value))
+
+    def test_bundled_fault_catalog_resolves_live_error_and_warning(self):
+        pack = PackRepository(service_codes_file="")
+        result = pack.service_catalog("163")
+        self.assertTrue(result["available"])
+        self.assertEqual(result["schema"], "open-dachs-manager/fault-catalog/v1")
+        self.assertEqual(result["count"], 222)
+        self.assertFalse(result["details_available"])
+        self.assertEqual(result["items"], [{
+            "code": 163,
+            "text": "Leistung zu klein",
+            "causes": [],
+            "measures": [],
+        }])
+
+        payload = bytearray(70)
+        pack.encode_value(payload, "Hka_Bd.bStoerung", "163", block=22)
+        fields = {item.key: item for item in pack.decode(22, bytes(payload))}
+        self.assertEqual(fields["Hka_Bd.bStoerung"].value, "SC 163 · Leistung zu klein")
+
+        pack.encode_value(payload, "Hka_Bd.bWarnung", "610", block=22)
+        fields = {item.key: item for item in pack.decode(22, bytes(payload))}
+        self.assertEqual(fields["Hka_Bd.bWarnung"].value, "WARN 610 · Zusatzbrenner startet nicht")
+
+    def test_configurable_base_path_routes_health_and_static_files(self):
+        self.assertEqual(normalize_base_path("dachs/"), "/dachs")
+        self.assertEqual(normalize_base_path("/"), "")
+        with self.assertRaises(ValueError):
+            normalize_base_path("/dachs/../admin")
+
+        app = SimpleNamespace()
+        server = DachsHTTPServer(("127.0.0.1", 0), app, base_path="/dachs")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+            connection.request("GET", "/dachs/healthz")
+            response = connection.getresponse()
+            health = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(response.status, 200)
+            self.assertEqual(health["base_path"], "/dachs")
+            connection.close()
+
+            connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+            connection.request("GET", "/dachs/")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8")
+            self.assertEqual(response.status, 200)
+            self.assertIn('content="/dachs"', body)
+            self.assertIn('href="static/style.css', body)
+            connection.close()
+
+            connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+            connection.request("GET", "/healthz")
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 404)
+            connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_block18_history_decodes_packed_entries_and_message_id(self):
         pack = PackRepository()
         payload = bytearray(70)
@@ -162,7 +345,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(first["type_label"], "Störung")
         self.assertEqual(first["module_label"], "Dachs")
         self.assertEqual(first["message_id"], 105)
-        self.assertEqual(first["message"], "Code 105")
+        self.assertEqual(first["message"], "Vorlauftemperaturfühler fehlerhaft")
         self.assertIsNone(first["raw_value_label"])
         self.assertEqual(second["message_id"], 14)
         self.assertEqual(pack.field_map(18)["MeldeHIST.bWert[1]"]["offset"], 16)
@@ -227,7 +410,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(history["warning_ring"], 0)
         newest = history["services"][0]
         self.assertEqual((newest["slot"], newest["recency"], newest["code"]), (1, 1, 216))
-        self.assertEqual(newest["text"], "Keine Beschreibung hinterlegt")
+        self.assertEqual(newest["text"], "Spannung über 280 V")
         self.assertTrue(newest["active"])
         self.assertTrue(newest["auto_reset"])
         warning = next(entry for entry in history["warnings"] if entry["slot"] == 1)
@@ -460,15 +643,17 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(history["summary"]["thermal_work_condenser_kwh"], 789.0)
         self.assertEqual(history["shutdowns"][0]["code"], 12)
 
-    def test_service_history_codes_are_shown_without_bundled_text_catalogue(self):
+    def test_service_history_codes_use_bundled_fault_catalogue(self):
         pack = PackRepository()
         payload = bytearray(70)
         payload[0] = 5
         payload[2:6] = (86400).to_bytes(4, "little")
 
         fields = {field.key: field for field in pack.decode(82, bytes(payload))}
-        self.assertIn("Code 105", str(fields["Hka_BZbeiSC_Hist_9L.bStoercode"].value))
-        self.assertIn("unbekannt", str(fields["Hka_BZbeiSC_Hist_9L.bStoercode"].value))
+        self.assertEqual(
+            fields["Hka_BZbeiSC_Hist_9L.bStoercode"].value,
+            "SC 105 · Vorlauftemperaturfühler fehlerhaft",
+        )
 
         pack.encode_value(payload, "Hka_BZbeiSC_Hist_9L.bStoercode", "7", block=82)
         self.assertEqual(payload[0], 7)
@@ -482,9 +667,8 @@ class CoreTests(unittest.TestCase):
         payload[30] = 10
 
         fields = {field.key: field for field in pack.decode(34, bytes(payload))}
-        self.assertIn("Code 105", str(fields["Mm.ModulDaten.bStoerung[0]"].value))
-        self.assertIn("unbekannt", str(fields["Mm.ModulDaten.bStoerung[0]"].value))
-        self.assertIn("Code 610", str(fields["Mm.ModulDaten.bWarnung[0]"].value))
+        self.assertEqual(fields["Mm.ModulDaten.bStoerung[0]"].value, "SC 105 · Vorlauftemperaturfühler fehlerhaft")
+        self.assertEqual(fields["Mm.ModulDaten.bWarnung[0]"].value, "WARN 610 · Zusatzbrenner startet nicht")
 
     def test_decoder_uses_explicit_offsets_for_block_22_variants(self):
         pack = PackRepository()
@@ -635,7 +819,73 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(audit.written)
         self.assertTrue(audit.readback_ok)
         self.assertTrue(audit.ack_positive)
+        self.assertEqual(audit.readback_scope, "block")
+        self.assertEqual(audit.readback_attempts, 1)
         self.assertEqual(session.written, after)
+
+    def test_live_write_verifies_changed_field_when_an_unrelated_counter_moves(self):
+        pack = PackRepository()
+        service = DachsService(
+            "/dev/null", 19200, 0.1, pack, readback_attempts=3, readback_delay=0
+        )
+        before = bytearray(70)
+        pack.encode_value(before, "Hka_Ew.usSollGenerator", "5.3", block=50)
+        after = bytearray(before)
+        pack.encode_value(after, "Hka_Ew.usSollGenerator", "4.7", block=50)
+        readback = bytearray(after)
+        readback[36:38] = (1234).to_bytes(2, "little")
+        ack = Frame("ack", 2, b"", positive=True)
+        reads = deque([bytes(before), bytes(readback)])
+
+        class WriteSession:
+            def read_block(self, block, packet=None, timeout=0.9):
+                payload = reads.popleft()
+                frame = Frame("data", 1, b"", payload=b"\x00" + payload)
+                return BlockResult(block, 1, Response(b"", None, frame, 1.0), 0, payload)
+
+            def write_block(self, block, payload, packet=None, timeout=0.9):
+                return Response(b"", ack, None, 1.0)
+
+        audit = service.write_payload(
+            WriteSession(), 50, bytes(before), bytes(after),
+            ["Hka_Ew.usSollGenerator"], WriteAllowlist(), False,
+        )
+
+        self.assertTrue(audit.written)
+        self.assertTrue(audit.readback_ok)
+        self.assertTrue(audit.ack_positive)
+        self.assertEqual(audit.readback_scope, "changed-fields")
+        self.assertEqual(audit.readback_attempts, 1)
+
+    def test_live_write_retries_a_stale_changed_field_readback(self):
+        pack = PackRepository()
+        service = DachsService(
+            "/dev/null", 19200, 0.1, pack, readback_attempts=3, readback_delay=0
+        )
+        before = bytearray(70)
+        pack.encode_value(before, "Hka_Ew.usSollGenerator", "5.3", block=50)
+        after = bytearray(before)
+        pack.encode_value(after, "Hka_Ew.usSollGenerator", "4.7", block=50)
+        ack = Frame("ack", 2, b"", positive=True)
+        reads = deque([bytes(before), bytes(before), bytes(after)])
+
+        class WriteSession:
+            def read_block(self, block, packet=None, timeout=0.9):
+                payload = reads.popleft()
+                frame = Frame("data", 1, b"", payload=b"\x00" + payload)
+                return BlockResult(block, 1, Response(b"", None, frame, 1.0), 0, payload)
+
+            def write_block(self, block, payload, packet=None, timeout=0.9):
+                return Response(b"", ack, None, 1.0)
+
+        audit = service.write_payload(
+            WriteSession(), 50, bytes(before), bytes(after),
+            ["Hka_Ew.usSollGenerator"], WriteAllowlist(), False,
+        )
+
+        self.assertTrue(audit.written)
+        self.assertEqual(audit.readback_scope, "block")
+        self.assertEqual(audit.readback_attempts, 2)
 
     def test_live_write_stops_when_block_changed(self):
         service = DachsService("/dev/null", 19200, 0.1, PackRepository())
@@ -748,6 +998,72 @@ class CoreTests(unittest.TestCase):
         pdf = report_pdf(report, protocol)
         self.assertTrue(pdf.startswith(b"%PDF-1.4"))
         self.assertIn(b"xref", pdf)
+
+    def test_open_and_completed_maintenance_reports_can_be_deleted(self):
+        report = {"generated_at": "2026-08-08T12:00:00+00:00", "blocks": {}}
+        protocol = {
+            "fuel_type": "gas", "technician": "Firma", "notes": "ok",
+            "checklist": {}, "supplemental": {}, "measurements": {},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            store = DachsStore(Path(directory) / "history.db")
+            draft = store.create_maintenance_report("admin", "gas", report, protocol)
+            completed = store.create_maintenance_report("admin", "gas", report, protocol)
+            store.complete_maintenance_report(completed["id"], {
+                "mode": "demo", "controller_written": False,
+            })
+
+            self.assertEqual(store.delete_maintenance_report(draft["id"]), {
+                "id": draft["id"], "status": "draft",
+            })
+            self.assertEqual(store.delete_maintenance_report(completed["id"]), {
+                "id": completed["id"], "status": "completed",
+            })
+            self.assertEqual(store.maintenance_reports(), [])
+            with self.assertRaisesRegex(KeyError, "nicht gefunden"):
+                store.delete_maintenance_report(completed["id"])
+
+    def test_maintenance_delete_http_endpoint_requires_admin(self):
+        class App:
+            def __init__(self):
+                self.deleted = []
+
+            @staticmethod
+            def session_user(token):
+                return {
+                    "admin-token": {"username": "admin", "role": "admin"},
+                    "guest-token": {"username": "gast", "role": "guest"},
+                }.get(token)
+
+            def delete_maintenance_report(self, report_id):
+                self.deleted.append(report_id)
+                return {"id": report_id, "status": "completed"}
+
+        app = App()
+        server = DachsHTTPServer(("127.0.0.1", 0), app)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def request(token=None):
+            connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+            headers = {"Cookie": f"open_dachs_session={token}"} if token else {}
+            connection.request("DELETE", "/api/maintenance/reports/7", headers=headers)
+            response = connection.getresponse()
+            body = json.loads(response.read().decode("utf-8"))
+            connection.close()
+            return response.status, body
+
+        try:
+            self.assertEqual(request()[0], 401)
+            self.assertEqual(request("guest-token")[0], 403)
+            status, body = request("admin-token")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["deleted"], {"id": 7, "status": "completed"})
+            self.assertEqual(app.deleted, [7])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_compact_report_uses_three_pages_and_marks_demo_as_non_writing(self):
         report = {

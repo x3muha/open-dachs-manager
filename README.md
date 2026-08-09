@@ -1,9 +1,9 @@
-# Open Dachs Manager · V3 0.9.0
+# Open Dachs Manager · V3 1.0
 
 Lokale Bedienung, Überwachung und Wartungsdokumentation für Dachs-Anlagen mit
 MSR2-Regler – über die optische serielle Schnittstelle und ohne Cloud-Zwang.
 
-> **Projektstatus: Beta.** Lesen, Dekodieren, Wartungs-Demolauf und der
+> **Projektstatus: Version 1.0.** Lesen, Dekodieren, Wartungs-Testmodus und der
 > zentrale Serialworker sind an einer Anlage praktisch erprobt. Ein echter
 > Schreibvorgang erfordert immer die ausdrückliche Schreibfreigabe,
 > Authentifizierung, eine positive Antwort und den anschließenden Readback.
@@ -16,9 +16,9 @@ Open Dachs Manager ist ein unabhängiges Open-Source-Community-Projekt.
 
 | Bereich | Funktionen |
 |---|---|
-| **Übersicht** | Temperaturen, Laufzeit, Betriebsstunden, Starts, Energie und Wartungsstatus auf einen Blick |
+| **Übersicht** | Wirkleistung Ist/Soll, Wartungsrestzeit, frei auswählbare Live-Kacheln und technisches Anlagenbild mit Rußfilterschätzung |
 | **Überwachung** | Live-Werte, Anlagenbild, Historien, Service- und Warnmeldungen |
-| **Wartung** | Schreibfreier Gesamtsnapshot, digitale Checkliste, Vorher-/Nachher-Werte, lokales Archiv und PDF/HTML/JSON |
+| **Wartung** | Schreibfreier Gesamtsnapshot, digitale Checkliste, Vorher-/Nachher-Werte, löschbares lokales Archiv und PDF/HTML/JSON |
 | **Einstellungen** | Vollständig dekodierte Register, Dry-Run, kontrollierte Schreibvorgänge und getrennte Netzschutz-CPUs |
 | **Werkzeuge** | Weboberfläche, CLI, TUI, JSON-Backups, Audit-Protokoll und systemd-Dienste |
 
@@ -29,10 +29,17 @@ Weitere Merkmale:
 - zentrale SQLite-Historie für Messwerte und Wartungsprotokolle
 - ein gemeinsamer FIFO-Serialworker für Web, CLI und TUI
 - atomare Abläufe für Wartungssnapshots und `Auth → Write → ACK → Readback`
-- Demomodus: Wartung vollständig durchspielen und lokal abschließen, ohne den
-  Regler zu verändern
+- umschaltbarer Testmodus: Wartung vollständig durchspielen und lokal
+  abschließen, ohne den Regler zu verändern; nur ein Admin kann den
+  kontrollierten Echtabschluss freischalten
 - getrennte Adressierung von Regler-CPU sowie Netzschutz-CPU 1 und 2
 - Installation und Aktualisierung mit einem Skript
+- integrierter deutscher Klartextkatalog im eigenen Open-Dachs-JSON-Schema;
+  aktive Fehler erscheinen zum Beispiel als `SC 163 · Leistung zu klein`
+- optionaler lokaler Diagnosekatalog für zusätzliche Ursachen und Maßnahmen;
+  diese Quelldatei wird nicht in das öffentliche Repository kopiert
+- geschätzter Rußfilter-Füllstand aus einer lokal einstellbaren
+  Motorabgastemperatur-Kennlinie; reine Anzeige ohne Regler-Write
 
 ## Einblicke
 
@@ -40,8 +47,13 @@ Weitere Merkmale:
 
 Beim Start wird der gesamte seriell erreichbare Anlagenzustand in einer
 gemeinsamen Sitzung gelesen und lokal eingefroren. Checkliste, Messwerte und
-Bemerkungen werden automatisch gespeichert. Im Demomodus bleibt der Regler
-auch beim Abschluss unverändert.
+Bemerkungen werden automatisch gespeichert. Im standardmäßig aktiven
+Testmodus bleibt der Regler auch beim Abschluss unverändert. Ein Admin kann
+den Modus persistent in den Einstellungen umschalten; der Echtabschluss
+verlangt weiterhin PW4, exakte Bestätigung, positives ACK und Readback.
+Offene und abgeschlossene Wartungen können nach einer Sicherheitsabfrage aus
+dem lokalen Archiv gelöscht werden; ein bereits erfolgter Reglerabschluss und
+das Schreib-Audit bleiben davon unberührt.
 
 ![Geführte Wartung mit lokalem Archiv](docs/assets/screenshots/wartung.png)
 
@@ -111,6 +123,18 @@ Falls die automatische Geräteerkennung nicht eindeutig ist:
 sudo ./install.sh \
   --serial-port /dev/serial/by-id/usb-FTDI_USB__-__Serial-if00-port0
 ```
+
+Die Fehler-Klartexte sind bereits integriert. Ein lokal vorhandener deutscher
+Diagnosekatalog kann zusätzlich Ursachen und Maßnahmen ergänzen:
+
+```bash
+sudo ./install.sh \
+  --service-codes-file /pfad/zu/Servicecodes_de.properties
+```
+
+Für einen Reverse-Proxy-Subpfad lässt sich zusätzlich beispielsweise
+`--base-path /dachs` setzen. Ohne diese Option bleibt die bisherige Root-URL
+unverändert.
 
 Der Installer richtet einen eigenen Systembenutzer, eine isolierte
 Python-Umgebung, geschützte Konfiguration, lokales Datenverzeichnis und zwei

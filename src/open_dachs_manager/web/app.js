@@ -18,7 +18,13 @@ const state = {
   historyWindow: null,
   chartRefresh: { inFlight: false, pending: false },
   authPreview: null,
+  maintenanceSettings: null,
+  sootFilterSettings: null,
   maintenance: { reports: [], current: null, autosaveTimer: null },
+  dashboard: { settings: null, editCards: [], draggedIndex: null },
+  serviceCatalogTimer: null,
+  serviceCatalogLoaded: false,
+  changelogTrigger: null,
   refreshTimer: null,
   chartTimer: null,
 };
@@ -26,6 +32,12 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const loginView = $("loginView");
 const appView = $("appView");
+const BASE_PATH = document.querySelector('meta[name="open-dachs-base-path"]')?.content || "";
+
+function appUrl(path) {
+  const suffix = String(path || "").startsWith("/") ? String(path || "") : `/${path || ""}`;
+  return `${BASE_PATH}${suffix}` || "/";
+}
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[char]));
@@ -43,7 +55,7 @@ function numeric(value) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
+  const response = await fetch(appUrl(path), { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
   const text = await response.text();
   let payload = {};
   try { payload = text ? JSON.parse(text) : {}; } catch (_) { payload = { error: text }; }
@@ -77,9 +89,15 @@ function showApp(user) {
   $("overviewPowerTargetForm").hidden = !isAdmin;
   $("accountControls").hidden = !isAdmin;
   $("guestAccountControls").hidden = !isAdmin;
+  $("maintenanceModeControls").hidden = !isAdmin;
+  $("sootFilterSave").hidden = !isAdmin;
+  $("sootFilterZeroTemperature").disabled = !isAdmin;
+  $("sootFilterFullTemperature").disabled = !isAdmin;
+  $("dashboardEdit").hidden = !isAdmin;
   document.querySelectorAll(".maintenance-admin").forEach((element) => { element.hidden = !isAdmin; });
   $("settingsRoleHint").textContent = isAdmin ? "Admin: lesen und schreiben" : "Gast: nur lesen";
   $("settingsRoleHint").className = `status-pill ${isAdmin ? "ok" : "neutral"}`;
+  renderSootFilterSettings();
   if (isAdmin) updateWriteGuard(); else renderOverviewPowerWriteMode();
 }
 
@@ -100,7 +118,11 @@ async function boot() {
     if (!session.authenticated) return showLogin();
     showApp(session.user);
     state.schema = await api("/api/schema");
+    state.dashboard.settings = await api("/api/settings/dashboard");
+    state.sootFilterSettings = await api("/api/settings/soot-filter");
+    renderSootFilterSettings();
     renderRegisterTabs();
+    if (session.user.role === "admin") await refreshMaintenanceMode();
     await refreshLive();
     await refreshMaintenance(false);
     await loadBlock(state.selectedBlock);
@@ -113,6 +135,104 @@ async function boot() {
   } catch (error) {
     if (error.message !== "Anmeldung erforderlich") showLogin(error.message);
   }
+}
+
+function renderMaintenanceMode() {
+  const settings = state.maintenanceSettings;
+  if (!settings || state.user?.role !== "admin") return;
+  const testMode = Boolean(settings.test_mode);
+  $("maintenanceTestMode").checked = testMode;
+  $("maintenanceModeControls").classList.toggle("live-mode", !testMode);
+  $("maintenanceModeStatus").textContent = testMode
+    ? "Testmodus aktiv: Wartungsberichte werden ausschließlich lokal abgeschlossen. Der Regler bleibt unverändert."
+    : "Echtbetrieb aktiv: Ein Wartungsabschluss kann Block 100 und danach das Bestätigungsbit in Block 104 schreiben.";
+  $("maintenanceModeStatus").className = `write-guard-status ${testMode ? "ok" : "error"}`;
+}
+
+async function refreshMaintenanceMode() {
+  state.maintenanceSettings = await api("/api/settings/maintenance");
+  renderMaintenanceMode();
+}
+
+async function changeMaintenanceMode() {
+  if (state.user?.role !== "admin") return;
+  const control = $("maintenanceTestMode");
+  const testMode = control.checked;
+  control.disabled = true;
+  try {
+    state.maintenanceSettings = await api("/api/settings/maintenance", {
+      method: "POST",
+      body: JSON.stringify({ test_mode: testMode }),
+    });
+    renderMaintenanceMode();
+    if (state.maintenance.current?.id) {
+      await loadMaintenanceReport(Number(state.maintenance.current.id));
+    }
+    toast(testMode
+      ? "Testmodus gespeichert. Wartungsabschlüsse schreiben nicht in den Regler."
+      : "Echtbetrieb gespeichert. Ein Abschluss benötigt weiterhin PW4, Bestätigung, ACK und Readback.");
+  } catch (error) {
+    renderMaintenanceMode();
+    toast(error.message);
+  } finally {
+    control.disabled = false;
+  }
+}
+
+function renderSootFilterSettings() {
+  const settings = state.sootFilterSettings;
+  if (!settings) return;
+  $("sootFilterZeroTemperature").value = settings.zero_temperature_c;
+  $("sootFilterFullTemperature").value = settings.full_temperature_c;
+  const roleText = state.user?.role === "admin"
+    ? "Als Admin kannst du die Kennlinie ändern."
+    : "Gastzugang: Kennlinie nur lesbar.";
+  $("sootFilterSettingsStatus").textContent = `${settings.zero_temperature_c} °C = 0 % · ${settings.full_temperature_c} °C = 100 % · Grün < 60 % · Orange 60–89 % · Rot ab 90 %. ${roleText}`;
+}
+
+async function saveSootFilterSettings(event) {
+  event.preventDefault();
+  if (state.user?.role !== "admin") return;
+  const zero = numeric($("sootFilterZeroTemperature").value);
+  const full = numeric($("sootFilterFullTemperature").value);
+  const button = $("sootFilterSave");
+  button.disabled = true;
+  try {
+    state.sootFilterSettings = await api("/api/settings/soot-filter", {
+      method: "POST",
+      body: JSON.stringify({ zero_temperature_c: zero, full_temperature_c: full }),
+    });
+    renderSootFilterSettings();
+    await refreshLive();
+    toast("Rußfilter-Kennlinie lokal gespeichert.");
+  } catch (error) {
+    renderSootFilterSettings();
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderSootFilterEstimate() {
+  const gauge = $("v98-tech-soot-gauge");
+  const bar = $("v98-tech-soot-bar");
+  const value = $("v98-tech-soot-fill");
+  const source = $("v98-tech-soot-source");
+  const estimate = state.live?.soot_filter;
+  gauge.classList.remove("green", "orange", "red", "unknown");
+  if (!estimate?.available || estimate.percent === null) {
+    gauge.classList.add("unknown");
+    bar.setAttribute("width", "0");
+    value.textContent = "—";
+    source.textContent = "Motorabgastemperatur nicht verfügbar";
+    return;
+  }
+  const percent = Math.max(0, Math.min(100, Number(estimate.percent)));
+  const level = ["green", "orange", "red"].includes(estimate.level) ? estimate.level : "unknown";
+  gauge.classList.add(level);
+  bar.setAttribute("width", String(Math.round(136 * percent / 100)));
+  value.textContent = `${Math.round(percent)} %`;
+  source.textContent = `aus ${estimate.source_temperature_c} °C Motorabgas · ${estimate.zero_temperature_c}–${estimate.full_temperature_c} °C`;
 }
 
 function valueIndex() {
@@ -169,40 +289,297 @@ function setElectricalText(prefix, unit, elementIds, digits = null) {
   elementIds.forEach((id) => { if ($(id)) $(id).textContent = value; });
 }
 
+function activeMessageCode(seriesId, offset) {
+  const raw = numeric(seriesValue(seriesId)?.raw);
+  return raw !== null && raw > 0 ? Math.round(raw) + offset : 0;
+}
+
+function renderHmiMessages() {
+  const service = seriesValue("servicecode");
+  const warning = seriesValue("warncode");
+  const serviceCode = activeMessageCode("servicecode", 100);
+  const warningCode = activeMessageCode("warncode", 600);
+  const serviceActive = serviceCode > 0;
+  const warningActive = warningCode > 0;
+  const serviceText = serviceActive
+    ? String(service?.value || `SC ${serviceCode} · Unbekannter Servicecode`)
+    : "Kein aktiver Servicecode";
+  const warningText = warningActive
+    ? String(warning?.value || `WARN ${warningCode} · Unbekannter Warncode`)
+    : "Keine aktive Warnung";
+
+  $("hmiServiceMessage").className = `hmi-message-card ${serviceActive ? "alarm" : "normal"}`;
+  $("hmiWarningMessage").className = `hmi-message-card ${warningActive ? "warning" : "normal"}`;
+  $("hmiServiceSymbol").textContent = serviceActive ? "!" : "✓";
+  $("hmiWarningSymbol").textContent = warningActive ? "▲" : "✓";
+  $("hmiServiceText").textContent = serviceText;
+  $("hmiWarningText").textContent = warningText;
+  $("hmiServiceCode").textContent = serviceActive ? `SC ${serviceCode}` : "SC —";
+  $("hmiWarningCode").textContent = warningActive ? `WARN ${warningCode}` : "WARN —";
+  $("hmiFaultCount").textContent = rowText("anzahl_stoerungen");
+  $("hmiWarningCount").textContent = rowText("anzahl_warnungen");
+
+  const level = serviceActive ? "alarm" : warningActive ? "warning" : "normal";
+  const stateCode = serviceActive ? `SC ${serviceCode}` : warningActive ? `W ${warningCode}` : "OK";
+  ["hmiOverviewAlarmIndicator", "hmiTechnicalAlarmIndicator"].forEach((id) => {
+    if ($(id)) $(id).setAttribute("class", `hmi-svg-state ${level}`);
+  });
+  ["v95-overview-state-code", "v95-tech-state-code"].forEach((id) => {
+    if ($(id)) $(id).textContent = stateCode;
+  });
+}
+
+function setSchematicMode(mode) {
+  const selected = mode === "technical" ? "technical" : "overview";
+  document.querySelectorAll("[data-schematic-view]").forEach((view) => {
+    view.hidden = view.dataset.schematicView !== selected;
+  });
+  document.querySelectorAll("[data-schematic-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.schematicMode === selected);
+  });
+  try { localStorage.setItem("open-dachs-schematic-mode", selected); } catch (_) { /* optional */ }
+}
+
+function openChangelog(event) {
+  state.changelogTrigger = event?.currentTarget || document.activeElement;
+  $("changelogModal").hidden = false;
+  document.body.classList.add("modal-open");
+  $("changelogClose").focus();
+}
+
+function closeChangelog() {
+  if ($("changelogModal").hidden) return;
+  $("changelogModal").hidden = true;
+  document.body.classList.remove("modal-open");
+  if (state.changelogTrigger instanceof HTMLElement) state.changelogTrigger.focus();
+  state.changelogTrigger = null;
+}
+
+async function openCurrentFaultCatalog() {
+  const code = activeMessageCode("servicecode", 100) || activeMessageCode("warncode", 600);
+  showView("faultCatalogView");
+  $("serviceCatalogSearch").value = code ? String(code) : "";
+  await refreshServiceCatalog();
+  $("serviceCatalogResults").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function dashboardField(block, key) {
+  const series = (state.schema?.series || []).find((item) => Number(item.block) === Number(block) && item.key === key);
+  if (series) return { ...series, label: series.title, reserved: false };
+  const blockSchema = (state.schema?.blocks || []).find((item) => Number(item.block) === Number(block));
+  const field = (blockSchema?.fields || []).find((item) => item.key === key);
+  return field ? { ...field, block: Number(block), label: field.label || field.key, unit: "" } : null;
+}
+
+function dashboardRow(block, key) {
+  return valueIndex().get(`${Number(block)}:${key}`) || null;
+}
+
+function dashboardCards() {
+  return state.dashboard.settings?.cards || state.dashboard.settings?.default_cards || [];
+}
+
 function renderOverview() {
-  const overviewIds = ["kuehlwasser", "dachs_eintritt", "abgas_motor", "abgas_hka", "kapsel", "regler", "betriebsstunden_gesamt", "betriebsstunden", "starts", "arbeit_elektr", "arbeit_therm_hka", "arbeit_therm_kon", "servicecode"];
-  const cards = (state.schema?.series || []).filter((item) => overviewIds.includes(item.id)).filter((item) => !isInvalidSensor(item.id, seriesValue(item.id)));
-  $("overviewCards").innerHTML = cards.map((series) => {
-    const row = seriesValue(series.id);
-    return `<article class="metric-card"><div class="metric-label">${escapeHtml(series.title)}</div><div class="metric-value">${formatValue(row?.value, row?.unit || series.unit)}</div><div class="metric-extra">Block ${series.block} · ${row ? escapeHtml(row.recorded_at) : "wartet auf Messung"}</div></article>`;
-  }).join("");
+  const cards = dashboardCards();
+  $("overviewCards").innerHTML = cards.map((card) => {
+    const field = dashboardField(card.block, card.key);
+    const row = dashboardRow(card.block, card.key);
+    const knownSeries = (state.schema?.series || []).find((item) => Number(item.block) === Number(card.block) && item.key === card.key);
+    const invalid = knownSeries && isInvalidSensor(knownSeries.id, row);
+    const label = field?.label || card.key;
+    const value = row && !invalid ? formatValue(row.value, row.unit || field?.unit || "") : "—";
+    return `<article class="metric-card"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${value}</div><div class="metric-extra">Block ${escapeHtml(card.block)} · ${row && !invalid ? escapeHtml(row.recorded_at) : "wartet auf Messung"}</div></article>`;
+  }).join("") || `<article class="metric-card metric-card-empty"><div class="metric-label">Keine Kacheln gewählt</div><div class="metric-extra">Als Admin über „Bearbeiten“ Werte hinzufügen.</div></article>`;
   const motor = ["motorstatus", "drehzahl", "wirkleistung", "betriebsstunden", "kuehlwasser", "regler"].map((id) => seriesValue(id)).filter((row, index) => row && !isInvalidSensor(["motorstatus", "drehzahl", "wirkleistung", "betriebsstunden", "kuehlwasser", "regler"][index], row));
   $("motorStateCards").innerHTML = motor.map((row) => `<div class="detail-item"><div class="detail-label">${escapeHtml(row.label)}</div><div class="detail-value">${formatValue(row.value, row.unit)}</div></div>`).join("") || `<p class="muted">Noch keine Motordaten.</p>`;
   const system = ["servicecode", "warncode", "anzahl_warnungen", "anzahl_stoerungen"].map((id) => seriesValue(id)).filter(Boolean);
   $("systemStateCards").innerHTML = system.map((row) => `<div class="detail-item"><div class="detail-label">${escapeHtml(row.label)}</div><div class="detail-value">${formatValue(row.value, row.unit)}</div></div>`).join("") || `<p class="muted">Noch keine Statusdaten.</p>`;
-  const ids = { "value-vorlauf":"kuehlwasser", "value-ruecklauf":"dachs_eintritt", "value-kuehlwasser":"kuehlwasser", "value-tech-kuehlwasser":"kuehlwasser", "value-abgas-motor":"abgas_motor", "value-tech-abgas-motor":"abgas_motor", "value-abgas-hka":"abgas_hka", "value-kapsel":"kapsel", "value-tech-kapsel":"kapsel", "value-drehzahl":"drehzahl", "value-wirkleistung":"wirkleistung", "value-betriebsstunden":"betriebsstunden", "value-motorstatus":"motorstatus" };
+  const ids = {
+    "board-value-dachs-austritt":"dachs_austritt",
+    "board-value-dachs-eintritt":"dachs_eintritt",
+    "board-value-vorlauf":"vorlauf",
+    "board-value-ruecklauf":"ruecklauf",
+    "board-value-kuehlwasser":"kuehlwasser",
+    "board-value-abgas-motor":"abgas_motor",
+    "board-value-abgas-hka":"abgas_hka",
+    "board-value-kapsel":"kapsel",
+    "board-value-regler":"regler",
+    "board-value-drehzahl":"drehzahl",
+    "board-value-wirkleistung":"wirkleistung",
+    "board-value-wirkleistung-soll":"wirkleistung_soll",
+    "board-value-betriebsstunden":"betriebsstunden",
+    "board-value-motorstatus":"motorstatus",
+    "board-value-betriebsstunden-gesamt":"betriebsstunden_gesamt",
+    "board-value-starts":"starts",
+    "board-value-servicecode":"servicecode",
+    "v95-overview-dachs-austritt":"dachs_austritt",
+    "v95-overview-dachs-eintritt":"dachs_eintritt",
+    "v95-overview-vorlauf":"vorlauf",
+    "v95-overview-ruecklauf":"ruecklauf",
+    "v95-overview-kuehlwasser":"kuehlwasser",
+    "v95-overview-abgas-motor":"abgas_motor",
+    "v95-overview-abgas-hka":"abgas_hka",
+    "v95-overview-kapsel":"kapsel",
+    "v95-overview-regler":"regler",
+    "v95-overview-drehzahl":"drehzahl",
+    "v95-overview-wirkleistung":"wirkleistung",
+    "v95-overview-wirkleistung-soll":"wirkleistung_soll",
+    "v95-overview-betriebsstunden":"betriebsstunden",
+    "v95-overview-motorstatus":"motorstatus",
+    "v95-overview-betriebsstunden-gesamt":"betriebsstunden_gesamt",
+    "v95-overview-starts":"starts",
+    "v95-tech-dachs-austritt":"dachs_austritt",
+    "v95-tech-dachs-eintritt":"dachs_eintritt",
+    "v95-tech-eintritt-inside":"dachs_eintritt",
+    "v95-tech-kuehlwasser":"kuehlwasser",
+    "v95-tech-abgas-motor":"abgas_motor",
+    "v95-tech-abgas-hka":"abgas_hka",
+    "v95-tech-kapsel":"kapsel",
+    "v95-tech-regler":"regler",
+    "v95-tech-drehzahl":"drehzahl",
+    "v95-tech-wirkleistung":"wirkleistung",
+    "v95-tech-wirkleistung-soll":"wirkleistung_soll",
+    "v95-tech-betriebsstunden":"betriebsstunden",
+    "v95-tech-motorstatus":"motorstatus",
+    "v95-tech-betriebsstunden-gesamt":"betriebsstunden_gesamt",
+  };
   Object.entries(ids).forEach(([elementId, seriesId]) => setText(elementId, seriesId));
-  ["compact-value-kuehlwasser", "compact-value-kuehlwasser-box"].forEach((id) => setText(id, "kuehlwasser"));
-  ["compact-value-dachs-eintritt", "tech-value-dachs-eintritt"].forEach((id) => setText(id, "dachs_eintritt"));
-  ["compact-value-abgas-motor", "compact-value-abgas-hka", "tech-value-abgas-hka"].forEach((id, index) => setText(id, index === 0 ? "abgas_motor" : "abgas_hka"));
-  ["compact-value-kapsel"].forEach((id) => setText(id, "kapsel"));
-  ["compact-value-regler", "compact-value-regler-side", "tech-value-regler"].forEach((id) => setText(id, "regler"));
-  ["compact-value-drehzahl"].forEach((id) => setText(id, "drehzahl"));
-  ["compact-value-wirkleistung"].forEach((id) => setText(id, "wirkleistung"));
-  ["compact-value-betriebsstunden"].forEach((id) => setText(id, "betriebsstunden"));
-  ["compact-value-betriebsstunden-gesamt", "tech-value-betriebsstunden-gesamt"].forEach((id) => setText(id, "betriebsstunden_gesamt"));
-  ["compact-value-starts", "tech-value-starts"].forEach((id) => setText(id, "starts"));
-  ["compact-value-servicecode", "tech-value-servicecode"].forEach((id) => setText(id, "servicecode"));
-  ["tech-value-voltage"].forEach((id) => { if ($(id)) $(id).textContent = phaseText("spannung", "V", 1); });
-  ["tech-value-current"].forEach((id) => { if ($(id)) $(id).textContent = phaseText("strom", "A", 1); });
-  ["tech-value-impedance"].forEach((id) => { if ($(id)) $(id).textContent = phaseText("impedanz", "Ohm", 2); });
-  ["tech-value-frequency"].forEach((id) => { if ($(id)) $(id).textContent = rowText("frequenz"); });
-  setElectricalText("spannung", "V", ["compact-value-voltage"], 1);
-  setElectricalText("strom", "A", ["compact-value-current"], 1);
-  setElectricalText("impedanz", "Ohm", ["compact-value-impedance"], 2);
-  setText("compact-value-frequency", "frequenz");
+  setElectricalText("spannung", "V", ["board-value-voltage", "v95-overview-voltage", "v95-tech-voltage"], 1);
+  setElectricalText("strom", "A", ["board-value-current", "v95-overview-current", "v95-tech-current"], 1);
+  setElectricalText("impedanz", "Ohm", ["board-value-impedance", "v95-tech-impedance"], 2);
+  ["board-value-frequency", "v95-overview-frequency", "v95-tech-frequency"].forEach((id) => setText(id, "frequenz"));
+  renderSootFilterEstimate();
+  renderHmiMessages();
   renderOverviewPower();
   renderMaintenanceStatus(state.live?.maintenance || {});
+}
+
+function allDashboardFields() {
+  const fields = [];
+  const seen = new Set();
+  const add = (field) => {
+    const identity = `${Number(field.block)}:${field.key}`;
+    if (!field.key || seen.has(identity)) return;
+    seen.add(identity);
+    fields.push({
+      block: Number(field.block),
+      key: field.key,
+      label: field.label || field.title || field.key,
+      reserved: Boolean(field.reserved),
+    });
+  };
+  for (const series of (state.schema?.series || [])) add({ ...series, label: series.title });
+  for (const block of (state.schema?.blocks || [])) {
+    for (const field of (block.fields || [])) add({ ...field, block: block.block });
+  }
+  return fields.sort((left, right) => left.block - right.block || left.label.localeCompare(right.label, "de"));
+}
+
+function renderDashboardEditor() {
+  const cards = state.dashboard.editCards;
+  const maximum = Number(state.dashboard.settings?.max_cards || 24);
+  $("dashboardCardCount").textContent = `${cards.length}/${maximum}`;
+  $("dashboardCardList").innerHTML = cards.map((card, index) => {
+    const field = dashboardField(card.block, card.key);
+    return `<article class="dashboard-edit-card" draggable="true" data-dashboard-index="${index}"><span class="drag-handle" aria-hidden="true">⠿</span><div><strong>${escapeHtml(field?.label || card.key)}</strong><small>Block ${escapeHtml(card.block)} · ${escapeHtml(card.key)}</small></div><div class="dashboard-card-actions"><button type="button" data-dashboard-move="up" data-dashboard-index="${index}" aria-label="Nach oben">↑</button><button type="button" data-dashboard-move="down" data-dashboard-index="${index}" aria-label="Nach unten">↓</button><button class="danger" type="button" data-dashboard-remove="${index}" aria-label="Entfernen">×</button></div></article>`;
+  }).join("") || `<p class="muted">Noch keine Kachel gewählt.</p>`;
+
+  const selected = new Set(cards.map((card) => `${Number(card.block)}:${card.key}`));
+  const query = $("dashboardFieldSearch").value.trim().toLocaleLowerCase("de");
+  const available = allDashboardFields().filter((field) => {
+    if (selected.has(`${field.block}:${field.key}`)) return false;
+    const haystack = `${field.block} ${field.label} ${field.key}`.toLocaleLowerCase("de");
+    return !query || haystack.includes(query);
+  });
+  $("dashboardFieldList").innerHTML = available.slice(0, 160).map((field, index) => `<button type="button" data-dashboard-add="${index}"><span><strong>${escapeHtml(field.label)}</strong><small>Block ${field.block} · ${escapeHtml(field.key)}${field.reserved ? " · Reserve" : ""}</small></span><b>+</b></button>`).join("") || `<p class="muted">Kein weiterer passender Wert.</p>`;
+  $("dashboardFieldList").dataset.fields = JSON.stringify(available.slice(0, 160).map((field) => ({ block: field.block, key: field.key })));
+  $("dashboardSave").disabled = cards.length > maximum;
+
+  $("dashboardCardList").querySelectorAll("[draggable=true]").forEach((element) => {
+    element.addEventListener("dragstart", () => { state.dashboard.draggedIndex = Number(element.dataset.dashboardIndex); });
+    element.addEventListener("dragover", (event) => event.preventDefault());
+    element.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const from = state.dashboard.draggedIndex;
+      const to = Number(element.dataset.dashboardIndex);
+      if (!Number.isInteger(from) || from === to) return;
+      const [card] = state.dashboard.editCards.splice(from, 1);
+      state.dashboard.editCards.splice(to, 0, card);
+      state.dashboard.draggedIndex = null;
+      renderDashboardEditor();
+    });
+  });
+}
+
+function openDashboardEditor() {
+  if (state.user?.role !== "admin") return;
+  state.dashboard.editCards = dashboardCards().map((card) => ({ block: Number(card.block), key: card.key }));
+  $("dashboardFieldSearch").value = "";
+  $("dashboardEditor").hidden = false;
+  renderDashboardEditor();
+}
+
+function closeDashboardEditor() {
+  $("dashboardEditor").hidden = true;
+  state.dashboard.draggedIndex = null;
+}
+
+function moveDashboardCard(index, delta) {
+  const target = index + delta;
+  if (index < 0 || target < 0 || target >= state.dashboard.editCards.length) return;
+  const [card] = state.dashboard.editCards.splice(index, 1);
+  state.dashboard.editCards.splice(target, 0, card);
+  renderDashboardEditor();
+}
+
+async function saveDashboardEditor() {
+  const button = $("dashboardSave");
+  button.disabled = true;
+  try {
+    state.dashboard.settings = await api("/api/settings/dashboard", {
+      method: "POST",
+      body: JSON.stringify({ cards: state.dashboard.editCards }),
+    });
+    closeDashboardEditor();
+    renderOverview();
+    toast("Dashboard-Kacheln gespeichert. Neue Blöcke erscheinen nach dem nächsten langsamen Lesezyklus.");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderServiceCatalog(data) {
+  const status = $("serviceCatalogStatus");
+  if (!data?.available) {
+    status.textContent = "Der integrierte Open-Dachs-Klartextkatalog konnte nicht geladen werden.";
+    $("serviceCatalogResults").innerHTML = `<p class="muted">Bitte Installation und Paketdaten prüfen.</p>`;
+    return;
+  }
+  const detailStatus = data.details_available
+    ? " · lokale Ursachen und Maßnahmen verfügbar"
+    : " · Klartexte integriert; Ursachen und Maßnahmen optional";
+  status.textContent = `${data.count} Open-Dachs-Klartexte verfügbar${detailStatus}${data.query ? ` · Treffer für „${data.query}“` : ""}.`;
+  $("serviceCatalogResults").innerHTML = (data.items || []).map((entry) => {
+    const causes = renderDiagnosticCodeList("Mögliche Ursachen", entry.causes);
+    const measures = renderDiagnosticCodeList("Mögliche Maßnahmen", entry.measures);
+    const detail = causes || measures
+      ? `${causes}${measures}`
+      : `<p class="muted">Klartext ist integriert. Für diesen Code sind keine zusätzlichen Ursachen oder Maßnahmen hinterlegt.</p>`;
+    return `<details class="service-catalog-entry" ${String(entry.code) === "163" && data.query ? "open" : ""}><summary><strong>SC ${escapeHtml(entry.code)}</strong><span>${escapeHtml(entry.text)}</span><small>${(entry.causes || []).length} Ursachen · ${(entry.measures || []).length} Maßnahmen</small></summary><div class="service-catalog-detail">${detail}</div></details>`;
+  }).join("") || `<p class="muted">Keine passenden Servicecodes gefunden.</p>`;
+}
+
+async function refreshServiceCatalog() {
+  const query = $("serviceCatalogSearch")?.value.trim() || "";
+  try {
+    const params = new URLSearchParams({ q: query, limit: "250" });
+    renderServiceCatalog(await api(`/api/service-codes?${params.toString()}`));
+    state.serviceCatalogLoaded = true;
+  } catch (error) {
+    $("serviceCatalogStatus").textContent = error.message;
+  }
 }
 
 function renderOverviewPower() {
@@ -331,6 +708,7 @@ function showView(viewId) {
   if (viewId === "monitorView") refreshCharts();
   if (viewId === "auditView") refreshAudit();
   if (viewId === "maintenanceView") refreshMaintenance(true);
+  if (viewId === "faultCatalogView" && !state.serviceCatalogLoaded) refreshServiceCatalog();
 }
 
 function maintenanceNumber(value, suffix = "") {
@@ -341,13 +719,12 @@ function maintenanceNumber(value, suffix = "") {
 
 function renderMaintenanceStatus(status = {}) {
   const level = ["green", "yellow", "red"].includes(status.level) ? status.level : "unknown";
-  [$("maintenanceDashboard"), $("maintenanceStatusPanel")].forEach((element) => {
+  [$("maintenanceHeader"), $("maintenanceStatusPanel")].forEach((element) => {
     if (element) element.className = element.className.replace(/maintenance-(green|yellow|red|unknown)/g, "").trim() + ` maintenance-${level}`;
   });
-  $("maintenanceDashboardTitle").textContent = status.title || "Wartungsstatus noch nicht gelesen";
+  $("maintenanceHeaderValue").textContent = `${maintenanceNumber(status.remaining_hours, " Bh")} | ${maintenanceNumber(status.remaining_days, " Tage")}`;
+  $("maintenanceHeader").title = status.title || "Wartungsstatus noch nicht gelesen";
   $("maintenanceStatusTitle").textContent = status.title || "Wartungsstatus noch nicht gelesen";
-  const details = `Noch ${maintenanceNumber(status.remaining_hours, " Bh")} · ${maintenanceNumber(status.remaining_days, " Tage")} · Intervall ${maintenanceNumber(status.interval_hours, " Bh")}`;
-  $("maintenanceDashboardDetails").textContent = details;
   $("maintenanceStatusMetrics").innerHTML = [
     ["Betriebsstunden bis Wartung", maintenanceNumber(status.remaining_hours, " Bh")],
     ["Tage bis Wartung", maintenanceNumber(status.remaining_days, " Tage")],
@@ -360,6 +737,7 @@ function renderMaintenanceStatus(status = {}) {
 
 function renderMaintenanceReports() {
   const reports = state.maintenance.reports || [];
+  const isAdmin = state.user?.role === "admin";
   $("maintenanceReportRows").innerHTML = reports.map((item) => {
     const summary = item.summary || {};
     const snapshot = item.snapshot || {};
@@ -367,8 +745,9 @@ function renderMaintenanceReports() {
     const attempted = (snapshot.attempted_blocks || []).length;
     const snapshotText = attempted ? `<small>Snapshot ${captured}/${attempted} Blöcke</small>` : "";
     const status = item.status !== "completed" ? "Entwurf" : item.completion_mode === "demo" ? "Demo abgeschlossen" : "Abgeschlossen";
-    return `<tr><td><button class="history-ring" type="button" data-maintenance-report="${item.id}">#${item.id}</button></td><td>${escapeHtml(new Date(item.created_at).toLocaleString("de-DE"))}${snapshotText}</td><td><span class="status-pill ${item.status === "completed" ? "ok" : "warn"}">${status}</span></td><td>${escapeHtml(item.technician || "—")}</td><td>${formatValue(summary.operating_hours, "Bh")}</td><td class="report-links"><a href="/api/maintenance/reports/${item.id}/export/html">HTML</a><a href="/api/maintenance/reports/${item.id}/export/pdf">PDF</a><a href="/api/maintenance/reports/${item.id}/export/json">JSON</a></td></tr>`;
-  }).join("") || `<tr><td colspan="6" class="muted">Noch keine Berichte.</td></tr>`;
+    const deleteAction = isAdmin ? `<button class="danger report-delete" type="button" data-maintenance-delete="${item.id}">Löschen</button>` : "—";
+    return `<tr><td><button class="history-ring" type="button" data-maintenance-report="${item.id}">#${item.id}</button></td><td>${escapeHtml(new Date(item.created_at).toLocaleString("de-DE"))}${snapshotText}</td><td><span class="status-pill ${item.status === "completed" ? "ok" : "warn"}">${status}</span></td><td>${escapeHtml(item.technician || "—")}</td><td>${formatValue(summary.operating_hours, "Bh")}</td><td class="report-links"><a href="${appUrl(`/api/maintenance/reports/${item.id}/export/html`)}">HTML</a><a href="${appUrl(`/api/maintenance/reports/${item.id}/export/pdf`)}">PDF</a><a href="${appUrl(`/api/maintenance/reports/${item.id}/export/json`)}">JSON</a></td><td>${deleteAction}</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="muted">Noch keine Berichte.</td></tr>`;
 }
 
 async function refreshMaintenance(reloadCurrent = false) {
@@ -412,6 +791,30 @@ async function loadMaintenanceReport(reportId) {
   } catch (error) { toast(error.message); }
 }
 
+async function deleteMaintenanceReport(reportId) {
+  if (state.user?.role !== "admin") return;
+  const item = (state.maintenance.reports || []).find((candidate) => Number(candidate.id) === Number(reportId));
+  const status = item?.status === "completed" ? "abgeschlossen" : "offen";
+  const question = `Wartung #${reportId} (${status}) wirklich dauerhaft löschen? Snapshot, Protokoll und Exporte werden aus dem lokalen Pi-Archiv entfernt. Ein bereits erfolgter MSR2-Abschluss wird dadurch nicht rückgängig gemacht.`;
+  if (!window.confirm(question)) return;
+  clearTimeout(state.maintenance.autosaveTimer);
+  state.maintenance.autosaveTimer = null;
+  const button = document.querySelector(`[data-maintenance-delete="${reportId}"]`);
+  if (button) button.disabled = true;
+  try {
+    await api(`/api/maintenance/reports/${reportId}`, { method: "DELETE" });
+    if (Number(state.maintenance.current?.id) === Number(reportId)) {
+      state.maintenance.current = null;
+      renderMaintenanceEditor();
+    }
+    await refreshMaintenance(false);
+    toast(`Wartung #${reportId} wurde aus dem lokalen Archiv gelöscht.`);
+  } catch (error) {
+    toast(error.message);
+    if (button) button.disabled = false;
+  }
+}
+
 function renderMaintenanceEditor() {
   const item = state.maintenance.current;
   if (!item) { $("maintenanceEditor").hidden = true; return; }
@@ -423,7 +826,7 @@ function renderMaintenanceEditor() {
   $("maintenanceReportMeta").textContent = `Anlagenstand ${new Date(item.created_at).toLocaleString("de-DE")} · Seriennummer ${item.summary?.serial_number || "—"} · ${item.summary?.operating_hours || "—"} Bh${snapshotText}`;
   const comparison = item.comparison;
   $("maintenanceComparison").innerHTML = comparison ? `<div class="section-head"><div><p class="eyebrow">VERGLEICH MIT BERICHT #${comparison.report_id}</p><h4>Zählerentwicklung seit ${escapeHtml(new Date(comparison.created_at).toLocaleString("de-DE"))}</h4></div></div><div class="maintenance-comparison-grid">${(comparison.rows || []).map((row) => `<div><span>${escapeHtml(row.label)}</span><strong>${row.delta === null || row.delta === undefined ? "—" : `${numeric(row.delta) >= 0 ? "+" : ""}${escapeHtml(row.delta)}`}</strong><small>${escapeHtml(row.previous ?? "—")} → ${escapeHtml(row.current ?? "—")}</small></div>`).join("")}</div>` : `<p class="source-note">Dies ist der erste archivierte Bericht; ein Zählervergleich erscheint ab dem nächsten Bericht.</p>`;
-  ["Html", "Pdf", "Json"].forEach((name) => { $(`maintenanceExport${name}`).href = `/api/maintenance/reports/${item.id}/export/${name.toLowerCase()}`; });
+  ["Html", "Pdf", "Json"].forEach((name) => { $(`maintenanceExport${name}`).href = appUrl(`/api/maintenance/reports/${item.id}/export/${name.toLowerCase()}`); });
   const protocol = item.protocol || {};
   $("maintenanceFuelType").value = protocol.fuel_type || "gas";
   $("maintenanceTechnician").value = protocol.technician || "";
@@ -520,13 +923,6 @@ async function completeMaintenance() {
     toast(liveCompletion ? "Wartung geschrieben, bestätigt und per Readback geprüft." : "Demolauf lokal abgeschlossen. Es wurden keine Reglerdaten geschrieben.");
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
-}
-
-function setSchematicMode(mode) {
-  const stage = $("schematicStage");
-  if (!stage) return;
-  stage.classList.toggle("detail-mode", mode === "detail");
-  document.querySelectorAll("[data-schematic-mode]").forEach((button) => button.classList.toggle("active", button.dataset.schematicMode === mode));
 }
 
 function renderRegisterTabs() {
@@ -1234,7 +1630,7 @@ async function refreshAudit() {
   if (state.user?.role !== "admin") { $("auditRows").innerHTML = `<tr><td colspan="5">Nur für Admin sichtbar.</td></tr>`; return; }
   try {
     const data = await api("/api/audit");
-    $("auditRows").innerHTML = (data.items || []).map((item) => { const audit=item.audit||{}; const result=audit.written ? "GESCHRIEBEN + READBACK" : (audit.dry_run ? "DRY-RUN" : (audit.error || "Fehler")); const target=Number(audit.cpu||0) ? `CPU ${audit.cpu} · ${item.block}` : item.block; return `<tr class="${audit.critical ? "critical-audit" : ""}"><td>${escapeHtml(new Date(item.recorded_at).toLocaleString("de-DE"))}</td><td>${escapeHtml(item.username)}</td><td>${escapeHtml(target)}</td><td>${escapeHtml(result)}</td><td>${escapeHtml((audit.changed_keys || []).join(", "))}</td></tr>`; }).join("") || `<tr><td colspan="5">Noch keine Schreibversuche.</td></tr>`;
+    $("auditRows").innerHTML = (data.items || []).map((item) => { const audit=item.audit||{}; const scope=audit.readback_scope === "changed-fields" ? "FELD" : "BLOCK"; const attempts=Number(audit.readback_attempts||0); const result=audit.written ? `GESCHRIEBEN · READBACK ${scope}${attempts ? ` · ${attempts}×` : ""}` : (audit.dry_run ? "DRY-RUN" : (audit.error || "Fehler")); const target=Number(audit.cpu||0) ? `CPU ${audit.cpu} · ${item.block}` : item.block; return `<tr class="${audit.critical ? "critical-audit" : ""}"><td>${escapeHtml(new Date(item.recorded_at).toLocaleString("de-DE"))}</td><td>${escapeHtml(item.username)}</td><td>${escapeHtml(target)}</td><td>${escapeHtml(result)}</td><td>${escapeHtml((audit.changed_keys || []).join(", "))}</td></tr>`; }).join("") || `<tr><td colspan="5">Noch keine Schreibversuche.</td></tr>`;
   } catch (error) { toast(error.message); }
 }
 
@@ -1245,9 +1641,62 @@ document.addEventListener("DOMContentLoaded", () => {
   $("logoutButton").addEventListener("click", async () => { await api("/api/logout", { method:"POST", body:"{}" }); showLogin(); });
   document.querySelectorAll(".tab-button").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
   document.querySelectorAll("[data-view-target]").forEach((button) => button.addEventListener("click", () => showView(button.dataset.viewTarget)));
+  $("dashboardEdit").addEventListener("click", openDashboardEditor);
+  $("dashboardClose").addEventListener("click", closeDashboardEditor);
+  $("dashboardCancel").addEventListener("click", closeDashboardEditor);
+  $("dashboardSave").addEventListener("click", saveDashboardEditor);
+  $("dashboardReset").addEventListener("click", () => {
+    state.dashboard.editCards = (state.dashboard.settings?.default_cards || []).map((card) => ({ block: Number(card.block), key: card.key }));
+    renderDashboardEditor();
+  });
+  $("dashboardFieldSearch").addEventListener("input", renderDashboardEditor);
+  $("dashboardCardList").addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-dashboard-remove]");
+    if (remove) {
+      state.dashboard.editCards.splice(Number(remove.dataset.dashboardRemove), 1);
+      return renderDashboardEditor();
+    }
+    const move = event.target.closest("[data-dashboard-move]");
+    if (move) moveDashboardCard(Number(move.dataset.dashboardIndex), move.dataset.dashboardMove === "up" ? -1 : 1);
+  });
+  $("dashboardFieldList").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-dashboard-add]");
+    if (!button) return;
+    const fields = JSON.parse($("dashboardFieldList").dataset.fields || "[]");
+    const field = fields[Number(button.dataset.dashboardAdd)];
+    if (!field) return;
+    const maximum = Number(state.dashboard.settings?.max_cards || 24);
+    if (state.dashboard.editCards.length >= maximum) return toast(`Maximal ${maximum} Kacheln sind möglich.`);
+    state.dashboard.editCards.push(field);
+    renderDashboardEditor();
+  });
+  $("dashboardEditor").addEventListener("click", (event) => { if (event.target === $("dashboardEditor")) closeDashboardEditor(); });
+  document.querySelectorAll("[data-open-changelog]").forEach((button) => button.addEventListener("click", openChangelog));
+  $("changelogClose").addEventListener("click", closeChangelog);
+  $("changelogDone").addEventListener("click", closeChangelog);
+  $("changelogModal").addEventListener("click", (event) => { if (event.target === $("changelogModal")) closeChangelog(); });
+  $("serviceCatalogSearch").addEventListener("input", () => {
+    clearTimeout(state.serviceCatalogTimer);
+    state.serviceCatalogTimer = setTimeout(refreshServiceCatalog, 250);
+  });
+  $("hmiOpenFaultCatalog").addEventListener("click", openCurrentFaultCatalog);
+  document.querySelectorAll("[data-schematic-mode]").forEach((button) => button.addEventListener("click", () => setSchematicMode(button.dataset.schematicMode)));
+  let initialSchematicMode = "overview";
+  try { initialSchematicMode = localStorage.getItem("open-dachs-schematic-mode") || "overview"; } catch (_) { /* optional */ }
+  setSchematicMode(initialSchematicMode);
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (!$("changelogModal").hidden) closeChangelog();
+    else if (!$("dashboardEditor").hidden) closeDashboardEditor();
+  });
   $("maintenanceRefresh").addEventListener("click", () => refreshMaintenance(true));
   $("maintenanceCreate").addEventListener("click", createMaintenanceReport);
   $("maintenanceReportRows").addEventListener("click", (event) => {
+    const deleteButton = event.target.closest("[data-maintenance-delete]");
+    if (deleteButton) {
+      deleteMaintenanceReport(Number(deleteButton.dataset.maintenanceDelete));
+      return;
+    }
     const button = event.target.closest("[data-maintenance-report]");
     if (button) loadMaintenanceReport(Number(button.dataset.maintenanceReport));
   });
@@ -1275,9 +1724,10 @@ document.addEventListener("DOMContentLoaded", () => {
   $("authLevel").addEventListener("change", renderOverviewPowerWriteMode);
   $("authPreviewButton").addEventListener("click", refreshAuthPreview);
   $("authPreviewApply").addEventListener("click", applyAuthPreview);
-  document.querySelectorAll("[data-schematic-mode]").forEach((button) => button.addEventListener("click", () => setSchematicMode(button.dataset.schematicMode)));
   $("passwordForm").addEventListener("submit", changePassword);
   $("guestPasswordForm").addEventListener("submit", changeGuestPassword);
+  $("maintenanceTestMode").addEventListener("change", changeMaintenanceMode);
+  $("sootFilterSettingsForm").addEventListener("submit", saveSootFilterSettings);
   $("temperatureRange").addEventListener("change", () => { $("historyStart").value = ""; $("historyEnd").value = ""; refreshCharts(); });
   $("applyHistoryRange").addEventListener("click", refreshCharts);
   $("resetHistoryRange").addEventListener("click", () => { $("historyStart").value = ""; $("historyEnd").value = ""; $("temperatureRange").value = "24"; refreshCharts(); });

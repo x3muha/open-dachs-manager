@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 
@@ -246,7 +247,8 @@ BLOCK_NAMES_DE: dict[int, str] = {
 class PackRepository:
     """Load the self-contained, versioned MSR2 runtime pack."""
 
-    def __init__(self, pack_file: str | Path | None = None, pack_rev: str = "50"):
+    def __init__(self, pack_file: str | Path | None = None, pack_rev: str = "50",
+                 service_codes_file: str | Path | None = None):
         data_root = package_data_root()
         self.pack_file = Path(pack_file) if pack_file else data_root / "msr2_pack_master_version.json"
         self.pack_rev = str(pack_rev)
@@ -279,7 +281,22 @@ class PackRepository:
         ui_metadata_data = json.loads(ui_metadata_path.read_text(encoding="utf-8")) if ui_metadata_path.exists() else {}
         self.labels = self._load_properties(data_root / "labels_master.properties")
         self.melde_labels = self._load_properties(data_root / "meldehist_types_de.properties")
-        self.service_labels = self._load_properties(data_root / "servicecodes_de.properties")
+        self.fault_catalog_file = data_root / "fault_catalog_de.json"
+        self.fault_catalog_schema, self.service_labels = self._load_fault_catalog(
+            self.fault_catalog_file
+        )
+        configured_service_codes = str(
+            os.environ.get("OPEN_DACHS_SERVICE_CODES_FILE", "")
+            if service_codes_file is None
+            else service_codes_file
+        ).strip()
+        self.service_codes_file = Path(configured_service_codes).expanduser().resolve() if configured_service_codes else None
+        if self.service_codes_file is not None:
+            self.service_labels.update(self._load_properties(self.service_codes_file))
+        self.service_details_available = any(
+            re.fullmatch(r"(?:sc\.\d+\.uc|uc\.[^.]+|mc\.[^.]+)", key)
+            for key in self.service_labels
+        )
         self.metadata_labels: dict[tuple[int, str], str] = {}
         self.ui_metadata: dict[tuple[int, str], dict] = {}
         for block in self.blocks():
@@ -333,6 +350,62 @@ class PackRepository:
     @staticmethod
     def _load_properties(path: Path) -> dict[str, str]:
         return decoder.load_properties(path)
+
+    @staticmethod
+    def _load_fault_catalog(path: Path) -> tuple[str, dict[str, str]]:
+        """Load the compact Open-Dachs code-to-title catalogue."""
+        data = json.loads(path.read_text(encoding="utf-8"))
+        schema = str(data.get("schema") or "")
+        if schema != "open-dachs-manager/fault-catalog/v1":
+            raise ValueError(f"unsupported fault catalogue schema: {schema or 'missing'}")
+        codes = data.get("codes")
+        if not isinstance(codes, dict):
+            raise ValueError("fault catalogue codes must be an object")
+        result: dict[str, str] = {}
+        for code_text, title in codes.items():
+            code = int(str(code_text), 10)
+            clean_title = " ".join(str(title).split()).strip()
+            if code < 1 or code > 65535 or not clean_title:
+                raise ValueError(f"invalid fault catalogue entry: {code_text!r}")
+            result[f"sc.{code}"] = clean_title
+        return schema, result
+
+    def service_catalog(self, query: str = "", limit: int = 250) -> dict:
+        """Return bundled fault titles plus optional local diagnostic details."""
+        requested = str(query or "").strip().casefold()
+        maximum = max(1, min(500, int(limit)))
+        entries = []
+        for key in self.service_labels:
+            match = re.fullmatch(r"sc\.(\d+)", key)
+            if not match:
+                continue
+            code = int(match.group(1))
+            text, causes, measures = decoder._service_code_details(code, self.service_labels)
+            searchable = " ".join([
+                str(code),
+                text,
+                *(str(item.get("text", "")) for item in causes),
+                *(str(item.get("text", "")) for item in measures),
+            ]).casefold()
+            if requested and requested not in searchable:
+                continue
+            entries.append({
+                "code": code,
+                "text": text or "Keine Beschreibung hinterlegt",
+                "causes": causes,
+                "measures": measures,
+            })
+        entries.sort(key=lambda item: int(item["code"]))
+        total = sum(1 for key in self.service_labels if re.fullmatch(r"sc\.\d+", key))
+        return {
+            "available": bool(total),
+            "count": total,
+            "schema": self.fault_catalog_schema,
+            "details_available": self.service_details_available,
+            "query": str(query or "").strip(),
+            "items": entries[:maximum],
+            "truncated": len(entries) > maximum,
+        }
 
     def blocks(self) -> list[int]:
         source = self.data.get("layouts") or self.data.get("blocks") or {}

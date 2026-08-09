@@ -17,6 +17,8 @@ ODM_PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ODM_SERIAL_PORT=""
 ODM_WEB_HOST="0.0.0.0"
 ODM_WEB_PORT="8084"
+ODM_BASE_PATH=""
+ODM_SERVICE_CODES_FILE=""
 ODM_NO_START=0
 ODM_REPLACE_LEGACY=0
 
@@ -31,6 +33,9 @@ Optionen:
   --serial-port PFAD  Serielles Gerät; ohne Angabe automatische Erkennung
   --web-host ADRESSE  Bind-Adresse (Standard: 0.0.0.0)
   --web-port PORT     HTTP-Port (Standard: 8084)
+  --base-path PFAD    URL-Präfix, zum Beispiel /dachs (Standard: kein Präfix)
+  --service-codes-file PFAD
+                      Lokale Diagnoseergänzung mit Ursachen/Maßnahmen installieren
   --no-start          Paket und Dienste installieren, aber nicht starten
   --replace-legacy    Alte dachs-v3-Dienste stoppen und lokale Daten übernehmen
   -h, --help          Diese Hilfe anzeigen
@@ -63,6 +68,16 @@ while (($#)); do
       ODM_WEB_PORT="$2"
       shift 2
       ;;
+    --base-path)
+      (($# >= 2)) || die "--base-path benötigt einen URL-Pfad"
+      ODM_BASE_PATH="$2"
+      shift 2
+      ;;
+    --service-codes-file)
+      (($# >= 2)) || die "--service-codes-file benötigt einen Dateipfad"
+      ODM_SERVICE_CODES_FILE="$2"
+      shift 2
+      ;;
     --no-start)
       ODM_NO_START=1
       shift
@@ -85,6 +100,17 @@ done
 [[ "$ODM_WEB_PORT" =~ ^[0-9]+$ ]] || die "Web-Port muss numerisch sein"
 ((ODM_WEB_PORT >= 1 && ODM_WEB_PORT <= 65535)) || die "Web-Port muss zwischen 1 und 65535 liegen"
 [[ "$ODM_WEB_HOST" != *[[:space:]\"\']* ]] || die "Web-Adresse enthält nicht unterstützte Zeichen"
+if [[ -n "$ODM_BASE_PATH" && "$ODM_BASE_PATH" != "/" ]]; then
+  [[ "$ODM_BASE_PATH" == /* ]] || die "Base Path muss mit / beginnen"
+  [[ "$ODM_BASE_PATH" =~ ^/[A-Za-z0-9._~/-]+$ ]] || die "Base Path enthält nicht unterstützte Zeichen"
+  [[ "$ODM_BASE_PATH" != *"//"* && "$ODM_BASE_PATH" != *"/../"* && "$ODM_BASE_PATH" != *"/./"* && "$ODM_BASE_PATH" != */.. && "$ODM_BASE_PATH" != */. ]] || die "Base Path enthält ungültige Segmente"
+  while [[ "$ODM_BASE_PATH" == */ ]]; do ODM_BASE_PATH="${ODM_BASE_PATH%/}"; done
+else
+  ODM_BASE_PATH=""
+fi
+if [[ -n "$ODM_SERVICE_CODES_FILE" ]]; then
+  [[ -f "$ODM_SERVICE_CODES_FILE" && -r "$ODM_SERVICE_CODES_FILE" ]] || die "Fehlerkatalog nicht lesbar: $ODM_SERVICE_CODES_FILE"
+fi
 
 install_system_dependencies() {
   local packages=(git python3 python3-venv python3-pip ca-certificates)
@@ -118,7 +144,7 @@ install_system_dependencies() {
 
 install_system_dependencies
 
-for command_name in python3 systemctl getent groupadd useradd usermod install stat mktemp tar; do
+for command_name in python3 systemctl getent groupadd useradd usermod install stat mktemp tar readlink chmod chown; do
   command -v "$command_name" >/dev/null 2>&1 || die "benötigter Befehl fehlt: $command_name"
 done
 
@@ -181,6 +207,17 @@ install -d -m 0755 -o root -g root "$ODM_INSTALL_ROOT"
 install -d -m 0750 -o "$ODM_SERVICE_USER" -g "$ODM_SERVICE_USER" "$ODM_DATA_DIR"
 install -d -m 0750 -o root -g "$ODM_SERVICE_USER" "$ODM_CONFIG_DIR"
 
+ODM_INSTALLED_SERVICE_CODES="$ODM_DATA_DIR/servicecodes_de.properties"
+if [[ -n "$ODM_SERVICE_CODES_FILE" ]]; then
+  if [[ "$(readlink -f -- "$ODM_SERVICE_CODES_FILE")" != "$(readlink -m -- "$ODM_INSTALLED_SERVICE_CODES")" ]]; then
+    install -m 0640 -o "$ODM_SERVICE_USER" -g "$ODM_SERVICE_USER" "$ODM_SERVICE_CODES_FILE" "$ODM_INSTALLED_SERVICE_CODES"
+  else
+    chown "$ODM_SERVICE_USER:$ODM_SERVICE_USER" "$ODM_INSTALLED_SERVICE_CODES"
+    chmod 0640 "$ODM_INSTALLED_SERVICE_CODES"
+  fi
+  printf 'Lokaler Fehlerkatalog installiert: %s\n' "$ODM_INSTALLED_SERVICE_CODES"
+fi
+
 python3 -m venv "$ODM_VENV" || die "Python-Umgebung konnte nicht erstellt werden"
 
 # Build from a fresh staging tree.  Setuptools may otherwise reuse an ignored
@@ -211,7 +248,13 @@ trap 'rm -f -- "$ODM_CONFIG_TEMP"' EXIT
   printf 'OPEN_DACHS_BAUD=19200\n'
   printf 'OPEN_DACHS_WEB_HOST=%s\n' "$ODM_WEB_HOST"
   printf 'OPEN_DACHS_WEB_PORT=%s\n' "$ODM_WEB_PORT"
+  printf 'OPEN_DACHS_BASE_PATH=%s\n' "$ODM_BASE_PATH"
   printf 'OPEN_DACHS_WEB_DATA_DIR=%s\n' "$ODM_DATA_DIR"
+  if [[ -f "$ODM_INSTALLED_SERVICE_CODES" ]]; then
+    printf 'OPEN_DACHS_SERVICE_CODES_FILE=%s\n' "$ODM_INSTALLED_SERVICE_CODES"
+  else
+    printf 'OPEN_DACHS_SERVICE_CODES_FILE=\n'
+  fi
   printf 'OPEN_DACHS_TIMEOUT=0.9\n'
   printf 'OPEN_DACHS_WEB_INTERVAL=0.75\n'
   printf 'OPEN_DACHS_MAINTENANCE_LIVE_WRITES=0\n'
@@ -268,7 +311,7 @@ systemctl is-active --quiet "$ODM_SERIAL_SERVICE" || die "Serialworker ist nicht
 systemctl is-active --quiet "$ODM_WEB_SERVICE" || die "Webdienst ist nicht aktiv"
 
 printf '\nOpen Dachs Manager ist installiert.\n'
-printf 'Web: http://%s:%s\n' "$ODM_WEB_HOST" "$ODM_WEB_PORT"
+printf 'Web: http://%s:%s%s\n' "$ODM_WEB_HOST" "$ODM_WEB_PORT" "${ODM_BASE_PATH:-/}"
 printf 'CLI: %s/bin/open-dachs doctor\n' "$ODM_VENV"
 printf 'Dienste: %s, %s\n' "$ODM_SERIAL_SERVICE" "$ODM_WEB_SERVICE"
 if [[ -n "$ODM_CALLER" && "$ODM_CALLER" != "root" ]]; then

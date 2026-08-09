@@ -38,11 +38,16 @@ sudo journalctl \
 ```bash
 open-dachs doctor
 open-dachs read block --block 20
-curl -I http://127.0.0.1:8084/
+curl http://127.0.0.1:8084/healthz
 ```
 
 `doctor` muss `transport=serial-worker` und einen verfügbaren Worker-Socket
 melden.
+
+Bei konfiguriertem `OPEN_DACHS_BASE_PATH=/dachs` lauten Oberfläche und
+Healthcheck intern `http://127.0.0.1:8084/dachs/` beziehungsweise
+`/dachs/healthz`. Ein Reverse Proxy muss den Präfix in diesem Modus an den
+Webdienst weiterreichen.
 
 ## CLI und TUI gleichzeitig mit der Weboberfläche
 
@@ -128,6 +133,23 @@ Zuerst den Worker prüfen, danach das konfigurierte Gerät:
 sudo sed -n '1,20p' /etc/open-dachs-manager/open-dachs-manager.env
 ls -la /dev/ttyUSB* /dev/serial/by-id/* 2>/dev/null
 ```
+
+### Fehlercode erscheint ohne Klartext
+
+Der integrierte Katalog liegt im installierten Python-Paket als
+`fault_catalog_de.json` und verwendet das Schema
+`open-dachs-manager/fault-catalog/v1`. Ein bekannter aktiver Code muss in der
+API und Oberfläche gemeinsam mit seinem Text erscheinen, zum Beispiel
+`SC 163 · Leistung zu klein`.
+
+```bash
+/opt/open-dachs-manager/venv/bin/python -c \
+  'from open_dachs_manager.mapping import PackRepository; print(PackRepository().service_catalog("163")["items"])'
+```
+
+Fehlt nur die ausführliche Ursachen-/Maßnahmenliste, ist das kein Defekt des
+Klartextkatalogs. Diese Details stammen weiterhin aus der optionalen lokalen
+`servicecodes_de.properties`.
 
 Konfigurationen, Regler-Backups und Webdaten vor dem Einfügen in öffentliche
 Issues immer auf vertrauliche Anlageninformationen prüfen.

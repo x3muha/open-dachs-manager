@@ -1129,8 +1129,10 @@ def apply_format(key: str, value: object, formats: dict, service_labels: dict[st
     for invalid in fmt.get("invalidvals") or []:
         try:
             if float(value) == float(invalid):
-                if live in ("hka_bd.bstoerung", "hka_bd.bwarnung"):
-                    return "0 (-)", ""
+                if live == "hka_bd.bstoerung":
+                    return "Kein aktiver Servicecode", ""
+                if live == "hka_bd.bwarnung":
+                    return "Keine aktive Warnung", ""
                 return fmt.get("invaliddisplay") or "n.a.", fmt.get("unit", "")
         except (TypeError, ValueError):
             pass
@@ -1170,14 +1172,15 @@ def apply_format(key: str, value: object, formats: dict, service_labels: dict[st
     if live.endswith(".bstoercode") or live.endswith(".bwarncode"):
         raw_code = int(round(number))
         if raw_code == 0:
-            return "0 (-)", ""
+            return "Keine aktive Meldung", ""
         base_code = raw_code + (100 if live.endswith(".bstoercode") else 600)
         label = _service_code_label(base_code, service_labels)
-        return f"{raw_code} (Code {base_code}: {label if label != '-' else 'unbekannt'})", ""
+        kind = "SC" if live.endswith(".bstoercode") else "WARN"
+        return f"{kind} {base_code} · {label if label != '-' else 'Unbekannter Code'}", ""
     if live.endswith(".bstoerung") or live.endswith(".bwarnung"):
         raw_code = int(round(float(value)))
         if raw_code == 0:
-            return "0 (-)", ""
+            return "Kein aktiver Servicecode" if live.endswith(".bstoerung") else "Keine aktive Warnung", ""
         if live.startswith("mm.moduldaten."):
             # Multi-module status bytes use these offsets; they are not part
             # of the generic field format.
@@ -1185,7 +1188,8 @@ def apply_format(key: str, value: object, formats: dict, service_labels: dict[st
         else:
             base_code = int(round(number))
         label = _service_code_label(base_code, service_labels)
-        return f"{raw_code} (Code {base_code}: {label if label != '-' else 'unbekannt'})", ""
+        kind = "SC" if live.endswith(".bstoerung") else "WARN"
+        return f"{kind} {base_code} · {label if label != '-' else 'Unbekannter Code'}", ""
     if live == "hka_mw1.bkraftstofftyp":
         integer = int(round(number))
         kind = "Öl" if integer in (8, 9, 10, 11) else "Gas" if integer in (128, 144, 160, 176, 192, 208) else "-" if integer == 0 else "unbekannt"

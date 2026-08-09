@@ -52,7 +52,7 @@ vertrauliche Betriebsinformation schützen.
 
 ## Reifegrad
 
-Das Projekt befindet sich im Beta-Stadium und wird ohne Garantie bereitgestellt.
-Gerätevarianten und Packstände können abweichen. Leseergebnisse und Feldlagen
-am tatsächlichen Zielgerät verifizieren, bevor Schreibvorgänge freigegeben
-werden.
+Version 1.0 ist der erste stabile öffentliche Stand und wird ohne Garantie
+bereitgestellt. Gerätevarianten und Packstände können abweichen. Leseergebnisse
+und Feldlagen am tatsächlichen Zielgerät verifizieren, bevor Schreibvorgänge
+freigegeben werden.

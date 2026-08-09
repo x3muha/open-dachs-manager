@@ -3,13 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="open-dachs-base-path" content="__OPEN_DACHS_BASE_PATH__">
   <title>Open Dachs Manager</title>
-  <link rel="stylesheet" href="/static/style.css?v=16">
+  <link rel="stylesheet" href="static/style.css?v=25">
 </head>
 <body>
   <div id="loginView" class="login-shell">
     <div class="login-card">
-      <p class="eyebrow">OPEN · LOCAL · SERIAL · V3 0.9.0</p>
+      <p class="eyebrow">OPEN · LOCAL · SERIAL · <button class="version-changelog-button" type="button" data-open-changelog aria-haspopup="dialog">V3 1.0</button></p>
       <h1>Open Dachs Manager</h1>
       <p class="muted">Lokale Überwachung und geschützte Einstellungen.</p>
       <form id="loginForm">
@@ -25,18 +26,20 @@
     <header class="topbar">
       <div class="topbar-inner">
         <div class="brand">
-          <p class="eyebrow">MSR2 · SERIAL · V3 0.9.0</p>
+          <p class="eyebrow">MSR2 · SERIAL · <button class="version-changelog-button" type="button" data-open-changelog aria-haspopup="dialog">V3 1.0</button></p>
           <h1>Open Dachs Manager</h1>
         </div>
         <nav class="main-tabs" aria-label="Bereiche">
           <button class="tab-button active" data-view="overviewView">Übersicht</button>
           <button class="tab-button" data-view="monitorView">Überwachung</button>
           <button class="tab-button" data-view="maintenanceView">Wartung</button>
+          <button class="tab-button" data-view="faultCatalogView">Fehlerkatalog</button>
           <button class="tab-button" data-view="settingsView">Einstellungen</button>
           <button class="tab-button" data-view="auditView">Audit</button>
         </nav>
         <div class="topbar-status">
           <span id="connectionSummary" class="status-pill neutral">Initialisiere …</span>
+          <button id="maintenanceHeader" class="maintenance-header maintenance-unknown" type="button" data-view-target="maintenanceView"><span>Wartung</span><strong id="maintenanceHeaderValue">— Bh | — Tage</strong></button>
           <span id="userBadge" class="user-badge"></span>
           <button id="logoutButton" class="icon-button" title="Abmelden">↪</button>
         </div>
@@ -49,12 +52,6 @@
           <div><p class="eyebrow">LIVE-ANLAGE</p><h2>Dachs MSR2 · technische Übersicht</h2></div>
           <div class="page-head-actions"><span id="lastUpdate" class="muted">Noch keine Messung</span><button data-action="refresh-live">Aktualisieren</button></div>
         </header>
-        <div id="overviewCards" class="metric-grid"></div>
-        <section id="maintenanceDashboard" class="panel maintenance-dashboard maintenance-unknown">
-          <div class="maintenance-light" aria-hidden="true"><i></i></div>
-          <div><p class="eyebrow">WARTUNGSSTATUS</p><h3 id="maintenanceDashboardTitle">Wartungsstatus noch nicht gelesen</h3><p id="maintenanceDashboardDetails" class="muted">Block 104 wird im langsamen Zyklus gelesen.</p></div>
-          <button type="button" data-view-target="maintenanceView">Wartung öffnen</button>
-        </section>
         <section class="panel power-overview-panel">
           <div class="section-head">
             <div><p class="eyebrow">GENERATORLEISTUNG</p><h3>Wirkleistung Ist / Soll</h3><p class="muted">Istwert aus Block 24 · Sollwert aus Block 50, <code>Hka_Ew.usSollGenerator</code> · Offset 8</p></div>
@@ -77,9 +74,295 @@
             </article>
           </div>
         </section>
-        <section class="panel schematic-panel">
-          <div class="section-head"><div><p class="eyebrow">ANLAGENBILD</p><h3>Dachs-Anlagenbild</h3></div><div class="schematic-toolbar"><span class="muted">Livewerte direkt an der Anlage</span><div class="schematic-switch" role="group" aria-label="Darstellung wählen"><button type="button" class="active" data-schematic-mode="compact">Kompakt</button><button type="button" data-schematic-mode="detail">Technisch</button></div></div></div>
-          <div id="schematicStage" class="schematic-stage">
+        <section class="dashboard-section">
+          <div class="section-head dashboard-head">
+            <div><p class="eyebrow">LIVEWERTE</p><h3>Meine Kacheln</h3><p class="muted">Die Auswahl wird lokal auf dem Pi gespeichert. Zusätzliche Blöcke werden im langsamen Zyklus gelesen.</p></div>
+            <button id="dashboardEdit" class="dashboard-admin" type="button">Bearbeiten</button>
+          </div>
+          <div id="overviewCards" class="metric-grid"></div>
+        </section>
+        <section class="panel plant-board-panel">
+          <div class="section-head hmi-section-head">
+            <div><p class="eyebrow">ANLAGENÜBERSICHT</p><h3>Dachs-Prozessbild</h3><p class="muted">Ruhige HMI-Darstellung · deutliche Medienwege · Farbe warnt nur bei Abweichungen</p></div>
+            <div class="schematic-toolbar"><span class="status-pill ok">LIVE · SERIELL</span><div class="schematic-switch" role="group" aria-label="Darstellung wählen"><button type="button" class="active" data-schematic-mode="overview">Anlage</button><button type="button" data-schematic-mode="technical">Technisch</button></div></div>
+          </div>
+          <div class="hmi-message-grid" aria-label="Aktuelle Fehler und Warnungen">
+            <article id="hmiServiceMessage" class="hmi-message-card normal">
+              <span id="hmiServiceSymbol" class="hmi-message-symbol" aria-hidden="true">✓</span>
+              <div><small>AKTUELLE STÖRUNG</small><strong id="hmiServiceText">Kein aktiver Servicecode</strong><span id="hmiServiceCode">SC —</span></div>
+              <button id="hmiOpenFaultCatalog" type="button">Fehlerkatalog</button>
+            </article>
+            <article id="hmiWarningMessage" class="hmi-message-card normal">
+              <span id="hmiWarningSymbol" class="hmi-message-symbol" aria-hidden="true">✓</span>
+              <div><small>AKTUELLE WARNUNG</small><strong id="hmiWarningText">Keine aktive Warnung</strong><span id="hmiWarningCode">WARN —</span></div>
+            </article>
+            <article class="hmi-message-card hmi-message-counters">
+              <span class="hmi-message-symbol neutral" aria-hidden="true">Σ</span>
+              <div><small>MELDUNGSZÄHLER</small><strong><span id="hmiFaultCount">—</span> entstört · <span id="hmiWarningCount">—</span> Warnungen</strong><span>Klartexte aus Open-Dachs-Katalog</span></div>
+            </article>
+          </div>
+          <div id="schematicStage" class="hmi-schematic-stage">
+            <div class="hmi-schematic-view hmi-overview-view" data-schematic-view="overview">
+              <svg class="hmi-diagram" viewBox="0 0 1400 720" role="img" aria-labelledby="overviewDiagramTitle overviewDiagramDesc">
+                <title id="overviewDiagramTitle">Dachs-Anlagenübersicht</title>
+                <desc id="overviewDiagramDesc">Dachs mit Heizwasseraustritt, Rücklauf, Abgasanschluss, externen Fühlern und Netzanschluss.</desc>
+                <defs>
+                  <marker id="hmiArrowHot" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L14 7 L0 14 Z"></path></marker>
+                  <marker id="hmiArrowReturn" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L14 7 L0 14 Z"></path></marker>
+                  <marker id="hmiArrowGas" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L14 7 L0 14 Z"></path></marker>
+                  <marker id="hmiArrowPower" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L12 6 L0 12 Z"></path></marker>
+                </defs>
+                <rect class="hmi-canvas" x="1" y="1" width="1398" height="718" rx="10"></rect>
+                <g class="hmi-connectors" aria-hidden="true">
+                  <path class="hmi-pipe hmi-hot-pipe" d="M440 235 H350" marker-end="url(#hmiArrowHot)"></path>
+                  <path class="hmi-pipe hmi-return-pipe" d="M112 525 H440" marker-end="url(#hmiArrowReturn)"></path>
+                  <path class="hmi-exhaust-outer" d="M980 235 H1288"></path>
+                  <path class="hmi-exhaust-inner" d="M980 235 H1288" marker-end="url(#hmiArrowGas)"></path>
+                  <path class="hmi-power-line" d="M980 480 H1085" marker-end="url(#hmiArrowPower)"></path>
+                </g>
+                <g class="hmi-media-card hmi-hot-card">
+                  <rect x="48" y="148" width="285" height="122" rx="7"></rect>
+                  <text class="hmi-kicker" x="76" y="180">HEIZWASSER · AUS DEM DACHS</text>
+                  <text class="hmi-card-title" x="76" y="210">Dachs-Austritt</text>
+                  <text id="v95-overview-dachs-austritt" class="hmi-card-value" x="76" y="247">—</text>
+                </g>
+                <g class="hmi-media-card hmi-return-card">
+                  <rect x="48" y="470" width="285" height="122" rx="7"></rect>
+                  <text class="hmi-kicker" x="76" y="502">RÜCKLAUF · IN DEN DACHS</text>
+                  <text class="hmi-card-title" x="76" y="532">Dachs-Eintritt</text>
+                  <text id="v95-overview-dachs-eintritt" class="hmi-card-value" x="76" y="569">—</text>
+                </g>
+                <g id="hmiOverviewUnit" class="hmi-unit">
+                  <rect class="hmi-unit-shell" x="440" y="88" width="540" height="550" rx="8"></rect>
+                  <rect class="hmi-unit-header" x="440" y="88" width="540" height="76" rx="8"></rect>
+                  <text class="hmi-unit-title" x="476" y="126">DACHS</text>
+                  <text class="hmi-unit-subtitle" x="476" y="148">MSR2 · MOTOR / GENERATOR</text>
+                  <g id="hmiOverviewAlarmIndicator" class="hmi-svg-state normal" transform="translate(886 108)"><rect width="62" height="34" rx="4"></rect><text id="v95-overview-state-code" x="31" y="23" text-anchor="middle">OK</text></g>
+                  <rect class="hmi-machine-block" x="478" y="198" width="208" height="200" rx="5"></rect>
+                  <image class="hmi-engine-image" href="static/motor-horizontal.png?v=2" x="486" y="198" width="192" height="130" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></image>
+                  <circle class="hmi-generator" cx="582" cy="356" r="26"></circle>
+                  <path class="hmi-generator-mark" d="M566 356 H598 M582 340 V372"></path>
+                  <text class="hmi-component-label" x="582" y="384" text-anchor="middle">MOTOR / GENERATOR</text>
+                  <g class="hmi-primary-values">
+                    <text class="hmi-value-label" x="724" y="218">Betriebszustand</text><text id="v95-overview-motorstatus" class="hmi-value-main hmi-value-status" x="940" y="218" text-anchor="end">—</text>
+                    <text class="hmi-value-label" x="724" y="263">Wirkleistung Ist</text><text id="v95-overview-wirkleistung" class="hmi-value-main" x="940" y="263" text-anchor="end">—</text>
+                    <text class="hmi-value-label" x="724" y="308">Wirkleistung Soll</text><text id="v95-overview-wirkleistung-soll" class="hmi-value-main" x="940" y="308" text-anchor="end">—</text>
+                    <text class="hmi-value-label" x="724" y="353">Drehzahl</text><text id="v95-overview-drehzahl" class="hmi-value-main" x="940" y="353" text-anchor="end">—</text>
+                    <line class="hmi-value-rule" x1="724" y1="378" x2="940" y2="378"></line>
+                    <text class="hmi-value-label" x="724" y="415">Laufzeit seit Start</text><text id="v95-overview-betriebsstunden" class="hmi-value-secondary" x="940" y="415" text-anchor="end">—</text>
+                    <text class="hmi-value-label" x="724" y="450">Betriebsstunden gesamt</text><text id="v95-overview-betriebsstunden-gesamt" class="hmi-value-secondary" x="940" y="450" text-anchor="end">—</text>
+                    <text class="hmi-value-label" x="724" y="485">Starts</text><text id="v95-overview-starts" class="hmi-value-secondary" x="940" y="485" text-anchor="end">—</text>
+                  </g>
+                  <g class="hmi-temperature-row">
+                    <rect x="478" y="524" width="464" height="84" rx="5"></rect>
+                    <line x1="594" y1="524" x2="594" y2="608"></line><line x1="710" y1="524" x2="710" y2="608"></line><line x1="826" y1="524" x2="826" y2="608"></line>
+                    <text x="496" y="550">MOTORABGAS</text><text id="v95-overview-abgas-motor" class="hmi-temp-value" x="496" y="584">—</text>
+                    <text x="612" y="550">KAPSEL</text><text id="v95-overview-kapsel" class="hmi-temp-value" x="612" y="584">—</text>
+                    <text x="728" y="550">KÜHLWASSER</text><text id="v95-overview-kuehlwasser" class="hmi-temp-value" x="728" y="584">—</text>
+                    <text x="844" y="550">REGLER</text><text id="v95-overview-regler" class="hmi-temp-value" x="844" y="584">—</text>
+                  </g>
+                </g>
+                <g class="hmi-exhaust-card">
+                  <rect x="1030" y="108" width="310" height="100" rx="7"></rect>
+                  <text class="hmi-kicker" x="1056" y="140">ABGAS · NACH RUSSFILTER</text>
+                  <text class="hmi-card-title" x="1056" y="168">Dachs-Abgas</text>
+                  <text id="v95-overview-abgas-hka" class="hmi-card-value" x="1308" y="171" text-anchor="end">—</text>
+                </g>
+                <g class="hmi-network-card">
+                  <rect x="1085" y="350" width="265" height="278" rx="7"></rect>
+                  <rect class="hmi-network-head" x="1085" y="350" width="265" height="58" rx="7"></rect>
+                  <text class="hmi-network-title" x="1110" y="386">NETZ / STEUERUNG</text>
+                  <text class="hmi-network-label" x="1110" y="447">Spannung L1 / L2 / L3</text><text id="v95-overview-voltage" class="hmi-network-value" x="1325" y="470" text-anchor="end">—</text>
+                  <text class="hmi-network-label" x="1110" y="510">Strom L1 / L2 / L3</text><text id="v95-overview-current" class="hmi-network-value" x="1325" y="533" text-anchor="end">—</text>
+                  <text class="hmi-network-label" x="1110" y="573">Netzfrequenz</text><text id="v95-overview-frequency" class="hmi-network-value" x="1325" y="596" text-anchor="end">—</text>
+                </g>
+                <g class="hmi-sensor-card">
+                  <rect x="48" y="620" width="285" height="70" rx="7"></rect>
+                  <text class="hmi-kicker" x="70" y="647">EXTERNE HEIZKREISFÜHLER</text>
+                  <text class="hmi-sensor-label" x="70" y="674">VF</text><text id="v95-overview-vorlauf" class="hmi-sensor-value" x="112" y="674">—</text>
+                  <text class="hmi-sensor-label" x="205" y="674">RF</text><text id="v95-overview-ruecklauf" class="hmi-sensor-value" x="247" y="674">—</text>
+                </g>
+              </svg>
+            </div>
+            <div class="hmi-schematic-view hmi-technical-view" data-schematic-view="technical" hidden>
+              <svg class="hmi-diagram hmi-technical-diagram" viewBox="0 0 1480 820" role="img" aria-labelledby="technicalDiagramTitle technicalDiagramDesc">
+                <title id="technicalDiagramTitle">Technisches Dachs-Prozessschema</title>
+                <desc id="technicalDiagramDesc">Technische Darstellung der Messstellen, Medienwege, Motor-, Generator-, Regler- und Netzbaugruppen.</desc>
+                <defs>
+                  <marker id="techArrowHot95" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L13 6.5 L0 13 Z"></path></marker>
+                  <marker id="techArrowReturn95" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L13 6.5 L0 13 Z"></path></marker>
+                  <marker id="techArrowGas95" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L13 6.5 L0 13 Z"></path></marker>
+                  <marker id="techArrowPower95" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L12 6 L0 12 Z"></path></marker>
+                  <pattern id="techHoneycomb95" width="36" height="42" patternUnits="userSpaceOnUse">
+                    <path d="M12 1 H24 L30 11 L24 21 H12 L6 11 Z M-6 22 H6 L12 32 L6 42 H-6 L-12 32 Z M30 22 H42 L48 32 L42 42 H30 L24 32 Z"></path>
+                  </pattern>
+                </defs>
+                <rect class="hmi-canvas" x="1" y="1" width="1478" height="818" rx="10"></rect>
+                <g class="tech95-connectors" aria-hidden="true">
+                  <path class="tech95-pipe hot" d="M330 230 H78" marker-end="url(#techArrowHot95)"></path>
+                  <path class="tech95-pipe return" d="M78 594 H314" marker-end="url(#techArrowReturn95)"></path>
+                  <path class="tech95-exhaust-outer" d="M950 230 H1090 M1230 230 H1375"></path>
+                  <path class="tech95-exhaust-inner" d="M950 230 H1090 M1230 230 H1375" marker-end="url(#techArrowGas95)"></path>
+                  <path class="tech95-power" d="M950 480 H1080" marker-end="url(#techArrowPower95)"></path>
+                  <path class="tech95-signal" d="M565 326 H610 M830 326 H882 V545 H830 M570 585 H610"></path>
+                </g>
+                <g class="tech95-boundary-labels">
+                  <text x="62" y="182">DACHS-AUSTRITT</text><text id="v95-tech-dachs-austritt" class="tech95-boundary-value" x="62" y="210">—</text>
+                  <text x="62" y="548">DACHS-EINTRITT</text><text id="v95-tech-dachs-eintritt" class="tech95-boundary-value" x="62" y="576">—</text>
+                </g>
+                <g id="hmiTechnicalUnit" class="tech95-unit">
+                  <rect class="tech95-shell" x="330" y="82" width="620" height="654" rx="7"></rect>
+                  <rect class="tech95-head" x="330" y="82" width="620" height="68" rx="7"></rect>
+                  <text class="tech95-title" x="364" y="122">DACHS MSR2 · FUNKTIONSSCHEMA</text>
+                  <g id="hmiTechnicalAlarmIndicator" class="hmi-svg-state normal" transform="translate(852 99)"><rect width="66" height="34" rx="4"></rect><text id="v95-tech-state-code" x="33" y="23" text-anchor="middle">OK</text></g>
+                  <g class="tech95-module motor">
+                    <rect x="370" y="190" width="200" height="250" rx="5"></rect><text class="tech95-module-title" x="394" y="222">MOTOR</text>
+                    <image class="tech95-engine-image" href="static/motor-horizontal.png?v=2" x="378" y="230" width="184" height="110" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></image>
+                    <rect class="tech95-data-cell" x="390" y="350" width="160" height="38" rx="3"></rect>
+                    <text class="tech95-label" x="402" y="365">Drehzahl</text><text id="v95-tech-drehzahl" class="tech95-value" x="538" y="382" text-anchor="end">—</text>
+                  </g>
+                  <g class="tech95-module generator">
+                    <rect x="610" y="190" width="300" height="250" rx="5"></rect><text class="tech95-module-title" x="634" y="222">GENERATOR</text>
+                    <circle class="tech95-generator-symbol" cx="674" cy="294" r="42"></circle><text class="tech95-generator-letter" x="674" y="305" text-anchor="middle">G</text>
+                    <rect class="tech95-data-cell" x="734" y="246" width="160" height="62" rx="3"></rect>
+                    <text class="tech95-label" x="746" y="266">Wirkleistung Ist</text><text id="v95-tech-wirkleistung" class="tech95-value" x="882" y="294" text-anchor="end">—</text>
+                    <rect class="tech95-data-cell" x="734" y="316" width="160" height="62" rx="3"></rect>
+                    <text class="tech95-label" x="746" y="336">Wirkleistung Soll</text><text id="v95-tech-wirkleistung-soll" class="tech95-value" x="882" y="364" text-anchor="end">—</text>
+                    <text class="tech95-module-note" x="634" y="406">ELEKTRISCHE LEISTUNG · BLOCK 24 / 50</text>
+                  </g>
+                  <g class="tech95-module cooling">
+                    <rect x="370" y="480" width="200" height="210" rx="5"></rect><text class="tech95-module-title" x="394" y="512">KÜHLKREIS</text>
+                    <path class="tech95-exchanger" d="M394 548 H414 L428 532 L446 564 L464 532 L484 564 L502 532 L522 548 H546"></path>
+                    <rect class="tech95-data-cell" x="390" y="580" width="160" height="48" rx="3"></rect>
+                    <text class="tech95-label" x="402" y="597">Kühlwasser Motor</text><text id="v95-tech-kuehlwasser" class="tech95-value" x="538" y="620" text-anchor="end">—</text>
+                    <rect class="tech95-data-cell" x="390" y="636" width="160" height="48" rx="3"></rect>
+                    <text class="tech95-label" x="402" y="653">Dachs-Eintritt</text><text id="v95-tech-eintritt-inside" class="tech95-value" x="538" y="676" text-anchor="end">—</text>
+                  </g>
+                  <g class="tech95-module control">
+                    <rect x="610" y="480" width="300" height="210" rx="5"></rect><text class="tech95-module-title" x="634" y="512">REGLER / MSR2</text>
+                    <text class="tech95-label" x="634" y="544">Motorstatus</text><text id="v95-tech-motorstatus" class="tech95-value tech95-status-value" x="884" y="544" text-anchor="end">—</text>
+                    <line class="tech95-row-rule" x1="634" y1="554" x2="884" y2="554"></line>
+                    <text class="tech95-label" x="634" y="574">Kapseltemperatur</text><text id="v95-tech-kapsel" class="tech95-value" x="884" y="574" text-anchor="end">—</text>
+                    <line class="tech95-row-rule" x1="634" y1="584" x2="884" y2="584"></line>
+                    <text class="tech95-label" x="634" y="604">Reglerfühler</text><text id="v95-tech-regler" class="tech95-value" x="884" y="604" text-anchor="end">—</text>
+                    <line class="tech95-row-rule" x1="634" y1="614" x2="884" y2="614"></line>
+                    <text class="tech95-label" x="634" y="634">Laufzeit seit Start</text><text id="v95-tech-betriebsstunden" class="tech95-value" x="884" y="634" text-anchor="end">—</text>
+                    <line class="tech95-row-rule" x1="634" y1="644" x2="884" y2="644"></line>
+                    <text class="tech95-label" x="634" y="674">Betriebsstunden gesamt</text><text id="v95-tech-betriebsstunden-gesamt" class="tech95-value" x="884" y="674" text-anchor="end">—</text>
+                  </g>
+                </g>
+                <g class="tech95-exhaust-reading before-filter">
+                  <rect x="958" y="146" width="122" height="66" rx="4"></rect>
+                  <text class="tech95-reading-label" x="1019" y="165" text-anchor="middle">MOTORABGAS-</text>
+                  <text class="tech95-reading-label" x="1019" y="178" text-anchor="middle">TEMPERATUR</text>
+                  <text id="v95-tech-abgas-motor" class="tech95-reading-value" x="1019" y="201" text-anchor="middle">—</text>
+                </g>
+                <g class="tech95-filter">
+                  <rect x="1090" y="130" width="140" height="180" rx="5"></rect><text class="tech95-module-title" x="1160" y="158" text-anchor="middle">RUSSFILTER</text>
+                  <rect class="tech95-honeycomb-core" x="1106" y="176" width="108" height="120" rx="3"></rect>
+                  <rect class="tech95-honeycomb-pattern" x="1110" y="180" width="100" height="112" rx="2"></rect>
+                </g>
+                <g class="tech95-exhaust-reading after-filter">
+                  <rect x="1240" y="146" width="128" height="66" rx="4"></rect>
+                  <text class="tech95-reading-label" x="1304" y="165" text-anchor="middle">DACHS-ABGAS-</text>
+                  <text class="tech95-reading-label" x="1304" y="178" text-anchor="middle">TEMPERATUR</text>
+                  <text id="v95-tech-abgas-hka" class="tech95-reading-value" x="1304" y="201" text-anchor="middle">—</text>
+                </g>
+                <g id="v98-tech-soot-gauge" class="tech95-soot-gauge unknown">
+                  <text class="tech95-soot-label" x="1160" y="339" text-anchor="middle">RUSSFILTER-FÜLLSTAND · GESCHÄTZT</text>
+                  <rect class="tech95-soot-track" x="1090" y="350" width="140" height="16" rx="3"></rect>
+                  <rect id="v98-tech-soot-bar" class="tech95-soot-bar" x="1093" y="353" width="0" height="10" rx="2"></rect>
+                  <text id="v98-tech-soot-fill" class="tech95-soot-value" x="1160" y="389" text-anchor="middle">—</text>
+                  <text id="v98-tech-soot-source" class="tech95-soot-source" x="1160" y="406" text-anchor="middle">aus Motorabgas · 420–520 °C</text>
+                </g>
+                <g class="tech95-flue"><path d="M1375 270 V130 H1420 V270"></path><path d="M1362 130 H1433"></path><text x="1397" y="300" text-anchor="middle">ABGAS</text></g>
+                <g class="tech95-network">
+                  <rect x="1080" y="420" width="340" height="316" rx="5"></rect><rect class="tech95-network-head" x="1080" y="420" width="340" height="56" rx="5"></rect>
+                  <text class="tech95-network-title" x="1106" y="455">NETZ / ÜBERWACHUNG</text>
+                  <rect class="tech95-data-cell" x="1096" y="488" width="308" height="52" rx="3"></rect>
+                  <text class="tech95-label" x="1108" y="505">Spannung L1 / L2 / L3</text><text id="v95-tech-voltage" class="tech95-value" x="1390" y="530" text-anchor="end">—</text>
+                  <rect class="tech95-data-cell" x="1096" y="548" width="308" height="52" rx="3"></rect>
+                  <text class="tech95-label" x="1108" y="565">Strom L1 / L2 / L3</text><text id="v95-tech-current" class="tech95-value" x="1390" y="590" text-anchor="end">—</text>
+                  <rect class="tech95-data-cell" x="1096" y="608" width="308" height="52" rx="3"></rect>
+                  <text class="tech95-label" x="1108" y="625">Impedanz L1 / L2 / L3</text><text id="v95-tech-impedance" class="tech95-value" x="1390" y="650" text-anchor="end">—</text>
+                  <rect class="tech95-data-cell" x="1096" y="668" width="308" height="52" rx="3"></rect>
+                  <text class="tech95-label" x="1108" y="685">Netzfrequenz</text><text id="v95-tech-frequency" class="tech95-value" x="1390" y="710" text-anchor="end">—</text>
+                </g>
+                <g class="tech95-sensors">
+                  <circle cx="330" cy="230" r="16"></circle><text x="330" y="235" text-anchor="middle">T1</text>
+                  <circle cx="330" cy="594" r="16"></circle><text x="330" y="599" text-anchor="middle">T2</text>
+                  <circle cx="1020" cy="230" r="16"></circle><text x="1020" y="235" text-anchor="middle">T3</text>
+                  <circle cx="1300" cy="230" r="16"></circle><text x="1300" y="235" text-anchor="middle">T4</text>
+                  <circle cx="950" cy="480" r="16"></circle><text x="950" y="485" text-anchor="middle">P</text>
+                </g>
+                <g class="tech95-legend">
+                  <text x="64" y="760">MESSSTELLEN</text><text x="64" y="785">T1 Dachs-Austritt · T2 Dachs-Eintritt · T3 Motorabgas vor Filter · T4 Dachs-Abgas nach Filter · P elektrische Leistung</text>
+                  <text x="950" y="785" text-anchor="end">Schema nach Funktionsgruppen · nicht maßstäblich</text>
+                </g>
+              </svg>
+            </div>
+          </div>
+          <div class="plant-board" hidden aria-hidden="true">
+            <article class="plant-flow plant-flow-hot">
+              <span class="plant-flow-rail" aria-hidden="true">←</span>
+              <small>HEIZWASSER · AUS DEM DACHS</small>
+              <strong>Dachs-Austritt</strong>
+              <b id="board-value-dachs-austritt">—</b>
+              <em>berechnet aus Kühlwasser Motor + 3 K</em>
+            </article>
+            <article class="plant-flow plant-flow-return">
+              <span class="plant-flow-rail" aria-hidden="true">→</span>
+              <small>RÜCKLAUF · IN DEN DACHS</small>
+              <strong>Dachs-Eintritt</strong>
+              <b id="board-value-dachs-eintritt">—</b>
+              <em>Generator-/Eintrittsfühler</em>
+            </article>
+            <article class="plant-unit-card">
+              <header><div><small>MSR2 · BLOCK 22/24</small><h4>DACHS</h4></div><i aria-hidden="true"></i></header>
+              <table class="plant-data-table">
+                <tbody>
+                  <tr><th>Motorstatus</th><td id="board-value-motorstatus">—</td></tr>
+                  <tr><th>Wirkleistung Ist</th><td id="board-value-wirkleistung">—</td></tr>
+                  <tr><th>Wirkleistung Soll</th><td id="board-value-wirkleistung-soll">—</td></tr>
+                  <tr><th>Drehzahl</th><td id="board-value-drehzahl">—</td></tr>
+                  <tr><th>Laufzeit seit Start</th><td id="board-value-betriebsstunden">—</td></tr>
+                  <tr><th>Betriebsstunden gesamt</th><td id="board-value-betriebsstunden-gesamt">—</td></tr>
+                  <tr><th>Anzahl Starts</th><td id="board-value-starts">—</td></tr>
+                  <tr><th>Aktueller Fehlercode</th><td id="board-value-servicecode">—</td></tr>
+                </tbody>
+              </table>
+              <div class="plant-temperature-grid">
+                <div><small>Motorabgas</small><strong id="board-value-abgas-motor">—</strong></div>
+                <div><small>Kapsel</small><strong id="board-value-kapsel">—</strong></div>
+                <div><small>Kühlwasser Motor</small><strong id="board-value-kuehlwasser">—</strong></div>
+                <div><small>Reglerfühler</small><strong id="board-value-regler">—</strong></div>
+              </div>
+            </article>
+            <article class="plant-flow plant-flow-exhaust">
+              <span class="plant-flow-rail" aria-hidden="true">→</span>
+              <small>ABGAS · AUS DEM DACHS</small>
+              <strong>Dachs-Abgas</strong>
+              <b id="board-value-abgas-hka">—</b>
+              <em>Messung nach Rußfilter</em>
+            </article>
+            <article class="plant-sensor-card">
+              <small>EXTERNE HEIZKREISFÜHLER</small>
+              <dl><div><dt>Vorlauf VF</dt><dd id="board-value-vorlauf">—</dd></div><div><dt>Rücklauf RF</dt><dd id="board-value-ruecklauf">—</dd></div></dl>
+            </article>
+            <article class="plant-network-card">
+              <header><div><small>BLOCK 26 · 10 s</small><h4>STEUERUNG / NETZ</h4></div></header>
+              <table class="plant-data-table">
+                <tbody>
+                  <tr><th>Spannung L1 / L2 / L3</th><td id="board-value-voltage">—</td></tr>
+                  <tr><th>Strom L1 / L2 / L3</th><td id="board-value-current">—</td></tr>
+                  <tr><th>Impedanz L1 / L2 / L3</th><td id="board-value-impedance">—</td></tr>
+                  <tr><th>Netzfrequenz</th><td id="board-value-frequency">—</td></tr>
+                </tbody>
+              </table>
+              <p>Netzwerte werden im langsamen Zyklus nachgeladen.</p>
+            </article>
+          </div>
+          <div id="legacySchematicStage" class="legacy-schematic" hidden aria-hidden="true">
           <svg class="plant-schematic compact-schematic" viewBox="0 0 1180 600" role="img" aria-label="Technisches Schema mit Dachs, Vorlauf, Rücklauf, Abgas und Steuerung">
             <defs>
               <marker id="arrowCompactHot" markerUnits="userSpaceOnUse" markerWidth="18" markerHeight="18" refX="16" refY="9" orient="auto"><path d="M0,0 L18,9 L0,18 z"></path></marker>
@@ -330,7 +613,7 @@
         </section>
         <section class="panel">
           <div class="section-head"><div><p class="eyebrow">LOKALES ARCHIV AUF DEM PI</p><h3>Anlagen-Snapshots und Online-Wartungsprotokolle</h3><p class="muted">Jeder Wartungsstart erzeugt einen schreibfreien Gesamtzustand. Snapshot, Checkliste, Messwerte und Bemerkungen bleiben lokal in SQLite gespeichert.</p></div></div>
-          <div class="table-wrap"><table class="data-table"><thead><tr><th>Nr.</th><th>Erstellt</th><th>Status</th><th>Monteur</th><th>Betriebsstunden</th><th>Exporte</th></tr></thead><tbody id="maintenanceReportRows"><tr><td colspan="6" class="muted">Noch keine Berichte.</td></tr></tbody></table></div>
+          <div class="table-wrap"><table class="data-table"><thead><tr><th>Nr.</th><th>Erstellt</th><th>Status</th><th>Monteur</th><th>Betriebsstunden</th><th>Exporte</th><th>Aktionen</th></tr></thead><tbody id="maintenanceReportRows"><tr><td colspan="7" class="muted">Noch keine Berichte.</td></tr></tbody></table></div>
         </section>
         <section id="maintenanceEditor" class="panel maintenance-editor" hidden>
           <div class="section-head"><div><p class="eyebrow">WARTUNGSPROTOKOLL <span id="maintenanceReportNumber"></span></p><h3 id="maintenanceReportTitle">Bericht bearbeiten</h3><p id="maintenanceReportMeta" class="muted"></p></div><div class="report-export-actions"><a id="maintenanceExportHtml" class="button-link" href="#">HTML</a><a id="maintenanceExportPdf" class="button-link" href="#">PDF</a><a id="maintenanceExportJson" class="button-link" href="#">JSON</a></div></div>
@@ -350,6 +633,20 @@
         </section>
       </section>
 
+      <section id="faultCatalogView" class="app-view" hidden>
+        <header class="page-head">
+          <div><p class="eyebrow">FEHLERKATALOG</p><h2>Servicecodes und Klartexte</h2><p class="muted">Eigener Open-Dachs-Katalog mit deutschen Meldungstiteln. Der lokale Diagnosekatalog auf dem Pi ergänzt bei vorhandenen Daten Ursachen und Maßnahmen.</p></div>
+          <div class="page-head-actions"><span id="serviceCatalogStatus" class="muted">Integrierter Klartextkatalog wird geprüft.</span></div>
+        </header>
+        <section class="panel service-catalog-panel">
+          <div class="section-head">
+            <div><p class="eyebrow">SUCHE</p><h3>Fehler schnell finden</h3><p class="muted">Suche nach Nummer, Titel, Ursache oder Maßnahme.</p></div>
+            <label class="service-catalog-search">Fehler suchen<input id="serviceCatalogSearch" type="search" placeholder="z. B. 163 oder Leistung zu klein"></label>
+          </div>
+          <div id="serviceCatalogResults" class="service-catalog-results"><p class="muted">Katalog wird geladen …</p></div>
+        </section>
+      </section>
+
       <section id="settingsView" class="app-view" hidden>
         <header class="page-head"><div><p class="eyebrow">MSR2 REGISTER</p><h2>Einstellungen und Register</h2><p class="muted">Regler-CPU und beide Netzüberwachungs-CPUs besitzen getrennte Blockräume. Änderungen werden erst nach Admin-Login, Auth-Level und explizitem Hardware-Schalter geschrieben.</p></div><span id="settingsRoleHint" class="status-pill neutral"></span></header>
         <section id="writeControls" class="panel write-controls" hidden>
@@ -364,6 +661,20 @@
             <div class="auth-preview-actions"><button id="authPreviewApply" type="button" disabled>Berechnete PW4 übernehmen</button><span id="authPreviewFormula" class="muted">Formel: letzte 4 Stellen des MSR2-Tagescodes</span></div>
           </div>
         </section>
+        <section id="maintenanceModeControls" class="panel maintenance-mode-controls" hidden>
+          <div><p class="eyebrow">WARTUNGSABSCHLUSS</p><h3>Testmodus</h3><p class="muted">Das Umschalten selbst schreibt nichts in den Regler. Die Einstellung wird lokal auf dem Pi gespeichert und bleibt nach einem Neustart erhalten.</p></div>
+          <label class="check-label maintenance-mode-toggle"><input id="maintenanceTestMode" type="checkbox" checked> Testmodus aktivieren (kein Schreiben beim Wartungsabschluss)</label>
+          <div id="maintenanceModeStatus" class="write-guard-status ok">Testmodus aktiv: Wartungsberichte werden ausschließlich lokal abgeschlossen. Der Regler bleibt unverändert.</div>
+        </section>
+        <section id="sootFilterControls" class="panel soot-filter-controls">
+          <div><p class="eyebrow">RUSSFILTER</p><h3>Geschätzter Füllstand</h3><p class="muted">Lineare Schätzung aus der Motorabgastemperatur. Unterhalb der 0-%-Temperatur werden 0 %, oberhalb der 100-%-Temperatur 100 % angezeigt. Diese lokale Anzeige schreibt niemals in den Regler.</p></div>
+          <form id="sootFilterSettingsForm" class="soot-filter-form">
+            <label>0 % bei<input id="sootFilterZeroTemperature" type="number" min="100" max="790" step="1" inputmode="decimal" required><span>°C</span></label>
+            <label>100 % bei<input id="sootFilterFullTemperature" type="number" min="110" max="800" step="1" inputmode="decimal" required><span>°C</span></label>
+            <button id="sootFilterSave" class="primary" type="submit">Kennlinie speichern</button>
+          </form>
+          <div id="sootFilterSettingsStatus" class="soot-filter-settings-status muted">Standard: 420 °C = 0 % · 520 °C = 100 % · Grün &lt; 60 % · Orange 60–89 % · Rot ab 90 %.</div>
+        </section>
         <section id="accountControls" class="panel account-controls" hidden><div><p class="eyebrow">ADMIN-ZUGANG</p><h3>Eigenes Admin-Passwort ändern</h3><p class="muted">Mindestens 12 Zeichen. Danach wird die Admin-Sitzung beendet und eine neue Anmeldung verlangt.</p></div><form id="passwordForm" class="password-form"><label>Bisheriges Admin-Passwort<input id="currentWebPassword" type="password" autocomplete="current-password" required></label><label>Neues Admin-Passwort<input id="newWebPassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Admin-Passwort ändern</button></form></section>
         <section id="guestAccountControls" class="panel account-controls" hidden><div><p class="eyebrow">GAST-ZUGANG</p><h3>Gastpasswort festlegen</h3><p class="muted">Das Gastkonto ist ausschließlich lesend und kann sein Passwort nicht selbst ändern. Eine Änderung beendet alle offenen Gastsitzungen.</p></div><form id="guestPasswordForm" class="password-form"><label>Aktuelles Admin-Passwort<input id="guestPasswordAdminCurrent" type="password" autocomplete="current-password" required></label><label>Neues Gastpasswort<input id="newGuestPassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Gastpasswort ändern</button></form></section>
         <div id="settingsTabs" class="register-tabs" role="tablist"></div>
@@ -376,7 +687,68 @@
       </section>
     </main>
   </div>
+  <div id="dashboardEditor" class="modal-backdrop" hidden>
+    <section class="modal-card dashboard-editor" role="dialog" aria-modal="true" aria-labelledby="dashboardEditorTitle">
+      <div class="section-head"><div><p class="eyebrow">ÜBERSICHT ANPASSEN</p><h3 id="dashboardEditorTitle">Kacheln auswählen und sortieren</h3><p class="muted">Ziehen oder mit den Pfeilen verschieben. Mit + kannst du alle gemappten Anlagenwerte hinzufügen.</p></div><button id="dashboardClose" class="icon-button" type="button" aria-label="Schließen">×</button></div>
+      <div class="dashboard-editor-layout">
+        <section><h4>Angezeigte Kacheln <span id="dashboardCardCount" class="muted"></span></h4><div id="dashboardCardList" class="dashboard-card-list"></div></section>
+        <section><h4>+ Wert hinzufügen</h4><label>Wert oder Block suchen<input id="dashboardFieldSearch" type="search" placeholder="Temperatur, Betriebsstunden, Block 24 …"></label><div id="dashboardFieldList" class="dashboard-field-list"></div></section>
+      </div>
+      <div class="dashboard-editor-actions"><button id="dashboardReset" type="button">Standard wiederherstellen</button><span class="muted">Maximal 24 Kacheln und 12 zusätzliche Blöcke.</span><button id="dashboardCancel" type="button">Abbrechen</button><button id="dashboardSave" class="primary" type="button">Speichern</button></div>
+    </section>
+  </div>
+  <div id="changelogModal" class="modal-backdrop" hidden>
+    <section class="modal-card changelog-modal" role="dialog" aria-modal="true" aria-labelledby="changelogTitle" aria-describedby="changelogIntro">
+      <div class="section-head changelog-head">
+        <div><p class="eyebrow">OPEN DACHS MANAGER</p><h3 id="changelogTitle">Änderungsverlauf</h3><p id="changelogIntro" class="muted">Was sich seit der ersten öffentlichen Beta direkt an der Anlage geändert hat.</p></div>
+        <button id="changelogClose" class="icon-button" type="button" aria-label="Änderungsverlauf schließen">×</button>
+      </div>
+      <div class="changelog-list">
+        <article class="changelog-entry current">
+          <header><strong>V3 1.0</strong><time datetime="2026-08-09">09.08.2026</time><span>Aktuell</span></header>
+          <ul><li>Erster stabiler öffentlicher 1.0-Stand mit der vollständig integrierten Bedien-, Überwachungs- und Wartungsoberfläche.</li><li>Serielle Schreibsicherheit bleibt unverändert über Freigabe, Authentifizierung, ACK, Readback und Audit abgesichert.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 0.9.10</strong><time datetime="2026-08-09">09.08.2026</time></header>
+          <ul><li>Motorbild nach der charakteristischen kompakten Dachs-Bauform neu erstellt.</li><li>Schwarzer Einzylindermotor mit offener Schwungscheibe und silbernen Seitendeckeln in beiden HMI-Ansichten.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 0.9.9</strong><time datetime="2026-08-08">08.08.2026</time></header>
+          <ul><li>Eigenständige generische Motorillustration als liegendes stationäres Einzylinder-Aggregat.</li><li>Motorbild passend freigestellt und in Anlagenübersicht sowie technisches Funktionsschema integriert.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 0.9.8</strong><time datetime="2026-08-08">08.08.2026</time></header>
+          <ul><li>Rußfilter im technischen Bild mit echter Wabenstruktur sowie klaren Temperaturmessstellen vor und nach dem Filter.</li><li>Geschätzter Rußfilter-Füllstand aus der Motorabgastemperatur mit grüner, oranger und roter Anzeige.</li><li>0-%- und 100-%-Temperatur als dauerhaft gespeicherte lokale Einstellung.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 0.9.7</strong><time datetime="2026-08-08">08.08.2026</time></header>
+          <ul><li>Technische Ansicht neu ausgerichtet: jede Beschriftung steht jetzt eindeutig in derselben Zeile wie ihr Livewert.</li><li>Kapseltemperatur zum Regler verschoben, Kühlkreis und Netzwerte fachlich eindeutiger beschriftet.</li><li>Versionsnummer öffnet diesen Änderungsverlauf direkt in der Website.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 0.9.6</strong><time datetime="2026-08-08">08.08.2026</time></header>
+          <ul><li>Fehlerkatalog als eigener Haupt-Tab.</li><li>Aktive Anlagenmeldung springt direkt zum passenden Fehlercode.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 0.9.5</strong><time datetime="2026-08-08">08.08.2026</time></header>
+          <ul><li>Neue Ansichten „Anlage“ und „Technisch“ mit klaren Medienwegen.</li><li>222 Fehlerklartexte im eigenen Open-Dachs-Katalog; zum Beispiel SC 163 · Leistung zu klein.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 0.9.4</strong><time datetime="2026-08-08">08.08.2026</time></header>
+          <ul><li>Sollwert-Readback prüft gezielt die geschriebenen Bytes und toleriert gleichzeitig laufende Reglerwerte.</li><li>Bis zu vier Readback-Versuche mit vollständigem Audit.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 0.9.3</strong><time datetime="2026-08-08">08.08.2026</time></header>
+          <ul><li>Wartungsrestzeit im Kopf und Wirkleistung Ist/Soll ganz oben.</li><li>Dashboard-Kacheln frei auswählen, hinzufügen und sortieren.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 0.9.2</strong><time datetime="2026-08-08">08.08.2026</time></header>
+          <ul><li>Offene und abgeschlossene Wartungsberichte nach Sicherheitsabfrage löschbar.</li></ul>
+        </article>
+      </div>
+      <footer class="changelog-footer"><span>Vollständige technische Details stehen weiterhin in <code>CHANGELOG.md</code>.</span><button id="changelogDone" class="primary" type="button">Schließen</button></footer>
+    </section>
+  </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=25"></script>
+  <script src="static/app.js?v=33"></script>
 </body>
 </html>
