@@ -134,17 +134,16 @@ input:focus, select:focus, button:focus-visible { outline:3px solid color-mix(in
 .hmi-unit-header { fill:#315e56; stroke:#264c46; stroke-width:2; }
 .hmi-unit-title { fill:#fff; font-size:27px; font-weight:850; letter-spacing:.08em; }
 .hmi-unit-subtitle { fill:#d4e2df; font-size:11px; font-weight:750; letter-spacing:.08em; }
-.hmi-machine-block { fill:#899597; stroke:#485355; stroke-width:2; }
-.hmi-engine-lines { fill:none; stroke:#d8dedf; stroke-width:4; opacity:.75; }
-.hmi-engine-image,.tech95-engine-image { filter:drop-shadow(0 3px 2px rgba(20,31,31,.28)); }
-.hmi-generator { fill:#536063; stroke:#e0e5e5; stroke-width:2; }
-.hmi-generator-mark { fill:none; stroke:#eef3f3; stroke-width:3; }
-.hmi-component-label { fill:#eef2f2; font-size:10px; font-weight:800; letter-spacing:.05em; }
-.hmi-value-label { fill:#536164; font-size:12px; font-weight:650; }
+.hmi-assembly-frame,.tech95-assembly-frame { fill:#fff; stroke:#879496; stroke-width:1.5; }
+.hmi-assembly-image,.tech95-assembly-image { image-rendering:auto; }
+.hmi-assembly-captions text,.tech95-assembly-captions text { fill:#425154; font-size:10px; font-weight:850; letter-spacing:.1em; }
+.hmi-assembly-captions line,.tech95-assembly-captions line { stroke:#738184; stroke-width:1.5; }
+.hmi-primary-values .hmi-data-grid { fill:#f5f7f7; stroke:#8b989a; stroke-width:1.5; }
+.hmi-primary-values line { stroke:#c1cbcc; stroke-width:1; }
+.hmi-value-label { fill:#536164; font-size:8px; font-weight:750; letter-spacing:.025em; }
 .hmi-value-main { fill:#152326; font-size:20px; font-weight:850; }
 .hmi-value-secondary { fill:#263639; font-size:15px; font-weight:800; }
-.hmi-value-status { font-size:14px; }
-.hmi-value-rule { stroke:#a3afb0; stroke-width:1; }
+.hmi-value-status { font-size:12px; }
 .hmi-temperature-row rect { fill:#bec8c9; stroke:#748184; stroke-width:1.5; }
 .hmi-temperature-row line { stroke:#9ca8aa; stroke-width:1; }
 .hmi-temperature-row text:not(.hmi-temp-value) { fill:#586568; font-size:9px; font-weight:800; letter-spacing:.04em; }
@@ -172,11 +171,9 @@ input:focus, select:focus, button:focus-visible { outline:3px solid color-mix(in
 .tech95-head { fill:#35474a; stroke:#2c3b3e; stroke-width:2; }
 .tech95-title { fill:#fff; font-size:18px; font-weight:850; letter-spacing:.07em; }
 .tech95-module rect,.tech95-filter rect:first-child,.tech95-network > rect:first-child { fill:#f3f5f5; stroke:#879496; stroke-width:2; }
-.tech95-module .tech95-data-cell,.tech95-network .tech95-data-cell { fill:#fafbfb; stroke:#cbd4d5; stroke-width:1; }
+.tech95-module .tech95-data-cell,.tech95-assembly-data .tech95-data-cell,.tech95-network .tech95-data-cell { fill:#fafbfb; stroke:#cbd4d5; stroke-width:1; }
 .tech95-module-title { fill:#48575a; font-size:12px; font-weight:850; letter-spacing:.08em; }
 .tech95-engine { fill:none; stroke:#788588; stroke-width:4; }
-.tech95-generator-symbol { fill:#d7ddde; stroke:#637174; stroke-width:3; }
-.tech95-generator-letter { fill:#445154; font-size:28px; font-weight:850; }
 .tech95-label { fill:#667477; font-size:11px; font-weight:650; }
 .tech95-value { fill:#1b282b; font-size:15px; font-weight:850; font-variant-numeric:tabular-nums; }
 .tech95-status-value { font-size:12px; }
@@ -451,6 +448,30 @@ input:focus, select:focus, button:focus-visible { outline:3px solid color-mix(in
 .account-controls { display:grid; grid-template-columns:minmax(260px, 1fr) 2fr; align-items:end; gap:16px; }
 .account-controls h3 { margin:0; }.account-controls p { margin:5px 0 0; }
 .password-form { display:grid; grid-template-columns:1fr 1fr auto; align-items:end; gap:10px; }
+.system-tabs { margin:0 0 18px; padding:7px; border:1px solid var(--line); border-radius:7px; background:var(--surface); }
+.system-create-panel,.api-settings-panel { display:grid; grid-template-columns:minmax(260px,1fr) 2fr; align-items:end; gap:18px; }
+.system-create-panel h3,.api-settings-panel h3,.token-secret-panel h3,.api-reference h3 { margin:0; }
+.system-create-panel p,.api-settings-panel p,.token-secret-panel p { margin:5px 0 0; }
+.system-create-form { display:grid; grid-template-columns:1fr 1fr 1.35fr auto; align-items:end; gap:10px; }
+.api-settings-form { display:grid; grid-template-columns:minmax(250px,1fr) 150px auto; align-items:end; gap:10px; }
+.api-settings-form .write-guard-status { grid-column:1 / -1; }
+.token-create-form { display:grid; grid-template-columns:1.2fr 2fr auto; align-items:end; gap:12px; }
+.token-create-form fieldset { display:flex; align-items:center; gap:12px; min-height:42px; margin:0; padding:7px 12px; border:1px solid var(--line); border-radius:4px; }
+.token-create-form legend { padding:0 5px; color:var(--muted); font-size:10px; font-weight:750; text-transform:uppercase; }
+.token-secret-panel { display:grid; grid-template-columns:minmax(260px,1fr) minmax(300px,2fr) auto; align-items:center; gap:18px; border-color:#d3a838; background:#fff9e8; }
+.token-secret-panel code { overflow:auto; padding:12px; border:1px solid #e2c66e; border-radius:4px; background:#fff; color:#5b4300; font-size:13px; user-select:all; }
+.system-table td small { display:block; margin-top:3px; color:var(--muted); }
+.system-table select,.system-table input[type="password"] { min-width:140px; }
+.table-actions { display:flex; flex-wrap:wrap; gap:6px; }
+.table-actions button { min-height:32px; padding:0 9px; }
+.scope-list { display:flex; flex-wrap:wrap; gap:7px; min-width:210px; }
+.scope-list .check-label { min-height:30px; padding:4px 7px; }
+.api-reference { display:grid; gap:14px; }
+.api-reference > code { width:max-content; max-width:100%; overflow:auto; padding:9px 11px; border:1px solid var(--line); border-radius:4px; background:var(--surface-alt); }
+.api-reference dl { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin:0; }
+.api-reference dl div { padding:10px 12px; border:1px solid var(--line); border-radius:4px; background:var(--surface-alt); }
+.api-reference dt { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; font-weight:800; }
+.api-reference dd { margin:4px 0 0; color:var(--muted); font-size:12px; }
 .check-label { display:flex; align-items:center; align-self:end; min-height:38px; color:var(--red); font-size:13px; }
 .check-label input { min-height:auto; width:18px; margin:0 8px 0 0; accent-color:var(--red); }
 .reserve-toggle { color:var(--muted); white-space:nowrap; font-size:12px; }
@@ -616,6 +637,8 @@ body.modal-open { overflow:hidden; }
 @media (max-width:1100px) { .metric-grid { grid-template-columns:repeat(3,1fr); }.write-controls { grid-template-columns:1fr 1fr; }.auth-preview-values { grid-template-columns:repeat(2, minmax(0,1fr)); }.history-control-grid { grid-template-columns:1fr 1fr; }.history-actions { align-items:end; }.account-controls,.soot-filter-controls { grid-template-columns:1fr; }.password-form { grid-template-columns:1fr 1fr; }.register-grid { grid-template-columns:repeat(2,1fr); }.mc-io-grid { grid-template-columns:1fr 1fr; }.run-summary-grid { grid-template-columns:repeat(2,1fr); }.snapshot-grid { grid-template-columns:1fr; }.maintenance-columns,.maintenance-completion { grid-template-columns:1fr; }.maintenance-completion-fields { grid-template-columns:1fr 1fr; }.maintenance-comparison-grid { grid-template-columns:repeat(3,1fr); }.topbar-inner { gap:13px; }.brand { min-width:150px; }.brand h1 { font-size:19px; }.topbar-status { gap:5px; }.user-badge { display:none; }.plant-board { grid-template-columns:minmax(150px,.72fr) minmax(300px,1.35fr) minmax(180px,.83fr); }.plant-flow { padding:14px; }.plant-flow b { font-size:21px; }.plant-network-card .plant-data-table th,.plant-network-card .plant-data-table td { padding:10px 8px; font-size:10px; } }
 @media (max-width:780px) { .topbar-inner { min-height:150px; flex-wrap:wrap; align-content:center; gap:6px 14px; padding:10px 0; }.brand { width:100%; }.main-tabs { order:3; width:100%; min-height:42px; overflow:auto; }.main-tabs button { flex:0 0 auto; min-height:36px; padding:0 10px; }.topbar-status { order:2; width:100%; overflow:auto; }.shell { width:min(100% - 20px, 1560px); padding-top:20px; }.page-head { flex-direction:column; gap:12px; }.page-head h2 { font-size:26px; }.two-column { grid-template-columns:1fr; }.metric-grid, .metric-grid.compact { grid-template-columns:repeat(2,1fr); }.power-overview-grid { grid-template-columns:1fr; }.power-target-input { grid-template-columns:minmax(80px,1fr) auto; }.power-target-input button { grid-column:1 / -1; }.register-grid { grid-template-columns:1fr; }.write-controls,.maintenance-mode-controls { grid-template-columns:1fr; }.auth-preview-values { grid-template-columns:1fr 1fr; }.auth-preview-head, .auth-preview-actions { flex-direction:column; align-items:stretch; }.history-control-grid { grid-template-columns:1fr; }.history-actions { flex-wrap:wrap; }.password-form,.soot-filter-form { grid-template-columns:1fr; }.plant-schematic { min-height:220px; }.schematic-toolbar { width:100%; justify-content:space-between; flex-wrap:wrap; gap:8px; }.schematic-stage .compact-schematic { min-height:220px; }.compact-unit-title { font-size:18px; }.compact-unit-label, .compact-unit-caption { font-size:11px; }.compact-unit-value { font-size:13px; }.compact-status { font-size:14px; }.compact-pipe-label { font-size:9px; }.compact-pipe-value, .compact-gas-value { font-size:13px; }.compact-gas-label { font-size:8px; }.compact-diagram-title { font-size:14px; }.compact-diagram-note { font-size:8px; }.compact-condenser-title { font-size:15px; }.compact-condenser-subtitle, .compact-condenser-foot { font-size:8px; }.compact-sensor-labels text { font-size:9px; }.schematic-node text { font-size:11px !important; }.schematic-node .node-title { font-size:14px !important; }.schematic-node .node-value { font-size:13px !important; }.schematic-label { display:none; }.dashboard-editor-layout,.service-catalog-detail { grid-template-columns:1fr; }.dashboard-editor-actions { align-items:stretch; flex-direction:column; }.dashboard-editor-actions > span { margin:0; }.service-catalog-search { width:100%; }.service-catalog-entry summary { grid-template-columns:72px minmax(160px,1fr); }.service-catalog-entry summary small { grid-column:2; } }
 @media (max-width:480px) { .metric-grid, .metric-grid.compact { grid-template-columns:1fr; }.panel { padding:16px; }.topbar-status .status-pill { max-width:120px; overflow:hidden; }.page-head-actions { flex-wrap:wrap; } }
+@media (max-width:1100px) { .system-create-panel,.api-settings-panel { grid-template-columns:1fr; }.system-create-form { grid-template-columns:1fr 1fr; }.api-settings-form { grid-template-columns:1fr 160px; }.token-create-form { grid-template-columns:1fr 1fr; }.token-secret-panel { grid-template-columns:1fr; }.api-reference dl { grid-template-columns:1fr; } }
+@media (max-width:780px) { .system-create-form,.api-settings-form,.token-create-form { grid-template-columns:1fr; }.token-create-form fieldset { flex-wrap:wrap; }.system-table { min-width:840px; } }
 @media (max-width:1100px) {
   .hmi-message-grid { grid-template-columns:1fr 1fr; }
   .hmi-message-counters { grid-column:1 / -1; }

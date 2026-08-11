@@ -83,6 +83,7 @@ Der Installer legt folgende Komponenten an:
 | `/var/lib/open-dachs-manager/maintenance_settings.json` | persistenter Wartungs-Testmodus nach der ersten Änderung |
 | `/var/lib/open-dachs-manager/dashboard_settings.json` | gemeinsame Auswahl und Reihenfolge der Übersichtskacheln |
 | `/var/lib/open-dachs-manager/soot_filter_settings.json` | lokale Temperaturkennlinie der geschätzten Rußfilteranzeige |
+| `/var/lib/open-dachs-manager/api_settings.json` | globale API-Schreibfreigabe und serverseitiges Auth-Level; entsteht erst nach einer Änderung |
 | `/var/lib/open-dachs-manager/servicecodes_de.properties` | optionale lokale Diagnoseergänzung für Ursachen und Maßnahmen |
 | `/run/open-dachs-manager/serial.sock` | Socket des gemeinsamen Serialworkers |
 | `/etc/systemd/system/open-dachs-manager-*.service` | systemd-Dienste |
@@ -114,8 +115,11 @@ Open-Source-Paket. Die Code-Klartexte funktionieren auch ohne diese Datei.
 
 ## Reverse Proxy und Subpfad
 
-Direktbetrieb bleibt standardmäßig unter `http://<pi>:8084/`. Soll ein Proxy
-den Präfix an das Backend weiterreichen, wird er bei der Installation gesetzt:
+Direktbetrieb und EDOMI-API bleiben standardmäßig unter
+`http://<pi>:8084/`. Der eingebaute Dienst terminiert absichtlich kein TLS;
+HTTPS wird bei Bedarf von einem vorgeschalteten nginx übernommen. Soll ein
+Proxy den Präfix an das Backend weiterreichen, wird er bei der Installation
+gesetzt:
 
 ```bash
 sudo ./install.sh --base-path /dachs
@@ -138,16 +142,25 @@ sudo journalctl -u open-dachs-manager-web.service | \
   sed -n '/Web-Erstzugang/,+2p'
 ```
 
-Das anfängliche Admin-Passwort anschließend in den Web-Einstellungen ändern.
-Der Admin kann dort außerdem das Gastpasswort festlegen. Das Gastkonto ist
-nur lesend und kann sein Passwort nicht selbst ändern. Eine Änderung des
-Gastpassworts beendet alle offenen Gastsitzungen. Im Datenverzeichnis werden
-Passwort-Hashes und keine Klartextpasswörter gespeichert.
+Das anfängliche Admin-Passwort anschließend unter
+`System → Benutzer & Berechtigungen` ändern. Dort können Administratoren
+weitere Admin- oder Lesekonten anlegen, Rollen und Aktivstatus verwalten und
+Passwörter zurücksetzen. Jeder angemeldete Benutzer kann sein eigenes Passwort
+ändern. Relevante Kontoänderungen beenden die offenen Sitzungen des Kontos. Im
+Datenverzeichnis werden Passwort-Hashes und keine Klartextpasswörter
+gespeichert.
 
-Der Wartungsabschluss startet im Testmodus. Unter `Einstellungen → Testmodus`
+API-Tokens werden unter `System → API & Tokens` erzeugt. Das vollständige
+Token wird nur einmal angezeigt; in SQLite bleibt ausschließlich sein Hash.
+Bei einer Neuinstallation ist die globale API-Schreibfreigabe aus. Eine später
+absichtlich geänderte Einstellung wird in `api_settings.json` gespeichert und
+bleibt bei Updates erhalten.
+
+Der Wartungsabschluss startet im Testmodus. Unter `System → Wartungsabschluss`
 kann ein Admin später zwischen rein lokalem Testabschluss und kontrolliertem
 Reglerabschluss umschalten. Die Auswahl bleibt bei Updates und Neustarts
-erhalten; das Umschalten selbst schreibt nicht in den Regler.
+erhalten; auch eine ältere, ausschließlich per Environment gesetzte Auswahl
+wird beim ersten Update übernommen. Das Umschalten selbst schreibt nicht in den Regler.
 
 ## Migration von der Entwicklungsinstallation
 

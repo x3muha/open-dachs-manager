@@ -44,6 +44,55 @@ curl http://127.0.0.1:8084/healthz
 `doctor` muss `transport=serial-worker` und einen verfügbaren Worker-Socket
 melden.
 
+Block 22 und 24 werden in einem Zielabstand von 0,75 Sekunden gelesen. Der
+tatsächliche Abstand kann nur dann größer werden, wenn die seriellen Antworten
+zusammen länger dauern. Block 20 und die weiteren langsam veränderlichen
+Blöcke werden alle zehn Sekunden ergänzt.
+
+Dauerhaft in SQLite landen weiterhin 21 ausgewählte Betriebs- und Messwerte
+aus Block 22 und 24 gemeinsam in genau einer kompakten Snapshot-Zeile je
+schnellem Zyklus. Zusätzlich zeichnet die adaptive Historie alle regulär
+gelesenen Livewerte zunächst mit voller Auflösung auf. Maßgeblich ist
+`Hka_Mw1.usDrehzahl`: Ab einer Drehzahl größer null bleiben die Stunde vor dem
+Start, die vollständige Laufzeit und eine Stunde Nachlauf hochaufgelöst
+erhalten. Ruhige Zeiträume bei Drehzahl null werden nach 24 Stunden in
+15-Minuten-Fenster mit Anfang, Ende, Minimum, Maximum, Mittelwert,
+Änderungszahl und Stichprobenzahl verdichtet. Dadurch bleiben Start- und
+Stopvorgänge untersuchbar, ohne jahrelang jede unveränderte Sekunde abzulegen.
+
+Die Liveanzeige enthält weiterhin zusätzliche Werte. Ein optionaler
+Mindestabstand für Historien-Snapshots kann in
+`/etc/open-dachs-manager/open-dachs-manager.env` gesetzt werden:
+
+```text
+OPEN_DACHS_HISTORY_INTERVAL=0
+```
+
+`0` bedeutet: jeden erfolgreichen Livezyklus speichern. Ein positiver Wert
+drosselt nur die klassische 21-Werte-Historie, nicht die Liveanzeige oder die
+adaptive Historie.
+
+## Lokale EDOMI-API
+
+Die Maschinen-API liegt unter `/api/v1/` beziehungsweise unter dem
+konfigurierten Base Path. Sie verwendet Bearer-Tokens, die ausschließlich im
+Adminbereich **System → API & Tokens** erstellt werden. Das vollständige Token
+wird nur einmal beim Erstellen gezeigt; in der Datenbank liegt nur sein
+SHA-256-Hash.
+
+Lesen und Historie sind über getrennte Berechtigungen steuerbar. Schreiben ist
+zusätzlich global deaktiviert und muss im Systembereich absichtlich
+freigeschaltet werden. Die API nimmt nur logische Block-/Feld-/Wert-Aktionen
+entgegen; Authentifizierung, PW4-Berechnung, Schreiben, ACK, Readback und Audit
+bleiben vollständig im Server. Jeder Schreibaufruf benötigt eine eindeutige
+`request_id`, damit EDOMI-Wiederholungen nicht doppelt schreiben. Der Server
+reserviert sie atomar pro Token. Dieselbe ID mit anderem Inhalt oder während
+einer noch nicht eindeutig abgeschlossenen Aktion ergibt HTTP 409.
+
+Der eingebaute Dienst bleibt bewusst bei lokalem HTTP. TLS endet – falls
+benötigt – am vorgeschalteten nginx. Port 8084 nicht direkt ins Internet
+weiterleiten.
+
 Bei konfiguriertem `OPEN_DACHS_BASE_PATH=/dachs` lauten Oberfläche und
 Healthcheck intern `http://127.0.0.1:8084/dachs/` beziehungsweise
 `/dachs/healthz`. Ein Reverse Proxy muss den Präfix in diesem Modus an den

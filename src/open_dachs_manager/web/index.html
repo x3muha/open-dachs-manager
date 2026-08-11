@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="open-dachs-base-path" content="__OPEN_DACHS_BASE_PATH__">
   <title>Open Dachs Manager</title>
-  <link rel="stylesheet" href="static/style.css?v=25">
+  <link rel="stylesheet" href="static/style.css?v=27">
 </head>
 <body>
   <div id="loginView" class="login-shell">
     <div class="login-card">
-      <p class="eyebrow">OPEN · LOCAL · SERIAL · <button class="version-changelog-button" type="button" data-open-changelog aria-haspopup="dialog">V3 1.0</button></p>
+      <p class="eyebrow">OPEN · LOCAL · SERIAL · <button class="version-changelog-button" type="button" data-open-changelog aria-haspopup="dialog">V3 1.1.0</button></p>
       <h1>Open Dachs Manager</h1>
       <p class="muted">Lokale Überwachung und geschützte Einstellungen.</p>
       <form id="loginForm">
@@ -26,7 +26,7 @@
     <header class="topbar">
       <div class="topbar-inner">
         <div class="brand">
-          <p class="eyebrow">MSR2 · SERIAL · <button class="version-changelog-button" type="button" data-open-changelog aria-haspopup="dialog">V3 1.0</button></p>
+          <p class="eyebrow">MSR2 · SERIAL · <button class="version-changelog-button" type="button" data-open-changelog aria-haspopup="dialog">V3 1.1.0</button></p>
           <h1>Open Dachs Manager</h1>
         </div>
         <nav class="main-tabs" aria-label="Bereiche">
@@ -35,6 +35,7 @@
           <button class="tab-button" data-view="maintenanceView">Wartung</button>
           <button class="tab-button" data-view="faultCatalogView">Fehlerkatalog</button>
           <button class="tab-button" data-view="settingsView">Einstellungen</button>
+          <button class="tab-button system-admin" data-view="systemView" hidden>System</button>
           <button class="tab-button" data-view="auditView">Audit</button>
         </nav>
         <div class="topbar-status">
@@ -105,7 +106,7 @@
             <div class="hmi-schematic-view hmi-overview-view" data-schematic-view="overview">
               <svg class="hmi-diagram" viewBox="0 0 1400 720" role="img" aria-labelledby="overviewDiagramTitle overviewDiagramDesc">
                 <title id="overviewDiagramTitle">Dachs-Anlagenübersicht</title>
-                <desc id="overviewDiagramDesc">Dachs mit Heizwasseraustritt, Rücklauf, Abgasanschluss, externen Fühlern und Netzanschluss.</desc>
+                <desc id="overviewDiagramDesc">Dachs mit dem originalen Generator links, Motor rechts, Heizwasseraustritt, Rücklauf, Abgasanschluss, externen Fühlern und Netzanschluss.</desc>
                 <defs>
                   <marker id="hmiArrowHot" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L14 7 L0 14 Z"></path></marker>
                   <marker id="hmiArrowReturn" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L14 7 L0 14 Z"></path></marker>
@@ -133,33 +134,38 @@
                   <text id="v95-overview-dachs-eintritt" class="hmi-card-value" x="76" y="569">—</text>
                 </g>
                 <g id="hmiOverviewUnit" class="hmi-unit">
-                  <rect class="hmi-unit-shell" x="440" y="88" width="540" height="550" rx="8"></rect>
+                  <rect class="hmi-unit-shell" x="440" y="88" width="540" height="600" rx="8"></rect>
                   <rect class="hmi-unit-header" x="440" y="88" width="540" height="76" rx="8"></rect>
                   <text class="hmi-unit-title" x="476" y="126">DACHS</text>
-                  <text class="hmi-unit-subtitle" x="476" y="148">MSR2 · MOTOR / GENERATOR</text>
+                  <text class="hmi-unit-subtitle" x="476" y="148">MSR2 · GENERATOR / MOTOR</text>
                   <g id="hmiOverviewAlarmIndicator" class="hmi-svg-state normal" transform="translate(886 108)"><rect width="62" height="34" rx="4"></rect><text id="v95-overview-state-code" x="31" y="23" text-anchor="middle">OK</text></g>
-                  <rect class="hmi-machine-block" x="478" y="198" width="208" height="200" rx="5"></rect>
-                  <image class="hmi-engine-image" href="static/motor-horizontal.png?v=2" x="486" y="198" width="192" height="130" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></image>
-                  <circle class="hmi-generator" cx="582" cy="356" r="26"></circle>
-                  <path class="hmi-generator-mark" d="M566 356 H598 M582 340 V372"></path>
-                  <text class="hmi-component-label" x="582" y="384" text-anchor="middle">MOTOR / GENERATOR</text>
+                  <g class="hmi-assembly-captions" aria-hidden="true">
+                    <text x="563" y="183" text-anchor="middle">GENERATOR</text>
+                    <line x1="645" y1="170" x2="645" y2="187"></line>
+                    <text x="812" y="183" text-anchor="middle">MOTOR</text>
+                  </g>
+                  <rect class="hmi-assembly-frame" x="478" y="190" width="464" height="264" rx="5"></rect>
+                  <image class="hmi-assembly-image" href="static/dachs-generator-motor.png?v=1" x="478" y="190" width="464" height="264" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></image>
                   <g class="hmi-primary-values">
-                    <text class="hmi-value-label" x="724" y="218">Betriebszustand</text><text id="v95-overview-motorstatus" class="hmi-value-main hmi-value-status" x="940" y="218" text-anchor="end">—</text>
-                    <text class="hmi-value-label" x="724" y="263">Wirkleistung Ist</text><text id="v95-overview-wirkleistung" class="hmi-value-main" x="940" y="263" text-anchor="end">—</text>
-                    <text class="hmi-value-label" x="724" y="308">Wirkleistung Soll</text><text id="v95-overview-wirkleistung-soll" class="hmi-value-main" x="940" y="308" text-anchor="end">—</text>
-                    <text class="hmi-value-label" x="724" y="353">Drehzahl</text><text id="v95-overview-drehzahl" class="hmi-value-main" x="940" y="353" text-anchor="end">—</text>
-                    <line class="hmi-value-rule" x1="724" y1="378" x2="940" y2="378"></line>
-                    <text class="hmi-value-label" x="724" y="415">Laufzeit seit Start</text><text id="v95-overview-betriebsstunden" class="hmi-value-secondary" x="940" y="415" text-anchor="end">—</text>
-                    <text class="hmi-value-label" x="724" y="450">Betriebsstunden gesamt</text><text id="v95-overview-betriebsstunden-gesamt" class="hmi-value-secondary" x="940" y="450" text-anchor="end">—</text>
-                    <text class="hmi-value-label" x="724" y="485">Starts</text><text id="v95-overview-starts" class="hmi-value-secondary" x="940" y="485" text-anchor="end">—</text>
+                    <rect class="hmi-data-grid" x="478" y="466" width="464" height="114" rx="5"></rect>
+                    <line x1="478" y1="523" x2="942" y2="523"></line>
+                    <line x1="594" y1="466" x2="594" y2="523"></line><line x1="710" y1="466" x2="710" y2="523"></line><line x1="826" y1="466" x2="826" y2="523"></line>
+                    <line x1="633" y1="523" x2="633" y2="580"></line><line x1="787" y1="523" x2="787" y2="580"></line>
+                    <text class="hmi-value-label" x="536" y="484" text-anchor="middle">BETRIEBSZUSTAND</text><text id="v95-overview-motorstatus" class="hmi-value-main hmi-value-status" x="536" y="510" text-anchor="middle">—</text>
+                    <text class="hmi-value-label" x="652" y="484" text-anchor="middle">WIRKLEISTUNG IST</text><text id="v95-overview-wirkleistung" class="hmi-value-main" x="652" y="510" text-anchor="middle">—</text>
+                    <text class="hmi-value-label" x="768" y="484" text-anchor="middle">WIRKLEISTUNG SOLL</text><text id="v95-overview-wirkleistung-soll" class="hmi-value-main" x="768" y="510" text-anchor="middle">—</text>
+                    <text class="hmi-value-label" x="884" y="484" text-anchor="middle">DREHZAHL</text><text id="v95-overview-drehzahl" class="hmi-value-main" x="884" y="510" text-anchor="middle">—</text>
+                    <text class="hmi-value-label" x="555" y="541" text-anchor="middle">LAUFZEIT SEIT START</text><text id="v95-overview-betriebsstunden" class="hmi-value-secondary" x="555" y="569" text-anchor="middle">—</text>
+                    <text class="hmi-value-label" x="710" y="541" text-anchor="middle">BETRIEBSSTUNDEN GESAMT</text><text id="v95-overview-betriebsstunden-gesamt" class="hmi-value-secondary" x="710" y="569" text-anchor="middle">—</text>
+                    <text class="hmi-value-label" x="865" y="541" text-anchor="middle">STARTS</text><text id="v95-overview-starts" class="hmi-value-secondary" x="865" y="569" text-anchor="middle">—</text>
                   </g>
                   <g class="hmi-temperature-row">
-                    <rect x="478" y="524" width="464" height="84" rx="5"></rect>
-                    <line x1="594" y1="524" x2="594" y2="608"></line><line x1="710" y1="524" x2="710" y2="608"></line><line x1="826" y1="524" x2="826" y2="608"></line>
-                    <text x="496" y="550">MOTORABGAS</text><text id="v95-overview-abgas-motor" class="hmi-temp-value" x="496" y="584">—</text>
-                    <text x="612" y="550">KAPSEL</text><text id="v95-overview-kapsel" class="hmi-temp-value" x="612" y="584">—</text>
-                    <text x="728" y="550">KÜHLWASSER</text><text id="v95-overview-kuehlwasser" class="hmi-temp-value" x="728" y="584">—</text>
-                    <text x="844" y="550">REGLER</text><text id="v95-overview-regler" class="hmi-temp-value" x="844" y="584">—</text>
+                    <rect x="478" y="592" width="464" height="78" rx="5"></rect>
+                    <line x1="594" y1="592" x2="594" y2="670"></line><line x1="710" y1="592" x2="710" y2="670"></line><line x1="826" y1="592" x2="826" y2="670"></line>
+                    <text x="496" y="616">MOTORABGAS</text><text id="v95-overview-abgas-motor" class="hmi-temp-value" x="496" y="650">—</text>
+                    <text x="612" y="616">KAPSEL</text><text id="v95-overview-kapsel" class="hmi-temp-value" x="612" y="650">—</text>
+                    <text x="728" y="616">KÜHLWASSER</text><text id="v95-overview-kuehlwasser" class="hmi-temp-value" x="728" y="650">—</text>
+                    <text x="844" y="616">REGLER</text><text id="v95-overview-regler" class="hmi-temp-value" x="844" y="650">—</text>
                   </g>
                 </g>
                 <g class="hmi-exhaust-card">
@@ -187,7 +193,7 @@
             <div class="hmi-schematic-view hmi-technical-view" data-schematic-view="technical" hidden>
               <svg class="hmi-diagram hmi-technical-diagram" viewBox="0 0 1480 820" role="img" aria-labelledby="technicalDiagramTitle technicalDiagramDesc">
                 <title id="technicalDiagramTitle">Technisches Dachs-Prozessschema</title>
-                <desc id="technicalDiagramDesc">Technische Darstellung der Messstellen, Medienwege, Motor-, Generator-, Regler- und Netzbaugruppen.</desc>
+                <desc id="technicalDiagramDesc">Technische Darstellung mit dem originalen Generator links, Motor rechts sowie Messstellen, Medienwegen, Regler- und Netzbaugruppen.</desc>
                 <defs>
                   <marker id="techArrowHot95" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L13 6.5 L0 13 Z"></path></marker>
                   <marker id="techArrowReturn95" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L13 6.5 L0 13 Z"></path></marker>
@@ -204,7 +210,7 @@
                   <path class="tech95-exhaust-outer" d="M950 230 H1090 M1230 230 H1375"></path>
                   <path class="tech95-exhaust-inner" d="M950 230 H1090 M1230 230 H1375" marker-end="url(#techArrowGas95)"></path>
                   <path class="tech95-power" d="M950 480 H1080" marker-end="url(#techArrowPower95)"></path>
-                  <path class="tech95-signal" d="M565 326 H610 M830 326 H882 V545 H830 M570 585 H610"></path>
+                  <path class="tech95-signal" d="M606 487 V548 M570 639 H610"></path>
                 </g>
                 <g class="tech95-boundary-labels">
                   <text x="62" y="182">DACHS-AUSTRITT</text><text id="v95-tech-dachs-austritt" class="tech95-boundary-value" x="62" y="210">—</text>
@@ -215,40 +221,41 @@
                   <rect class="tech95-head" x="330" y="82" width="620" height="68" rx="7"></rect>
                   <text class="tech95-title" x="364" y="122">DACHS MSR2 · FUNKTIONSSCHEMA</text>
                   <g id="hmiTechnicalAlarmIndicator" class="hmi-svg-state normal" transform="translate(852 99)"><rect width="66" height="34" rx="4"></rect><text id="v95-tech-state-code" x="33" y="23" text-anchor="middle">OK</text></g>
-                  <g class="tech95-module motor">
-                    <rect x="370" y="190" width="200" height="250" rx="5"></rect><text class="tech95-module-title" x="394" y="222">MOTOR</text>
-                    <image class="tech95-engine-image" href="static/motor-horizontal.png?v=2" x="378" y="230" width="184" height="110" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></image>
-                    <rect class="tech95-data-cell" x="390" y="350" width="160" height="38" rx="3"></rect>
-                    <text class="tech95-label" x="402" y="365">Drehzahl</text><text id="v95-tech-drehzahl" class="tech95-value" x="538" y="382" text-anchor="end">—</text>
+                  <g class="tech95-assembly">
+                    <g class="tech95-assembly-captions" aria-hidden="true">
+                      <text x="469" y="171" text-anchor="middle">GENERATOR</text>
+                      <line x1="564" y1="157" x2="564" y2="176"></line>
+                      <text x="758" y="171" text-anchor="middle">MOTOR</text>
+                    </g>
+                    <rect class="tech95-assembly-frame" x="370" y="180" width="540" height="307" rx="5"></rect>
+                    <image class="tech95-assembly-image" href="static/dachs-generator-motor.png?v=1" x="370" y="180" width="540" height="307" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></image>
                   </g>
-                  <g class="tech95-module generator">
-                    <rect x="610" y="190" width="300" height="250" rx="5"></rect><text class="tech95-module-title" x="634" y="222">GENERATOR</text>
-                    <circle class="tech95-generator-symbol" cx="674" cy="294" r="42"></circle><text class="tech95-generator-letter" x="674" y="305" text-anchor="middle">G</text>
-                    <rect class="tech95-data-cell" x="734" y="246" width="160" height="62" rx="3"></rect>
-                    <text class="tech95-label" x="746" y="266">Wirkleistung Ist</text><text id="v95-tech-wirkleistung" class="tech95-value" x="882" y="294" text-anchor="end">—</text>
-                    <rect class="tech95-data-cell" x="734" y="316" width="160" height="62" rx="3"></rect>
-                    <text class="tech95-label" x="746" y="336">Wirkleistung Soll</text><text id="v95-tech-wirkleistung-soll" class="tech95-value" x="882" y="364" text-anchor="end">—</text>
-                    <text class="tech95-module-note" x="634" y="406">ELEKTRISCHE LEISTUNG · BLOCK 24 / 50</text>
+                  <g class="tech95-assembly-data">
+                    <rect class="tech95-data-cell" x="370" y="500" width="170" height="48" rx="3"></rect>
+                    <text class="tech95-label" x="382" y="517">Wirkleistung Ist</text><text id="v95-tech-wirkleistung" class="tech95-value" x="528" y="540" text-anchor="end">—</text>
+                    <rect class="tech95-data-cell" x="555" y="500" width="170" height="48" rx="3"></rect>
+                    <text class="tech95-label" x="567" y="517">Wirkleistung Soll</text><text id="v95-tech-wirkleistung-soll" class="tech95-value" x="713" y="540" text-anchor="end">—</text>
+                    <rect class="tech95-data-cell" x="740" y="500" width="170" height="48" rx="3"></rect>
+                    <text class="tech95-label" x="752" y="517">Motordrehzahl</text><text id="v95-tech-drehzahl" class="tech95-value" x="898" y="540" text-anchor="end">—</text>
                   </g>
                   <g class="tech95-module cooling">
-                    <rect x="370" y="480" width="200" height="210" rx="5"></rect><text class="tech95-module-title" x="394" y="512">KÜHLKREIS</text>
-                    <path class="tech95-exchanger" d="M394 548 H414 L428 532 L446 564 L464 532 L484 564 L502 532 L522 548 H546"></path>
-                    <rect class="tech95-data-cell" x="390" y="580" width="160" height="48" rx="3"></rect>
-                    <text class="tech95-label" x="402" y="597">Kühlwasser Motor</text><text id="v95-tech-kuehlwasser" class="tech95-value" x="538" y="620" text-anchor="end">—</text>
-                    <rect class="tech95-data-cell" x="390" y="636" width="160" height="48" rx="3"></rect>
-                    <text class="tech95-label" x="402" y="653">Dachs-Eintritt</text><text id="v95-tech-eintritt-inside" class="tech95-value" x="538" y="676" text-anchor="end">—</text>
+                    <rect x="370" y="568" width="200" height="142" rx="5"></rect><text class="tech95-module-title" x="394" y="592">KÜHLKREIS</text>
+                    <rect class="tech95-data-cell" x="390" y="604" width="160" height="44" rx="3"></rect>
+                    <text class="tech95-label" x="402" y="618">Kühlwasser Motor</text><text id="v95-tech-kuehlwasser" class="tech95-value" x="538" y="640" text-anchor="end">—</text>
+                    <rect class="tech95-data-cell" x="390" y="654" width="160" height="44" rx="3"></rect>
+                    <text class="tech95-label" x="402" y="668">Dachs-Eintritt</text><text id="v95-tech-eintritt-inside" class="tech95-value" x="538" y="690" text-anchor="end">—</text>
                   </g>
                   <g class="tech95-module control">
-                    <rect x="610" y="480" width="300" height="210" rx="5"></rect><text class="tech95-module-title" x="634" y="512">REGLER / MSR2</text>
-                    <text class="tech95-label" x="634" y="544">Motorstatus</text><text id="v95-tech-motorstatus" class="tech95-value tech95-status-value" x="884" y="544" text-anchor="end">—</text>
-                    <line class="tech95-row-rule" x1="634" y1="554" x2="884" y2="554"></line>
-                    <text class="tech95-label" x="634" y="574">Kapseltemperatur</text><text id="v95-tech-kapsel" class="tech95-value" x="884" y="574" text-anchor="end">—</text>
-                    <line class="tech95-row-rule" x1="634" y1="584" x2="884" y2="584"></line>
-                    <text class="tech95-label" x="634" y="604">Reglerfühler</text><text id="v95-tech-regler" class="tech95-value" x="884" y="604" text-anchor="end">—</text>
-                    <line class="tech95-row-rule" x1="634" y1="614" x2="884" y2="614"></line>
-                    <text class="tech95-label" x="634" y="634">Laufzeit seit Start</text><text id="v95-tech-betriebsstunden" class="tech95-value" x="884" y="634" text-anchor="end">—</text>
+                    <rect x="610" y="568" width="300" height="142" rx="5"></rect><text class="tech95-module-title" x="634" y="592">REGLER / MSR2</text>
+                    <text class="tech95-label" x="634" y="616">Motorstatus</text><text id="v95-tech-motorstatus" class="tech95-value tech95-status-value" x="884" y="616" text-anchor="end">—</text>
+                    <line class="tech95-row-rule" x1="634" y1="623" x2="884" y2="623"></line>
+                    <text class="tech95-label" x="634" y="637">Kapseltemperatur</text><text id="v95-tech-kapsel" class="tech95-value" x="884" y="637" text-anchor="end">—</text>
                     <line class="tech95-row-rule" x1="634" y1="644" x2="884" y2="644"></line>
-                    <text class="tech95-label" x="634" y="674">Betriebsstunden gesamt</text><text id="v95-tech-betriebsstunden-gesamt" class="tech95-value" x="884" y="674" text-anchor="end">—</text>
+                    <text class="tech95-label" x="634" y="658">Reglerfühler</text><text id="v95-tech-regler" class="tech95-value" x="884" y="658" text-anchor="end">—</text>
+                    <line class="tech95-row-rule" x1="634" y1="665" x2="884" y2="665"></line>
+                    <text class="tech95-label" x="634" y="679">Laufzeit seit Start</text><text id="v95-tech-betriebsstunden" class="tech95-value" x="884" y="679" text-anchor="end">—</text>
+                    <line class="tech95-row-rule" x1="634" y1="686" x2="884" y2="686"></line>
+                    <text class="tech95-label" x="634" y="700">Betriebsstunden gesamt</text><text id="v95-tech-betriebsstunden-gesamt" class="tech95-value" x="884" y="700" text-anchor="end">—</text>
                   </g>
                 </g>
                 <g class="tech95-exhaust-reading before-filter">
@@ -297,7 +304,7 @@
                 </g>
                 <g class="tech95-legend">
                   <text x="64" y="760">MESSSTELLEN</text><text x="64" y="785">T1 Dachs-Austritt · T2 Dachs-Eintritt · T3 Motorabgas vor Filter · T4 Dachs-Abgas nach Filter · P elektrische Leistung</text>
-                  <text x="950" y="785" text-anchor="end">Schema nach Funktionsgruppen · nicht maßstäblich</text>
+                  <text x="1420" y="785" text-anchor="end">Schema nach Funktionsgruppen · nicht maßstäblich</text>
                 </g>
               </svg>
             </div>
@@ -661,13 +668,8 @@
             <div class="auth-preview-actions"><button id="authPreviewApply" type="button" disabled>Berechnete PW4 übernehmen</button><span id="authPreviewFormula" class="muted">Formel: letzte 4 Stellen des MSR2-Tagescodes</span></div>
           </div>
         </section>
-        <section id="maintenanceModeControls" class="panel maintenance-mode-controls" hidden>
-          <div><p class="eyebrow">WARTUNGSABSCHLUSS</p><h3>Testmodus</h3><p class="muted">Das Umschalten selbst schreibt nichts in den Regler. Die Einstellung wird lokal auf dem Pi gespeichert und bleibt nach einem Neustart erhalten.</p></div>
-          <label class="check-label maintenance-mode-toggle"><input id="maintenanceTestMode" type="checkbox" checked> Testmodus aktivieren (kein Schreiben beim Wartungsabschluss)</label>
-          <div id="maintenanceModeStatus" class="write-guard-status ok">Testmodus aktiv: Wartungsberichte werden ausschließlich lokal abgeschlossen. Der Regler bleibt unverändert.</div>
-        </section>
         <section id="sootFilterControls" class="panel soot-filter-controls">
-          <div><p class="eyebrow">RUSSFILTER</p><h3>Geschätzter Füllstand</h3><p class="muted">Lineare Schätzung aus der Motorabgastemperatur. Unterhalb der 0-%-Temperatur werden 0 %, oberhalb der 100-%-Temperatur 100 % angezeigt. Diese lokale Anzeige schreibt niemals in den Regler.</p></div>
+          <div><p class="eyebrow">RUSSFILTER</p><h3>Geschätzter Füllstand</h3><p class="muted">Lineare Schätzung aus der Motorabgastemperatur. Unterhalb der 0-%-Temperatur werden 0 %, oberhalb der 100-%-Temperatur 100 % angezeigt.</p></div>
           <form id="sootFilterSettingsForm" class="soot-filter-form">
             <label>0 % bei<input id="sootFilterZeroTemperature" type="number" min="100" max="790" step="1" inputmode="decimal" required><span>°C</span></label>
             <label>100 % bei<input id="sootFilterFullTemperature" type="number" min="110" max="800" step="1" inputmode="decimal" required><span>°C</span></label>
@@ -675,10 +677,39 @@
           </form>
           <div id="sootFilterSettingsStatus" class="soot-filter-settings-status muted">Standard: 420 °C = 0 % · 520 °C = 100 % · Grün &lt; 60 % · Orange 60–89 % · Rot ab 90 %.</div>
         </section>
-        <section id="accountControls" class="panel account-controls" hidden><div><p class="eyebrow">ADMIN-ZUGANG</p><h3>Eigenes Admin-Passwort ändern</h3><p class="muted">Mindestens 12 Zeichen. Danach wird die Admin-Sitzung beendet und eine neue Anmeldung verlangt.</p></div><form id="passwordForm" class="password-form"><label>Bisheriges Admin-Passwort<input id="currentWebPassword" type="password" autocomplete="current-password" required></label><label>Neues Admin-Passwort<input id="newWebPassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Admin-Passwort ändern</button></form></section>
-        <section id="guestAccountControls" class="panel account-controls" hidden><div><p class="eyebrow">GAST-ZUGANG</p><h3>Gastpasswort festlegen</h3><p class="muted">Das Gastkonto ist ausschließlich lesend und kann sein Passwort nicht selbst ändern. Eine Änderung beendet alle offenen Gastsitzungen.</p></div><form id="guestPasswordForm" class="password-form"><label>Aktuelles Admin-Passwort<input id="guestPasswordAdminCurrent" type="password" autocomplete="current-password" required></label><label>Neues Gastpasswort<input id="newGuestPassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Gastpasswort ändern</button></form></section>
         <div id="settingsTabs" class="register-tabs" role="tablist"></div>
         <section class="panel settings-panel"><div class="section-head"><div><p id="selectedBlockEyebrow" class="eyebrow">BLOCK</p><h3 id="selectedBlockTitle">Block auswählen</h3></div><div class="page-head-actions"><label class="check-label reserve-toggle"><input id="showReserved" type="checkbox"> Reservefelder anzeigen</label><span id="blockReadStatus" class="muted"></span><button data-action="reload-block">Block neu lesen</button><button id="saveBlockButton" class="primary" data-action="save-block">Änderungen anwenden</button></div></div><div id="settingsFields" class="register-grid"></div></section>
+      </section>
+
+      <section id="systemView" class="app-view" hidden>
+        <header class="page-head"><div><p class="eyebrow">OPEN DACHS MANAGER</p><h2>Systemverwaltung</h2><p class="muted">Benutzer, Rollen, Passwörter, API-Zugänge und der Wartungs-Testmodus werden hier verwaltet – vollständig getrennt von den Dachs/MSR2-Einstellungen.</p></div><span class="status-pill ok">Nur Admin</span></header>
+        <div id="systemTabs" class="register-tabs system-tabs" role="tablist">
+          <button type="button" role="tab" class="active" data-system-tab="users">Benutzer &amp; Berechtigungen</button>
+          <button type="button" role="tab" data-system-tab="tokens">API &amp; Tokens</button>
+          <button type="button" role="tab" data-system-tab="maintenance">Wartungsabschluss</button>
+        </div>
+
+        <div id="systemMaintenanceTab" data-system-panel="maintenance" hidden>
+          <section id="maintenanceModeControls" class="panel maintenance-mode-controls" hidden>
+            <div><p class="eyebrow">WARTUNGSABSCHLUSS</p><h3>Testmodus</h3><p class="muted">Das Umschalten selbst schreibt nichts in den Regler. Die Einstellung wird lokal auf dem Pi gespeichert und bleibt nach einem Neustart erhalten.</p></div>
+            <label class="check-label maintenance-mode-toggle"><input id="maintenanceTestMode" type="checkbox" checked> Testmodus aktivieren (kein Schreiben beim Wartungsabschluss)</label>
+            <div id="maintenanceModeStatus" class="write-guard-status ok">Testmodus aktiv: Wartungsberichte werden ausschließlich lokal abgeschlossen. Der Regler bleibt unverändert.</div>
+          </section>
+        </div>
+
+        <div id="systemUsersTab" data-system-panel="users">
+          <section class="panel account-controls"><div><p class="eyebrow">EIGENES KONTO</p><h3>Eigenes Passwort ändern</h3><p class="muted">Mindestens 12 Zeichen. Danach werden deine offenen Sitzungen beendet.</p></div><form id="passwordForm" class="password-form"><label>Bisheriges Passwort<input id="currentWebPassword" type="password" autocomplete="current-password" required></label><label>Neues Passwort<input id="newWebPassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Passwort ändern</button></form></section>
+          <section class="panel system-create-panel"><div><p class="eyebrow">NEUER BENUTZER</p><h3>Konto anlegen</h3><p class="muted">Gäste dürfen lesen. Admins dürfen zusätzlich Systemeinstellungen und kontrollierte Dachs-Schreibvorgänge bedienen.</p></div><form id="userCreateForm" class="system-create-form"><label>Benutzername<input id="userCreateName" minlength="3" maxlength="32" pattern="[A-Za-z0-9._-]+" autocomplete="off" required></label><label>Rolle<select id="userCreateRole"><option value="guest">Gast · lesen</option><option value="admin">Admin · lesen und schreiben</option></select></label><label>Startpasswort<input id="userCreatePassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Benutzer anlegen</button></form></section>
+          <section class="panel"><div class="section-head"><div><p class="eyebrow">BENUTZERVERWALTUNG</p><h3>Konten und Berechtigungen</h3></div><button id="usersRefresh" type="button">Aktualisieren</button></div><div class="table-wrap"><table class="data-table system-table"><thead><tr><th>Benutzer</th><th>Rolle</th><th>Status</th><th>Neues Passwort</th><th>Aktionen</th></tr></thead><tbody id="userRows"><tr><td colspan="5" class="muted">Benutzer werden geladen …</td></tr></tbody></table></div></section>
+        </div>
+
+        <div id="systemTokensTab" data-system-panel="tokens" hidden>
+          <section class="panel api-settings-panel"><div><p class="eyebrow">EDOMI-SCHREIBSCHUTZ</p><h3>Serverseitige API-Logik</h3><p class="muted">HTTP bleibt lokal aktiv. HTTPS kann extern durch nginx terminiert werden. EDOMI übergibt nur logische Keys und Werte; PW4, Blockkodierung, ACK und Readback bleiben im Dachs Manager.</p></div><form id="apiSettingsForm" class="api-settings-form"><label class="check-label"><input id="apiWriteEnabled" type="checkbox"> API-Schreibaktionen aktivieren</label><label>MSR2 Auth-Level<input id="apiAuthLevel" type="number" min="0" max="255" value="4" required></label><button class="primary" type="submit">API-Einstellung speichern</button><div id="apiWriteStatus" class="write-guard-status ok">API-Schreiben ist deaktiviert.</div></form></section>
+          <section class="panel system-create-panel"><div><p class="eyebrow">NEUER API-TOKEN</p><h3>EDOMI-Zugang erzeugen</h3><p class="muted">Das Token wird nur einmal vollständig angezeigt. Danach speichert das System ausschließlich den Hash.</p></div><form id="tokenCreateForm" class="token-create-form"><label>Name<input id="tokenCreateName" minlength="3" maxlength="64" placeholder="EDOMI Heizung" required></label><fieldset><legend>Rechte</legend><label class="check-label"><input type="checkbox" name="tokenScope" value="read" checked> Lesen</label><label class="check-label"><input type="checkbox" name="tokenScope" value="history" checked> Historie</label><label class="check-label"><input type="checkbox" name="tokenScope" value="write"> Schreiben</label></fieldset><button class="primary" type="submit">Token erzeugen</button></form></section>
+          <section id="tokenSecretPanel" class="panel token-secret-panel" hidden><div><p class="eyebrow">NUR EINMAL SICHTBAR</p><h3>Neues API-Token sichern</h3><p class="muted">Jetzt in den EDOMI-Logikbaustein übernehmen. Eine spätere Anzeige ist absichtlich nicht möglich.</p></div><code id="tokenSecret"></code><button id="tokenSecretCopy" type="button">Token kopieren</button></section>
+          <section class="panel"><div class="section-head"><div><p class="eyebrow">TOKEN-MANAGER</p><h3>API-Zugänge</h3></div><button id="tokensRefresh" type="button">Aktualisieren</button></div><div class="table-wrap"><table class="data-table system-table"><thead><tr><th>Name</th><th>Token</th><th>Rechte</th><th>Status</th><th>Zuletzt benutzt</th><th>Aktionen</th></tr></thead><tbody id="tokenRows"><tr><td colspan="6" class="muted">Tokens werden geladen …</td></tr></tbody></table></div></section>
+          <section class="panel api-reference"><div><p class="eyebrow">EDOMI-API</p><h3>Endpunkte</h3></div><code>Authorization: Bearer &lt;Token&gt;</code><dl><div><dt>GET /api/v1/live</dt><dd>Alle aktuellen Werte aus dem lokalen Cache</dd></div><div><dt>GET /api/v1/catalog</dt><dd>Blöcke, Keys, Typen und Grenzen</dd></div><div><dt>GET /api/v1/history</dt><dd>24-h-Rohwerte und verdichtete Stillstandszeiten</dd></div><div><dt>POST /api/v1/actions/set-value</dt><dd>Serverseitig validierter Schreibablauf mit Readback und Audit</dd></div></dl><div id="adaptiveHistoryStatus" class="muted">Historienstatus wird geladen …</div></section>
+        </div>
       </section>
 
       <section id="auditView" class="app-view" hidden>
@@ -705,7 +736,15 @@
       </div>
       <div class="changelog-list">
         <article class="changelog-entry current">
-          <header><strong>V3 1.0</strong><time datetime="2026-08-09">09.08.2026</time><span>Aktuell</span></header>
+          <header><strong>V3 1.1.0</strong><time datetime="2026-08-10">10.08.2026</time><span>Aktuell</span></header>
+          <ul><li>Eigener Admin-Hauptbereich „System“ für Benutzer, API-Tokens und den Wartungs-Testmodus.</li><li>Token-geschützte EDOMI-API mit Lese-, Historien- und serverseitig kontrollierten Schreibaktionen.</li><li>Alle Livewerte bleiben 24 Stunden roh; Motorlauf sowie je eine Stunde davor und danach bleiben hochauflösend, übriger Stillstand wird verdichtet.</li><li>Block-20-Zeitsync, Kraftstofftexte und Abschaltgründe werden anhand der Originalstrukturen korrekt dekodiert.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.0.1</strong><time datetime="2026-08-09">09.08.2026</time></header>
+          <ul><li>21 ausgewählte Werte aus Block 22/24 werden bei jedem schnellen Livezyklus gemeinsam als ein kompakter Historien-Snapshot gespeichert.</li><li>Der 0,75-s-Takt ist jetzt der Zielabstand vollständiger Zyklen; statische Block-20-Werte laufen langsam.</li><li>Feste Textfelder behalten beim Schreiben ihre vorhandene Space- oder NUL-Paddingart bytegetreu bei.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.0</strong><time datetime="2026-08-09">09.08.2026</time></header>
           <ul><li>Erster stabiler öffentlicher 1.0-Stand mit der vollständig integrierten Bedien-, Überwachungs- und Wartungsoberfläche.</li><li>Serielle Schreibsicherheit bleibt unverändert über Freigabe, Authentifizierung, ACK, Readback und Audit abgesichert.</li></ul>
         </article>
         <article class="changelog-entry">
@@ -749,6 +788,6 @@
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="static/app.js?v=33"></script>
+  <script src="static/app.js?v=34"></script>
 </body>
 </html>

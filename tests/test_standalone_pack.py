@@ -43,12 +43,20 @@ class StandalonePackTests(unittest.TestCase):
         pack = PackRepository()
         data = json.loads((Path(pack.pack_file).parent / "physical_offsets.json").read_text(encoding="utf-8"))
         self.assertEqual(data["summary"], {
-            "blocks": 8,
-            "fields": 253,
+            "blocks": 9,
+            "fields": 261,
             "packed_fields": 28,
-            "corrected_offsets": 203,
+            "corrected_offsets": 211,
         })
         expected = {
+            (20, "Hka_Bd_Stat.Reserve1"): 25,
+            (20, "Hka_Bd_Stat.bSoftwareVersionUeberw[0]"): 26,
+            (20, "Hka_Bd_Stat.bSoftwareVersionMessen[0]"): 30,
+            (20, "Hka_Bd_Stat.bSoftwareVersionRegler[0]"): 34,
+            (20, "Hka_Bd_Stat.bDispHelligkeit"): 39,
+            (20, "Hka_Bd_Stat.bDispKontrast"): 40,
+            (20, "Hka_Bd_Stat.bZeitsyncAktiv"): 41,
+            (20, "Hka_Bd_Stat.bRes[27]"): 69,
             (24, "Hka_Mw1.bMotorStatus"): 0,
             (24, "Hka_Mw1.usDrehzahl"): 2,
             (24, "Hka_Mw1.Bivschalt.bZeitBisUmschaltung"): 39,
@@ -97,6 +105,9 @@ class StandalonePackTests(unittest.TestCase):
         self.assertEqual(pack.field_ui_metadata(112, "Adresse2.bLand")["choices"][8], {"value": 12, "label": "DE"})
         self.assertEqual(pack.field_ui_metadata(76, "Ww_Ew.bWwSollTemp")["max"], 65)
         self.assertEqual(pack.field_ui_metadata(100, "Wartung_Ew1.Vorher.bAvSpiel")["step"], 0.01)
+        self.assertIn("keine Wertetabelle", pack.field_ui_metadata(20, "Hka_Bd_Stat.bZeitsyncAktiv")["help"])
+        self.assertIn("nicht auf Gasanlagen beschränkt", pack.field_ui_metadata(24, "Hka_Mw1.usLuftdruck")["help"])
+        self.assertIn("Heizöl EL", pack.field_ui_metadata(24, "Hka_Mw1.bKraftstofftyp")["help"])
 
         # Unimplemented fields do not get nominal limits presented as
         # reliable editor rules.

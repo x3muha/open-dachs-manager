@@ -242,6 +242,17 @@ ln -sfn "$ODM_VENV/bin/open-dachs-manager" /usr/local/bin/open-dachs-manager
 
 ODM_CONFIG_TEMP="$(mktemp "$ODM_CONFIG_DIR/.open-dachs-manager.env.XXXXXX")"
 trap 'rm -f -- "$ODM_CONFIG_TEMP"' EXIT
+
+# New installations start safely in test mode.  On upgrades the JSON setting
+# written by the web UI always wins.  Preserve the older environment-only
+# live-mode setting as well when no JSON setting exists yet.
+ODM_MAINTENANCE_LIVE_WRITES=0
+if [[ ! -f "$ODM_DATA_DIR/maintenance_settings.json" && -f "$ODM_CONFIG_FILE" ]]; then
+  ODM_EXISTING_MAINTENANCE_MODE="$(sed -n 's/^OPEN_DACHS_MAINTENANCE_LIVE_WRITES=//p' "$ODM_CONFIG_FILE" | tail -n 1)"
+  case "${ODM_EXISTING_MAINTENANCE_MODE,,}" in
+    1|true|yes|on) ODM_MAINTENANCE_LIVE_WRITES=1 ;;
+  esac
+fi
 {
   printf 'OPEN_DACHS_SERIAL_PORT=%s\n' "$ODM_SERIAL_PORT"
   printf 'OPEN_DACHS_SERIAL_SOCKET=/run/open-dachs-manager/serial.sock\n'
@@ -257,7 +268,8 @@ trap 'rm -f -- "$ODM_CONFIG_TEMP"' EXIT
   fi
   printf 'OPEN_DACHS_TIMEOUT=0.9\n'
   printf 'OPEN_DACHS_WEB_INTERVAL=0.75\n'
-  printf 'OPEN_DACHS_MAINTENANCE_LIVE_WRITES=0\n'
+  printf 'OPEN_DACHS_HISTORY_INTERVAL=0\n'
+  printf 'OPEN_DACHS_MAINTENANCE_LIVE_WRITES=%s\n' "$ODM_MAINTENANCE_LIVE_WRITES"
 } >"$ODM_CONFIG_TEMP"
 install -m 0640 -o root -g "$ODM_SERVICE_USER" "$ODM_CONFIG_TEMP" "$ODM_CONFIG_FILE"
 

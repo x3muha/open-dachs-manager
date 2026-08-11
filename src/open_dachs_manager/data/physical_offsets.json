@@ -2,12 +2,22 @@
   "schema": 2,
   "pack_rev": "50",
   "summary": {
-    "blocks": 8,
-    "fields": 253,
+    "blocks": 9,
+    "fields": 261,
     "packed_fields": 28,
-    "corrected_offsets": 203
+    "corrected_offsets": 211
   },
   "blocks": {
+    "20": {
+      "Hka_Bd_Stat.Reserve1": 25,
+      "Hka_Bd_Stat.bSoftwareVersionUeberw": 26,
+      "Hka_Bd_Stat.bSoftwareVersionMessen": 30,
+      "Hka_Bd_Stat.bSoftwareVersionRegler": 34,
+      "Hka_Bd_Stat.bDispHelligkeit": 39,
+      "Hka_Bd_Stat.bDispKontrast": 40,
+      "Hka_Bd_Stat.bZeitsyncAktiv": 41,
+      "Hka_Bd_Stat.bRes": 42
+    },
     "24": {
       "Hka_Mw1.bMotorStatus": 0,
       "Hka_Mw1.usDrehzahl": 2,

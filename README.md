@@ -1,9 +1,9 @@
-# Open Dachs Manager · V3 1.0
+# Open Dachs Manager · V3 1.1.0
 
 Lokale Bedienung, Überwachung und Wartungsdokumentation für Dachs-Anlagen mit
 MSR2-Regler – über die optische serielle Schnittstelle und ohne Cloud-Zwang.
 
-> **Projektstatus: Version 1.0.** Lesen, Dekodieren, Wartungs-Testmodus und der
+> **Projektstatus: Version 1.1.0.** Lesen, Dekodieren, Wartungs-Testmodus und der
 > zentrale Serialworker sind an einer Anlage praktisch erprobt. Ein echter
 > Schreibvorgang erfordert immer die ausdrückliche Schreibfreigabe,
 > Authentifizierung, eine positive Antwort und den anschließenden Readback.
@@ -20,13 +20,21 @@ Open Dachs Manager ist ein unabhängiges Open-Source-Community-Projekt.
 | **Überwachung** | Live-Werte, Anlagenbild, Historien, Service- und Warnmeldungen |
 | **Wartung** | Schreibfreier Gesamtsnapshot, digitale Checkliste, Vorher-/Nachher-Werte, löschbares lokales Archiv und PDF/HTML/JSON |
 | **Einstellungen** | Vollständig dekodierte Register, Dry-Run, kontrollierte Schreibvorgänge und getrennte Netzschutz-CPUs |
+| **System** | Mehrere Benutzer, Rollen, Passwortverwaltung, API-Freigabe und Token-Manager |
 | **Werkzeuge** | Weboberfläche, CLI, TUI, JSON-Backups, Audit-Protokoll und systemd-Dienste |
 
 Weitere Merkmale:
 
 - lokaler Betrieb auf Raspberry Pi oder einem vergleichbaren Linux-System
-- Gast- und Admin-Zugang für die Weboberfläche
-- zentrale SQLite-Historie für Messwerte und Wartungsprotokolle
+- beliebig viele lokale Gast- und Admin-Konten mit gesalzenen Passwort-Hashes
+- Token-geschützte HTTP-API für EDOMI; HTTPS kann vor dem Dienst durch nginx
+  terminiert werden
+- zentrale kompakte SQLite-Historie: 21 ausgewählte Betriebs- und Messwerte
+  aus Block 22/24 gemeinsam in einem Snapshot je Livezyklus sowie getrennte
+  Wartungs- und Auditprotokolle
+- zusätzliche adaptive Historie für alle regulär überwachten Livewerte:
+  24 Stunden Rohdaten, volle Auflösung für Motorlauf plus je eine Stunde Vor-
+  und Nachlauf, 15-Minuten-Verdichtung für übrige Stillstandszeiten
 - ein gemeinsamer FIFO-Serialworker für Web, CLI und TUI
 - atomare Abläufe für Wartungssnapshots und `Auth → Write → ACK → Readback`
 - umschaltbarer Testmodus: Wartung vollständig durchspielen und lokal
@@ -49,7 +57,7 @@ Beim Start wird der gesamte seriell erreichbare Anlagenzustand in einer
 gemeinsamen Sitzung gelesen und lokal eingefroren. Checkliste, Messwerte und
 Bemerkungen werden automatisch gespeichert. Im standardmäßig aktiven
 Testmodus bleibt der Regler auch beim Abschluss unverändert. Ein Admin kann
-den Modus persistent in den Einstellungen umschalten; der Echtabschluss
+den Modus persistent unter `System → Wartungsabschluss` umschalten; der Echtabschluss
 verlangt weiterhin PW4, exakte Bestätigung, positives ACK und Readback.
 Offene und abgeschlossene Wartungen können nach einer Sicherheitsabfrage aus
 dem lokalen Archiv gelöscht werden; ein bereits erfolgter Reglerabschluss und
@@ -75,6 +83,19 @@ rein lesend. Schreibvorgänge verwenden den normalen Admin-Haken, Auth, ACK,
 bytegenauen Readback und Audit.
 
 ![Rot gekennzeichnete Netzschutzfelder](docs/assets/screenshots/netzschutz.png)
+
+### Systemverwaltung und EDOMI-API
+
+`System` ist ein eigener, nur für Admins sichtbarer Hauptbereich. Dort werden
+Benutzer, Rollen, Passwörter, API-Schreibfreigabe und Tokens verwaltet; die
+Dachs/MSR2-Register bleiben davon vollständig getrennt. Tokens besitzen
+unabhängige Rechte für `read`, `history` und `write` und werden nur einmal im
+Klartext angezeigt.
+
+EDOMI sendet beim Schreiben ausschließlich einen technischen Key und den
+logischen Zielwert. Blockkodierung, PW4, Authentifizierung, positives ACK,
+Readback und Audit verbleiben serverseitig im Open Dachs Manager. Rohe
+Blockpayloads oder PW4 werden nicht über die API entgegengenommen.
 
 ## Warum ein zentraler Serialworker?
 
@@ -202,10 +223,12 @@ Vor dem Aktivieren von Schreibvorgängen bitte das
 
 ## Mitmachen und Lizenz
 
-Der Inhalt dieses Repositories steht unter der [MIT-Lizenz](LICENSE). Externe
-Python-Pakete werden bei der Installation aus ihren jeweiligen Projekten
-bezogen und nicht in diesem Repository mitgeliefert; siehe
-[Abhängigkeiten](DEPENDENCIES.md).
+Quellcode und Dokumentation dieses Repositories stehen unter der
+[MIT-Lizenz](LICENSE). Das vom Anlagenbetreiber bereitgestellte technische
+Visualisierungsbild ist davon ausgenommen; Herkunft und Nutzungsgrenze stehen
+in den [Asset-Hinweisen](docs/ASSETS.md). Externe Python-Pakete werden bei der
+Installation aus ihren jeweiligen Projekten bezogen und nicht in diesem
+Repository mitgeliefert; siehe [Abhängigkeiten](DEPENDENCIES.md).
 
 Beiträge sind willkommen. Die technischen Anforderungen stehen in
 [CONTRIBUTING.md](CONTRIBUTING.md).

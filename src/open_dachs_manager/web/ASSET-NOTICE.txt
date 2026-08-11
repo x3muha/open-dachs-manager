@@ -1,0 +1,10 @@
+Asset notice for dachs-generator-motor.png
+
+This technical visualization was supplied by the project and plant operator
+for use in this project and for distribution as part of this repository and
+its installation packages. It is not licensed under the repository's MIT
+license. Any trademarks, labels, product design, and other third-party rights
+remain with their respective owners. Reuse outside this project requires
+separate permission.
+
+The file contains no embedded EXIF, text, or location metadata.

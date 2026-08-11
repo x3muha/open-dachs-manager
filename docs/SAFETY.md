@@ -50,9 +50,24 @@ HTTPS-Reverse-Proxy. Den Standardport nicht direkt ins Internet weiterleiten.
 Anfangspasswörter sofort ändern und `/var/lib/open-dachs-manager` als
 vertrauliche Betriebsinformation schützen.
 
+API-Tokens werden nur beim Erstellen vollständig angezeigt und danach nur als
+SHA-256-Hash gespeichert. Berechtigungen für Lesen, Historie und Schreiben
+sind getrennt. Ein Schreibrecht im Token allein genügt nicht: API-Schreiben
+bleibt standardmäßig global gesperrt und muss von einem Administrator bewusst
+aktiviert werden. Die API akzeptiert keine fertigen Rohtelegramme oder
+externen PW4-Werte. Schreibaktionen laufen durch denselben validierten
+Read-/Auth-/Write-/ACK-/Readback-/Audit-Pfad wie die Weboberfläche und
+benötigen eine eindeutige `request_id`. Diese wird vor dem Serialzugriff
+atomar reserviert und an den konkreten Aktionsinhalt gebunden. Bei der
+Generatornennleistung wird außerdem die kraftstoffabhängige Originalgrenze
+vor Authentifizierung und Write geprüft.
+
+Tokenwerte gehören wie Passwörter behandelt. Sie dürfen nicht in EDOMI-Logs,
+URLs, Browser-Lesezeichen oder öffentliche Fehlerberichte gelangen.
+
 ## Reifegrad
 
-Version 1.0 ist der erste stabile öffentliche Stand und wird ohne Garantie
-bereitgestellt. Gerätevarianten und Packstände können abweichen. Leseergebnisse
-und Feldlagen am tatsächlichen Zielgerät verifizieren, bevor Schreibvorgänge
-freigegeben werden.
+Version 1.1.0 basiert auf dem ersten stabilen öffentlichen Stand und wird ohne
+Garantie bereitgestellt. Gerätevarianten und Packstände können abweichen.
+Leseergebnisse und Feldlagen am tatsächlichen Zielgerät verifizieren, bevor
+Schreibvorgänge freigegeben werden.

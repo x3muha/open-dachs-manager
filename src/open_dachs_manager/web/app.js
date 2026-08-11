@@ -22,6 +22,7 @@ const state = {
   sootFilterSettings: null,
   maintenance: { reports: [], current: null, autosaveTimer: null },
   dashboard: { settings: null, editCards: [], draggedIndex: null },
+  system: { selectedTab: "users", users: [], tokens: [], apiSettings: null },
   serviceCatalogTimer: null,
   serviceCatalogLoaded: false,
   changelogTrigger: null,
@@ -87,8 +88,7 @@ function showApp(user) {
   $("monitorToggle").hidden = !isAdmin;
   $("serialToggle").hidden = !isAdmin;
   $("overviewPowerTargetForm").hidden = !isAdmin;
-  $("accountControls").hidden = !isAdmin;
-  $("guestAccountControls").hidden = !isAdmin;
+  document.querySelectorAll(".system-admin").forEach((element) => { element.hidden = !isAdmin; });
   $("maintenanceModeControls").hidden = !isAdmin;
   $("sootFilterSave").hidden = !isAdmin;
   $("sootFilterZeroTemperature").disabled = !isAdmin;
@@ -97,6 +97,7 @@ function showApp(user) {
   document.querySelectorAll(".maintenance-admin").forEach((element) => { element.hidden = !isAdmin; });
   $("settingsRoleHint").textContent = isAdmin ? "Admin: lesen und schreiben" : "Gast: nur lesen";
   $("settingsRoleHint").className = `status-pill ${isAdmin ? "ok" : "neutral"}`;
+  if (!isAdmin && state.selectedView === "systemView") showView("overviewView");
   renderSootFilterSettings();
   if (isAdmin) updateWriteGuard(); else renderOverviewPowerWriteMode();
 }
@@ -702,6 +703,7 @@ function refreshMonitorStatus() {
 }
 
 function showView(viewId) {
+  if (viewId === "systemView" && state.user?.role !== "admin") return;
   state.selectedView = viewId;
   document.querySelectorAll(".app-view").forEach((view) => { view.hidden = view.id !== viewId; });
   document.querySelectorAll(".tab-button").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
@@ -709,6 +711,7 @@ function showView(viewId) {
   if (viewId === "auditView") refreshAudit();
   if (viewId === "maintenanceView") refreshMaintenance(true);
   if (viewId === "faultCatalogView" && !state.serviceCatalogLoaded) refreshServiceCatalog();
+  if (viewId === "systemView") refreshSystemView();
 }
 
 function maintenanceNumber(value, suffix = "") {
@@ -1102,12 +1105,12 @@ function renderRunHistory() {
   ];
   const metricCards = metrics.map(([label,value,unit]) => `<article class="run-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? "—")} ${escapeHtml(unit)}</strong></article>`).join("");
   const dayRows = (history?.days || []).map((day) => `<div class="run-day-row"><div class="run-day-label"><strong>${escapeHtml(day.day_label)}</strong><span>${escapeHtml(day.date_text)} · Ring ${day.ring_slot}</span></div><div class="run-raster" title="${day.runtime_hours} Betriebsstunden">${(day.quarters || []).map((active,index) => `<i class="${active ? "active" : ""}" title="${String(Math.floor(index / 4)).padStart(2,"0")}:${String((index % 4) * 15).padStart(2,"0")}"></i>`).join("")}</div><div class="run-day-stats"><strong>${day.runtime_hours} h</strong><span>${day.starts} Starts</span></div></div>`).join("");
-  const shutdownRows = (history?.shutdowns || []).map((entry) => `<tr class="${entry.timestamp_plausible ? "" : "history-empty"}"><td>${entry.index}</td><td>${escapeHtml(entry.timestamp_text || "—")}</td><td>${escapeHtml(entry.code)}</td></tr>`).join("");
+  const shutdownRows = (history?.shutdowns || []).map((entry) => `<tr class="${entry.timestamp_plausible ? "" : "history-empty"}"><td>${entry.index}</td><td>${escapeHtml(entry.timestamp_text || "—")}</td><td>${entry.has_event ? `${escapeHtml(entry.code)} (${escapeHtml(entry.code_hex)})` : "—"}</td><td>${escapeHtml(entry.reason || "—")}</td></tr>`).join("");
   $("settingsFields").innerHTML = `<div class="message-history-card run-history-card">
     <div class="run-summary-grid">${metricCards}</div>
     <div class="run-axis"><span>00:00</span><span>04:00</span><span>08:00</span><span>12:00</span><span>16:00</span><span>20:00</span><span>24:00</span></div>
     <div class="run-days">${dayRows}</div>
-    <section class="run-shutdowns"><h4>Letzte Abschaltgründe</h4><div class="table-wrap"><table class="data-table"><thead><tr><th>Eintrag</th><th>Zeitstempel</th><th>Abschaltcode</th></tr></thead><tbody>${shutdownRows}</tbody></table></div></section>
+    <section class="run-shutdowns"><h4>Letzte Abschaltgründe</h4><div class="table-wrap"><table class="data-table"><thead><tr><th>Eintrag</th><th>Zeitstempel</th><th>Abschaltcode</th><th>Text des Abschaltcodes</th></tr></thead><tbody>${shutdownRows}</tbody></table></div></section>
     <p class="source-note">Gemeinsame Auswertung der Blöcke 28 (Ring/Starts/Tage 1–5), 30 (Tage 6–7/Abschaltungen), 31 (aktueller Tag) und 32 (Summenwerte).</p>
     ${renderRawFieldsDetails(`Rohfelder des aktuell gewählten Teilblocks ${state.selectedBlock}; das Diagramm liest immer alle vier zusammengehörigen Blöcke.`)}
   </div>`;
@@ -1291,15 +1294,172 @@ async function changePassword(event) {
   } catch (error) { toast(error.message); }
 }
 
-async function changeGuestPassword(event) {
+function selectSystemTab(tab) {
+  const selected = ["users", "tokens", "maintenance"].includes(tab) ? tab : "users";
+  state.system.selectedTab = selected;
+  document.querySelectorAll("[data-system-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.systemTab === selected);
+  });
+  document.querySelectorAll("[data-system-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.systemPanel !== selected;
+  });
+  if (selected === "tokens") refreshSystemTokens();
+  else if (selected === "maintenance") refreshMaintenanceMode();
+  else refreshSystemUsers();
+}
+
+async function refreshSystemView() {
+  if (state.user?.role !== "admin") return;
+  selectSystemTab(state.system.selectedTab);
+}
+
+function renderSystemUsers() {
+  const items = state.system.users || [];
+  $("userRows").innerHTML = items.map((user) => {
+    const self = user.username === state.user?.username;
+    return `<tr data-user-row="${escapeHtml(user.username)}">
+      <td><strong>${escapeHtml(user.username)}</strong>${self ? `<small>Aktuelle Sitzung</small>` : ""}</td>
+      <td><select data-user-role ${self ? "disabled" : ""}><option value="guest" ${user.role === "guest" ? "selected" : ""}>Gast · lesen</option><option value="admin" ${user.role === "admin" ? "selected" : ""}>Admin · schreiben</option></select></td>
+      <td><label class="check-label"><input data-user-enabled type="checkbox" ${user.enabled ? "checked" : ""} ${self ? "disabled" : ""}> ${user.enabled ? "Aktiv" : "Deaktiviert"}</label></td>
+      <td><input data-user-password type="password" minlength="12" autocomplete="new-password" placeholder="unverändert"></td>
+      <td class="table-actions"><button type="button" data-user-save="${escapeHtml(user.username)}">Speichern</button><button type="button" class="danger" data-user-delete="${escapeHtml(user.username)}" ${self ? "disabled" : ""}>Löschen</button></td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="5" class="muted">Keine Benutzer vorhanden.</td></tr>`;
+}
+
+async function refreshSystemUsers() {
+  if (state.user?.role !== "admin") return;
+  try {
+    const data = await api("/api/users");
+    state.system.users = data.items || [];
+    renderSystemUsers();
+  } catch (error) { toast(error.message); }
+}
+
+async function createSystemUser(event) {
   event.preventDefault();
   try {
-    await api("/api/users/gast/password", { method:"POST", body:JSON.stringify({
-      current_password: $("guestPasswordAdminCurrent").value,
-      new_password: $("newGuestPassword").value,
+    await api("/api/users", { method: "POST", body: JSON.stringify({
+      username: $("userCreateName").value,
+      role: $("userCreateRole").value,
+      password: $("userCreatePassword").value,
     }) });
-    $("guestPasswordForm").reset();
-    toast("Gastpasswort geändert. Offene Gastsitzungen wurden beendet.");
+    $("userCreateForm").reset();
+    await refreshSystemUsers();
+    toast("Benutzer angelegt.");
+  } catch (error) { toast(error.message); }
+}
+
+async function saveSystemUser(username, row) {
+  try {
+    await api(`/api/users/${encodeURIComponent(username)}`, { method: "POST", body: JSON.stringify({
+      role: row.querySelector("[data-user-role]").value,
+      enabled: row.querySelector("[data-user-enabled]").checked,
+      password: row.querySelector("[data-user-password]").value,
+    }) });
+    await refreshSystemUsers();
+    toast(`Benutzer ${username} gespeichert. Offene Sitzungen wurden beendet.`);
+  } catch (error) { toast(error.message); }
+}
+
+async function deleteSystemUser(username) {
+  if (!window.confirm(`Benutzer ${username} wirklich löschen?`)) return;
+  try {
+    await api(`/api/users/${encodeURIComponent(username)}`, { method: "DELETE" });
+    await refreshSystemUsers();
+    toast(`Benutzer ${username} gelöscht.`);
+  } catch (error) { toast(error.message); }
+}
+
+function renderApiSettings() {
+  const settings = state.system.apiSettings;
+  if (!settings) return;
+  $("apiWriteEnabled").checked = Boolean(settings.write_enabled);
+  $("apiAuthLevel").value = settings.auth_level ?? 4;
+  $("apiWriteStatus").textContent = settings.write_enabled
+    ? "API-LIVE-SCHREIBEN aktiv: Tokens mit Schreibrecht können serverseitige Aktionen auslösen."
+    : "API-Schreiben ist deaktiviert. Lese- und Historienzugriffe bleiben verfügbar.";
+  $("apiWriteStatus").className = `write-guard-status ${settings.write_enabled ? "warn" : "ok"}`;
+}
+
+function tokenScopesFrom(container) {
+  return Array.from(container.querySelectorAll('input[type="checkbox"][value]:checked')).map((item) => item.value);
+}
+
+function renderSystemTokens() {
+  const items = state.system.tokens || [];
+  $("tokenRows").innerHTML = items.map((token) => `<tr data-token-row="${token.id}">
+    <td><strong>${escapeHtml(token.name)}</strong><small>von ${escapeHtml(token.owner_username)}</small></td>
+    <td><code>${escapeHtml(token.token_prefix)}…</code></td>
+    <td><div class="scope-list">${["read", "history", "write"].map((scope) => `<label class="check-label"><input type="checkbox" value="${scope}" ${token.scopes.includes(scope) ? "checked" : ""}> ${scope}</label>`).join("")}</div></td>
+    <td><label class="check-label"><input data-token-enabled type="checkbox" ${token.enabled ? "checked" : ""}> ${token.enabled ? "Aktiv" : "Deaktiviert"}</label></td>
+    <td>${token.last_used_at ? escapeHtml(new Date(token.last_used_at).toLocaleString("de-DE")) : "Noch nie"}</td>
+    <td class="table-actions"><button type="button" data-token-save="${token.id}">Speichern</button><button type="button" class="danger" data-token-delete="${token.id}">Löschen</button></td>
+  </tr>`).join("") || `<tr><td colspan="6" class="muted">Noch keine API-Tokens.</td></tr>`;
+}
+
+async function refreshSystemTokens() {
+  if (state.user?.role !== "admin") return;
+  try {
+    const [tokens, settings, history] = await Promise.all([
+      api("/api/tokens"),
+      api("/api/settings/api"),
+      api("/api/history/adaptive/status"),
+    ]);
+    state.system.tokens = tokens.items || [];
+    state.system.apiSettings = settings;
+    renderSystemTokens();
+    renderApiSettings();
+    const raw = history.raw || {};
+    const rollups = history.rollups || {};
+    $("adaptiveHistoryStatus").textContent = `Rohzone: ${raw.count || 0} Snapshots, davon ${raw.preserved || 0} im Motorfenster · Verdichtung: ${rollups.count || 0} Zeitfenster · Rohhaltung ${history.raw_retention_hours} h · Vor-/Nachlauf je ${Math.round((history.event_margin_seconds || 0) / 3600)} h.`;
+  } catch (error) { toast(error.message); }
+}
+
+async function saveApiSettings(event) {
+  event.preventDefault();
+  try {
+    state.system.apiSettings = await api("/api/settings/api", { method: "POST", body: JSON.stringify({
+      write_enabled: $("apiWriteEnabled").checked,
+      auth_level: Number($("apiAuthLevel").value),
+    }) });
+    renderApiSettings();
+    toast("API-Einstellungen gespeichert. Es wurde kein Reglerwert geschrieben.");
+  } catch (error) { toast(error.message); }
+}
+
+async function createApiToken(event) {
+  event.preventDefault();
+  try {
+    const created = await api("/api/tokens", { method: "POST", body: JSON.stringify({
+      name: $("tokenCreateName").value,
+      scopes: tokenScopesFrom($("tokenCreateForm")),
+    }) });
+    $("tokenCreateForm").reset();
+    $("tokenSecret").textContent = created.token;
+    $("tokenSecretPanel").hidden = false;
+    await refreshSystemTokens();
+    toast("API-Token erzeugt. Es wird nur jetzt vollständig angezeigt.");
+  } catch (error) { toast(error.message); }
+}
+
+async function saveApiToken(tokenId, row) {
+  try {
+    await api(`/api/tokens/${tokenId}`, { method: "POST", body: JSON.stringify({
+      scopes: tokenScopesFrom(row),
+      enabled: row.querySelector("[data-token-enabled]").checked,
+    }) });
+    await refreshSystemTokens();
+    toast("API-Token gespeichert.");
+  } catch (error) { toast(error.message); }
+}
+
+async function deleteApiToken(tokenId) {
+  if (!window.confirm("API-Token unwiderruflich löschen?")) return;
+  try {
+    await api(`/api/tokens/${tokenId}`, { method: "DELETE" });
+    await refreshSystemTokens();
+    toast("API-Token gelöscht.");
   } catch (error) { toast(error.message); }
 }
 
@@ -1725,7 +1885,33 @@ document.addEventListener("DOMContentLoaded", () => {
   $("authPreviewButton").addEventListener("click", refreshAuthPreview);
   $("authPreviewApply").addEventListener("click", applyAuthPreview);
   $("passwordForm").addEventListener("submit", changePassword);
-  $("guestPasswordForm").addEventListener("submit", changeGuestPassword);
+  $("systemTabs").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-system-tab]");
+    if (button) selectSystemTab(button.dataset.systemTab);
+  });
+  $("userCreateForm").addEventListener("submit", createSystemUser);
+  $("usersRefresh").addEventListener("click", refreshSystemUsers);
+  $("userRows").addEventListener("click", (event) => {
+    const save = event.target.closest("[data-user-save]");
+    if (save) return saveSystemUser(save.dataset.userSave, save.closest("[data-user-row]"));
+    const remove = event.target.closest("[data-user-delete]");
+    if (remove) deleteSystemUser(remove.dataset.userDelete);
+  });
+  $("apiSettingsForm").addEventListener("submit", saveApiSettings);
+  $("tokenCreateForm").addEventListener("submit", createApiToken);
+  $("tokensRefresh").addEventListener("click", refreshSystemTokens);
+  $("tokenRows").addEventListener("click", (event) => {
+    const save = event.target.closest("[data-token-save]");
+    if (save) return saveApiToken(Number(save.dataset.tokenSave), save.closest("[data-token-row]"));
+    const remove = event.target.closest("[data-token-delete]");
+    if (remove) deleteApiToken(Number(remove.dataset.tokenDelete));
+  });
+  $("tokenSecretCopy").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("tokenSecret").textContent || "");
+      toast("Token in die Zwischenablage kopiert.");
+    } catch (_) { toast("Token konnte nicht automatisch kopiert werden."); }
+  });
   $("maintenanceTestMode").addEventListener("change", changeMaintenanceMode);
   $("sootFilterSettingsForm").addEventListener("submit", saveSootFilterSettings);
   $("temperatureRange").addEventListener("change", () => { $("historyStart").value = ""; $("historyEnd").value = ""; refreshCharts(); });

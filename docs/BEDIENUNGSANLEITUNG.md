@@ -1,6 +1,6 @@
 # Open Dachs Manager – Bedienungsanleitung
 
-Stand: 09.08.2026 · Version V3 1.0
+Stand: 10.08.2026 · Version V3 1.1.0
 
 Diese Anleitung beschreibt den täglichen Betrieb der Weboberfläche, CLI und
 TUI. Installation und Migration stehen ausführlich in
@@ -26,9 +26,9 @@ http://<IP-Adresse-des-Pi>:8084
 
 Bei einer frischen Installation stehen die zufällig erzeugten Erstpasswörter
 einmal im Installerauszug und im ersten Webdienst-Log. Das Adminpasswort nach
-der ersten Anmeldung ändern. Unter `Einstellungen` kann der Admin auch das
-Gastpasswort neu setzen. Der Gast kann sein Passwort nicht selbst ändern;
-eine Änderung beendet alle offenen Gastsitzungen.
+der ersten Anmeldung ändern. Im eigenen Hauptbereich `System` können Admins
+mehrere Konten anlegen, Rollen und Status ändern, Passwörter zurücksetzen und
+Konten löschen. Änderungen an einem Konto beenden dessen offene Sitzungen.
 
 ## 2. Gemeinsamer serieller Zugriff
 
@@ -83,6 +83,13 @@ Die Überwachung schreibt ausgewählte Werte in die lokale SQLite-Datenbank und
 stellt Zeitreihen dar. `Web-Serialzugriff pausieren` stoppt nur das
 Web-Polling. Worker, CLI und TUI bleiben erreichbar.
 
+Alle regulär überwachten Livewerte werden zusätzlich zunächst 24 Stunden als
+komprimierte Roh-Snapshots gehalten. Sobald die Drehzahl größer als null ist,
+bleiben der komplette Motorlauf sowie je eine Stunde davor und danach in
+voller Auflösung erhalten. Übrige Stillstandszeiten werden danach in
+15-Minuten-Fenster mit Anfang, Ende, Minimum, Maximum, Mittelwert, Anzahl und
+Änderungszahl verdichtet.
+
 ### Wartung
 
 `Wartung starten & Anlage einlesen` liest alle seriell adressierbaren Blöcke
@@ -93,14 +100,14 @@ Der daraus erzeugte Entwurf wird lokal gespeichert. Checkliste, zusätzliche
 lokale Arbeitsliste, Monteur, Messwerte und Bemerkungen lassen sich fortlaufend
 ergänzen. HTML-, dreiseitiger PDF-Bericht und JSON-Export stehen zur Verfügung.
 
-V3 1.0 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
+V3 1.1.0 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
 die Oberfläche die exakte Eingabe `DEMO ABSCHLIESSEN`. Danach wird der Bericht
 lokal validiert, unveränderlich archiviert und deutlich als Demo gekennzeichnet.
 Der Abschluss öffnet keine Serialworker-Sitzung, schreibt weder Block 100 noch
 Block 104 und setzt kein Bestätigungsbit. Das gilt auch dann, wenn ein Browser
 manipulierte API-Daten sendet, weil der Schreibschutz serverseitig aktiv ist.
 
-Unter `Einstellungen → Testmodus` kann ausschließlich der Admin diesen Modus
+Unter `System → Wartungsabschluss` kann ausschließlich der Admin diesen Modus
 umschalten. Die Wahl wird lokal auf dem Pi gespeichert und überlebt Neustarts
 und Updates. Das Umschalten selbst öffnet keine Serialworker-Sitzung und
 schreibt nichts in den Regler. Bei deaktiviertem Testmodus verlangt der echte
@@ -137,6 +144,21 @@ Die Registeransicht gruppiert alle adressierbaren Mapping-Felder nach Block.
 Auswahllisten und Wertebereiche sind Eingabehilfen; ein Rohwert-Fallback bleibt
 für unbekannte Varianten erhalten.
 
+In Block 20 liegt `Zeitsynchronisierung aktiv` physisch an Offset 41. Die
+Originaloberfläche dokumentiert keine Wertetabelle; `0` und `1` werden deshalb
+als plausibel inaktiv/aktiv beschriftet, andere Werte bleiben unbekannte
+Rohwerte. Offset 40 ist der Display-Kontrast. In Block 24 wird der
+Kraftstofftyp mit den exakten Originalbezeichnungen angezeigt, beispielsweise
+`8 (Heizöl EL)`. `Luftdruck` ist ein barometrischer 16-Bit-Rohwert ohne
+dokumentierte Einheit oder Skalierung und ist nicht auf Gasanlagen beschränkt;
+ein gelesener Wert `0` wird nicht künstlich umgerechnet. Die Temperatur an
+Offset 20 heißt `Kapseltemperatur` und bleibt in °C skaliert.
+
+Die gemeinsame Dachs-Laufhistorie der Blöcke 28, 30, 31 und 32 zeigt die fünf
+Abschaltwerte zusätzlich als Hexwert und Klartext. Dabei handelt es sich um
+eine aktive-low 16-Bit-Freigabemaske, nicht um Servicecodes; mehrere gelöschte
+Bits ergeben mehrere gleichzeitig angezeigte Abschaltgründe.
+
 Ohne aktivierte Hardwarefreigabe erzeugt Speichern lediglich einen Dry-Run.
 Vor jedem echten Write werden Block, Feld, Datentyp, Authentifizierung und der
 aktuelle Payload geprüft.
@@ -158,6 +180,46 @@ kein Nachweis der Konformität mit einer heutigen Normausgabe.
 
 Der Aufbau von Zieladressen und Block-Lesevorgängen ist in
 [PROTOKOLL.md](PROTOKOLL.md) bytegenau beschrieben.
+
+### System, Benutzer und API-Tokens
+
+Der Hauptbereich `System` ist nur für Admins sichtbar und ausdrücklich von
+den Dachs-Einstellungen getrennt. Unter `Benutzer & Berechtigungen` lassen
+sich mehrere Gast- und Admin-Konten verwalten. Mindestens ein aktiver Admin
+bleibt erzwungen; das aktuell verwendete Admin-Konto kann sich nicht selbst
+deaktivieren oder löschen.
+
+Unter `API & Tokens` wird die lokale EDOMI-API verwaltet. Ein Token erhält
+getrennte Rechte:
+
+- `read`: Livecache, Katalog und kontrollierte Block-Lesevorgänge
+- `history`: adaptive Roh- und Verdichtungsdaten
+- `write`: serverseitige Aktion `set-value`
+
+Das vollständige Token wird nur unmittelbar nach der Erzeugung angezeigt;
+dauerhaft liegt ausschließlich sein SHA-256-Hash vor. API-Schreiben ist
+zusätzlich global standardmäßig deaktiviert. Erst wenn ein Admin es im
+Systembereich freischaltet, kann ein aktives Token mit `write`-Recht eine
+Aktion auslösen. EDOMI übergibt dabei weder PW4 noch rohe Blockbytes.
+
+Beispiel:
+
+```http
+POST /api/v1/actions/set-value
+Authorization: Bearer <Token>
+Content-Type: application/json
+
+{"block":50,"key":"Hka_Ew.usSollGenerator","value":4.7,"request_id":"edomi-4711"}
+```
+
+Die eindeutige `request_id` verhindert, dass eine bereits verarbeitete
+Anfrage bei einer Wiederholung nochmals geschrieben wird. Sie ist fest an
+Token, Block, CPU, Feld und Wert gebunden. Eine parallele Wiederholung oder die
+Wiederverwendung mit anderem Inhalt liefert HTTP 409 und löst keinen zweiten
+Write aus. Für die Generatornennleistung prüft der Server vor Auth und Write
+zusätzlich den vom Regler gelesenen Kraftstofftyp und dessen dokumentierten
+Leistungsbereich. HTTP bleibt für das lokale Netz verfügbar; eine externe
+TLS-Terminierung erfolgt bei Bedarf vor dem Dienst durch nginx.
 
 ### Audit
 

@@ -149,6 +149,51 @@ MOTOR_STATUS_MAP = {
     35: "KEINE Stellmotorbewegung",
 }
 
+FUEL_TYPE_MAP = {
+    0: "unbekannt",
+    8: "Heizöl EL",
+    9: "Rapsester",
+    10: "Rapsöl",
+    11: "Heizöl EL",
+    128: "Gas",
+    144: "Gas",
+    160: "Biogas",
+    176: "Erdgas",
+    192: "Flüssiggas (Propan)",
+    208: "Erdgas",
+}
+
+# Hka_Abschaltgrund.usAbschaltcode is an active-low snapshot of the
+# 16-bit Hka_Bd.UHka_Frei.Freigabe mask.  It is not a service-code number.
+SHUTDOWN_FLAG_TEXTS = (
+    "Keine Anforderung Dachs",
+    "25 Sek Abschaltzeit",
+    "Stillstandszeit aktiv",
+    "Sicherheitsabschaltung nach 24h",
+    "Anlagenstörung",
+    "Interne Temperatur > Soll",
+    "Eintrittstemperatur > Soll",
+    "Sicherheitskette offen",
+    "Fehler im Versorgungsnetz",
+    "Startverzögerung aktiv",
+    "Reserve 1",
+    "Reserve 2",
+    "Keine Modulfreigabe extern",
+    "Keine Modulfreigabe Uhr",
+    "Dachs ausgeschaltet",
+    "Inbetriebnahme erforderlich",
+)
+
+
+def shutdown_code_text(code: int) -> str:
+    """Describe the active-low Freigabe bits stored in the shutdown ring."""
+    value = int(code) & 0xFFFF
+    reasons = [
+        text for bit, text in enumerate(SHUTDOWN_FLAG_TEXTS)
+        if not value & (1 << bit)
+    ]
+    return "; ".join(reasons) if reasons else "Kein Abschaltgrund gesetzt"
+
 
 def _java_properties_escapes(value: str) -> str:
     value = re.sub(r"\\u([0-9A-Fa-f]{4})", lambda m: chr(int(m.group(1), 16)), value)
@@ -202,18 +247,19 @@ def _phase_suffix(key: str) -> str:
 
 
 FIELD_LABEL_OVERRIDES = {
+    "Hka_Bd_Stat.bZeitsyncAktiv": "Zeitsynchronisierung aktiv",
     "Hka_Mw1.Temp.sbRuecklauf": "Rücklauffühler RF (externer Heizkreis)",
     "Hka_Mw1.Temp.sbVorlauf": "Vorlauffühler VF (externer Heizkreis)",
     "Hka_Mw1.Temp.sbGen": "Dachs-Eintritt",
     "Hka_Mw1.Temp.sbZS_Warmwasser": "Warmwasser-Isttemperatur",
     "Hka_Mw1.Temp.sAbgasMotor": "Motorabgastemperatur",
     "Hka_Mw1.Temp.sAbgasHKA": "Dachs-Abgastemperatur",
-    "Hka_Mw1.Temp.sKapsel": "Kapseltemperatur / Kondenser-Abgastemperatur",
+    "Hka_Mw1.Temp.sKapsel": "Kapseltemperatur",
     "Hka_Bd.MaxTemp.sbMotor": "Maximale Kühlwassertemperatur Motor",
     "Hka_Bd.MaxTemp.sbGen": "Maximale Dachs-Eintrittstemperatur",
     "Hka_Bd.MaxTemp.sAbgasHKA": "Maximale Dachs-Abgastemperatur",
     "Hka_Bd.MaxTemp.sKapsel": "Maximale Kapsel-/Kondenser-Abgastemperatur",
-    "Hka_Mw1.bKraftstofftyp": "Kraftstofftyp / Status 2",
+    "Hka_Mw1.bKraftstofftyp": "Kraftstofftyp",
     "Hka_Mw1.Bivschalt.bZeitBisUmschaltung": "Zeit bis zur Bivalenz-Umschaltung",
     "Hka_Ew.HydraulikNr.b2_Waermeerzeuger": "Wärmeerzeuger 2",
     "Motbel250.bDachsEintritt": "Dachs-Eintritt",
@@ -1090,6 +1136,8 @@ def decode_run_history(payloads: dict[int, bytes]) -> dict:
         shutdowns.append({
             "index": index,
             "code": code,
+            "code_hex": f"0x{code:04X}",
+            "reason": shutdown_code_text(code) if code or timestamp else None,
             "timestamp": timestamp or None,
             "timestamp_text": timestamp_text,
             "timestamp_plausible": plausible,
@@ -1192,8 +1240,11 @@ def apply_format(key: str, value: object, formats: dict, service_labels: dict[st
         return f"{kind} {base_code} · {label if label != '-' else 'Unbekannter Code'}", ""
     if live == "hka_mw1.bkraftstofftyp":
         integer = int(round(number))
-        kind = "Öl" if integer in (8, 9, 10, 11) else "Gas" if integer in (128, 144, 160, 176, 192, 208) else "-" if integer == 0 else "unbekannt"
-        return f"{integer} ({kind})", ""
+        return f"{integer} ({FUEL_TYPE_MAP.get(integer, 'unbekannter Rohwert')})", ""
+    if live == "hka_bd_stat.bzeitsyncaktiv":
+        integer = int(round(number))
+        text = {0: "inaktiv", 1: "aktiv"}.get(integer, "unbekannter Rohwert")
+        return f"{integer} ({text})", ""
     if live == "hka_ew.uchprogrammwahl":
         integer = int(round(number))
         return f"{integer} ({ {65: 'A', 66: 'B', 69: 'E', 83: 'S'}.get(integer, 'unbekannt') })", ""

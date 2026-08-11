@@ -57,6 +57,21 @@ SPECIAL_LABELS_DE = {
 # Most choices and ranges live in bundled ``ui_metadata.json``.  These
 # additions describe fields which need a human note or a conditional value
 # that cannot be represented as one static range.
+BLOCK20_UI_OVERRIDES = {
+    "Hka_Bd_Stat.bZeitsyncAktiv": {
+        "help": "Statusbyte der Zeitsynchronisierung. Die Originaloberfläche enthält keine Wertetabelle; 0 = inaktiv und 1 = aktiv ist anhand des Feldnamens und realer Daten plausibel, andere Rohwerte bleiben als unbekannt sichtbar.",
+    },
+}
+
+BLOCK24_UI_OVERRIDES = {
+    "Hka_Mw1.usLuftdruck": {
+        "help": "Barometrischer Luftdruck (16-Bit-Rohwert). Die Originalquelle dokumentiert weder Einheit noch Skalierung; das Feld ist nicht auf Gasanlagen beschränkt. Rohwert 0 bleibt deshalb unverändert sichtbar und bedeutet hier nur: kein Messwert geliefert oder belegt.",
+    },
+    "Hka_Mw1.bKraftstofftyp": {
+        "help": "Originalzuordnung: 0 unbekannt; 8/11 Heizöl EL; 9 Rapsester; 10 Rapsöl; 128/144 Gas; 160 Biogas; 176/208 Erdgas; 192 Flüssiggas (Propan). Dokumentierte Leistungsbereiche: 8/10 = 3,8–5,3 kW; 128/160 = 4,0–5,5 kW; 144 = 3,5–5,0 kW; für die übrigen Typen ist kein belastbarer Bereich hinterlegt.",
+    },
+}
+
 BLOCK50_UI_OVERRIDES = {
     "Hka_Ew.UFlag_Ew1.bGrundeinstellung": {
         "help": "Kombiniertes Grundeinstellungs-/Flag-Byte; hierfür ist keine einzelne belastbare Auswahlliste dokumentiert.",
@@ -344,6 +359,10 @@ class PackRepository:
             for key, metadata in fields.items():
                 if isinstance(metadata, dict):
                     self.ui_metadata.setdefault((block, str(key)), {}).update(metadata)
+        for key, override in BLOCK20_UI_OVERRIDES.items():
+            self.ui_metadata.setdefault((20, key), {}).update(override)
+        for key, override in BLOCK24_UI_OVERRIDES.items():
+            self.ui_metadata.setdefault((24, key), {}).update(override)
         for key, override in BLOCK50_UI_OVERRIDES.items():
             self.ui_metadata.setdefault((50, key), {}).update(override)
 
@@ -787,7 +806,7 @@ class PackRepository:
                 item(".sWirkleistung", "Elektrische Generatorleistung"),
                 item(".ulMotorlaufsekunden", "Motorlaufzeit"),
                 item(".usLuftdruck", "Luftdruck"),
-                item(".bKraftstofftyp", "Kraftstofftyp / Status 2"),
+                item(".bKraftstofftyp", "Kraftstofftyp"),
             ]),
             section("Temperaturen im Dachs", [
                 item(".Temp.sbGen", "Dachs-Eintritt", "°C"),
@@ -795,7 +814,7 @@ class PackRepository:
                 dachs_outlet,
                 item(".Temp.sAbgasMotor", "Motorabgastemperatur", "°C"),
                 item(".Temp.sAbgasHKA", "Dachs-Abgastemperatur nach Rußfilter", "°C"),
-                item(".Temp.sKapsel", "Kapsel-/Kondenser-Abgastemperatur", "°C"),
+                item(".Temp.sKapsel", "Kapseltemperatur", "°C"),
                 item(".Temp.sbRegler", "Reglerfühler MSR2", "°C"),
             ]),
             section("Heizkreis, Speicher und Raum", [
@@ -923,7 +942,17 @@ class PackRepository:
             )
         if typ == "string":
             data = str(raw).encode("latin-1", errors="ignore")[:size]
-            payload[offset:offset + size] = data + b"\x00" * max(0, size - len(data))
+            original = bytes(payload[offset:offset + size])
+            original_text = original.decode("latin-1", errors="ignore").rstrip("\x00 ")
+            if str(raw) == original_text:
+                # A decoded fixed-width MSR2 string no longer carries its
+                # padding information.  A no-op edit must therefore leave the
+                # complete original field byte-identical.
+                return
+            original_data_size = len(original.rstrip(b"\x00 "))
+            trailing = original[original_data_size:]
+            pad = trailing[:1] if trailing[:1] in {b"\x00", b" "} else b"\x00"
+            payload[offset:offset + size] = data + pad * max(0, size - len(data))
         elif meta.get("packed"):
             bit_offset = int(meta["bit_offset"])
             bit_length = int(meta["bit_length"])

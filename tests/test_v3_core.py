@@ -1,8 +1,10 @@
 import json
 import http.client
 import os
+import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from collections import deque
 from contextlib import contextmanager
@@ -25,11 +27,18 @@ from open_dachs_manager.maintenance import (
     validate_protocol,
 )
 from open_dachs_manager.web import (
+    APIRequestConflictError,
     DEFAULT_DASHBOARD_SERIES,
+    DEFAULT_FAST_MONITOR_BLOCKS,
+    DEFAULT_HISTORY_SAMPLE_INTERVAL,
     DEFAULT_SLOW_MONITOR_BLOCKS,
     DachsHTTPServer,
     DachsWebApp,
     DachsStore,
+    HISTORY_MEASUREMENT_KEYS,
+    HISTORY_SERIES,
+    POWER_TARGET_LIMITS_KW,
+    PowerTargetRangeError,
     init_users,
     normalize_base_path,
     soot_filter_estimate,
@@ -121,7 +130,154 @@ class CoreTests(unittest.TestCase):
             True,
         ))
 
-    def test_only_admin_can_change_guest_password_and_guest_sessions_end(self):
+    def test_generator_target_uses_source_ranges_for_known_fuel_types(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+
+            class FuelService:
+                fuel_raw = 8
+                ok = True
+
+                def read_block(self, _session, block):
+                    self.last_block = block
+                    payload = bytearray(70)
+                    payload[54] = self.fuel_raw
+                    return SimpleNamespace(ok=self.ok, payload=bytes(payload))
+
+            service = FuelService()
+            app.service = service
+
+            def encoded_target(value):
+                payload = bytearray(70)
+                app.pack.encode_value(payload, "Hka_Ew.usSollGenerator", str(value), block=50)
+                return bytes(payload)
+
+            for fuel_raw, (minimum, maximum) in POWER_TARGET_LIMITS_KW.items():
+                service.fuel_raw = fuel_raw
+                for accepted in (minimum, maximum):
+                    with self.subTest(fuel_raw=fuel_raw, accepted=accepted):
+                        app._validate_power_target_changes(
+                            object(), 50,
+                            [{"key": "Hka_Ew.usSollGenerator", "value": accepted}],
+                            encoded_target(accepted),
+                        )
+                        self.assertEqual(service.last_block, 24)
+                for rejected in (minimum - 0.1, maximum + 0.1):
+                    with self.subTest(fuel_raw=fuel_raw, rejected=rejected):
+                        with self.assertRaises(PowerTargetRangeError):
+                            app._validate_power_target_changes(
+                                object(), 50,
+                                [{"key": "Hka_Ew.usSollGenerator", "value": rejected}],
+                                encoded_target(rejected),
+                            )
+
+            for unbounded in (0, 9, 11, 176, 192, 208, 77):
+                service.fuel_raw = unbounded
+                with self.subTest(unbounded=unbounded):
+                    app._validate_power_target_changes(
+                        object(), 50,
+                        [{"key": "Hka_Ew.usSollGenerator", "value": 5.7}],
+                        encoded_target(5.7),
+                    )
+
+            service.ok = False
+            with self.assertRaisesRegex(RuntimeError, "konnte nicht gelesen werden"):
+                app._validate_power_target_changes(
+                    object(), 50,
+                    [{"key": "Hka_Ew.usSollGenerator", "value": 5.0}],
+                    encoded_target(5.0),
+                )
+            service.ok = True
+            original_decode = app.pack.decode
+            app.pack.decode = lambda block, payload: (
+                [] if block == 24 else original_decode(block, payload)
+            )
+            try:
+                with self.assertRaisesRegex(RuntimeError, "nicht dekodiert"):
+                    app._validate_power_target_changes(
+                        object(), 50,
+                        [{"key": "Hka_Ew.usSollGenerator", "value": 5.0}],
+                        encoded_target(5.0),
+                    )
+            finally:
+                app.pack.decode = original_decode
+
+    def test_generator_target_is_validated_before_auth_and_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            target_payload = bytearray(70)
+            app.pack.encode_value(target_payload, "Hka_Ew.usSollGenerator", "4.7", block=50)
+
+            class RecordingService:
+                def __init__(self):
+                    self.calls = []
+                    self.fuel_ok = True
+
+                @contextmanager
+                def session(self):
+                    yield object()
+
+                def read_block(self, _session, block):
+                    self.calls.append(("read", block))
+                    if block == 50:
+                        return SimpleNamespace(ok=True, payload=bytes(target_payload))
+                    payload = bytearray(70)
+                    payload[54] = 8
+                    return SimpleNamespace(ok=self.fuel_ok, payload=bytes(payload))
+
+                def authenticate(self, _session, level, _pass4):
+                    self.calls.append(("auth", level))
+                    return SimpleNamespace(ok=True, granted_level=level)
+
+                def write_payload(self, *_args, **_kwargs):
+                    self.calls.append(("write", 50))
+                    return SimpleNamespace(as_dict=lambda: {
+                        "written": True,
+                        "readback_ok": True,
+                        "error": None,
+                    })
+
+            service = RecordingService()
+            app.service = service
+            created = app.store.create_api_token("admin", "EDOMI Leistung", ["write"])
+            principal = app.store.authenticate_api_token(created["token"])
+            app.set_api_settings({"write_enabled": True, "auth_level": 4})
+            with self.assertRaises(PowerTargetRangeError):
+                app.execute_api_set_value(principal, {
+                    "block": 50,
+                    "key": "Hka_Ew.usSollGenerator",
+                    "value": 5.7,
+                    "request_id": "oil-too-high",
+                })
+            self.assertEqual(service.calls, [("read", 50), ("read", 24)])
+            self.assertEqual(app.store.audits(), [])
+            with app.store.database() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM api_requests").fetchone()[0], 0)
+
+            service.calls.clear()
+            result = app.execute_api_set_value(principal, {
+                "block": 50,
+                "key": "Hka_Ew.usSollGenerator",
+                "value": 5.3,
+                "request_id": "oil-valid",
+            })
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                service.calls,
+                [("read", 50), ("read", 24), ("auth", 4), ("write", 50)],
+            )
+
+            service.calls.clear()
+            service.fuel_ok = False
+            with self.assertRaisesRegex(RuntimeError, "konnte nicht gelesen werden"):
+                app.write_block(
+                    "api:test", 50,
+                    [{"key": "Hka_Ew.usSollGenerator", "value": 5.0}],
+                    4, "", True,
+                )
+            self.assertEqual(service.calls, [("read", 50), ("read", 24)])
+
+    def test_multiple_users_roles_passwords_and_sessions_are_managed(self):
         with tempfile.TemporaryDirectory() as directory:
             init_users(
                 directory,
@@ -132,21 +288,32 @@ class CoreTests(unittest.TestCase):
             admin_token = app.login("admin", "AdminPasswort123")[0]
             guest_token = app.login("gast", "GastPasswort123")[0]
 
-            with self.assertRaises(PermissionError):
-                app.change_password("gast", "GastPasswort123", "EigenesPasswort456")
+            app.change_password("gast", "GastPasswort123", "EigenesPasswort456")
+            self.assertIsNone(app.session_user(guest_token))
+            self.assertIsNotNone(app.login("gast", "EigenesPasswort456"))
             with self.assertRaises(PermissionError):
                 app.change_guest_password("admin", "falsch", "NeuesGastPasswort456")
 
             app.change_guest_password("admin", "AdminPasswort123", "NeuesGastPasswort456")
+            created = app.create_user("edomi", "EDOMIStartPasswort123", "guest")
+            self.assertEqual(created["role"], "guest")
+            updated = app.update_user("admin", "edomi", {
+                "role": "admin", "enabled": True, "password": "EDOMINeuesPasswort456",
+            })
+            self.assertEqual(updated["role"], "admin")
+            self.assertIsNotNone(app.login("edomi", "EDOMINeuesPasswort456"))
+            app.delete_user("admin", "edomi")
+            self.assertIsNone(app.login("edomi", "EDOMINeuesPasswort456"))
 
             self.assertIsNone(app.login("gast", "GastPasswort123"))
             self.assertIsNotNone(app.login("gast", "NeuesGastPasswort456"))
-            self.assertIsNone(app.session_user(guest_token))
             self.assertEqual(app.session_user(admin_token)["role"], "admin")
+            with self.assertRaises(PermissionError):
+                app.delete_user("admin", "admin")
 
     def test_maintenance_test_mode_is_safe_and_persistent(self):
         with tempfile.TemporaryDirectory() as directory:
-            app = DachsWebApp(data_dir=directory, interval=60, maintenance_live_writes=False)
+            app = DachsWebApp(data_dir=directory, interval=60)
             self.assertEqual(app.maintenance_settings(), {
                 "test_mode": True,
                 "maintenance_live_writes_enabled": False,
@@ -167,6 +334,47 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(safe_restart.maintenance_settings()["maintenance_live_writes_enabled"])
             with self.assertRaises(ValueError):
                 safe_restart.set_maintenance_test_mode("false")
+
+    def test_maintenance_mode_http_is_admin_only_and_base_path_safe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            init_users(
+                directory,
+                admin_password="AdminPasswort123",
+                guest_password="GastPasswort123",
+            )
+            app = DachsWebApp(data_dir=directory, interval=60)
+            admin_token = app.login("admin", "AdminPasswort123")[0]
+            guest_token = app.login("gast", "GastPasswort123")[0]
+            server = DachsHTTPServer(("127.0.0.1", 0), app, base_path="/dachs")
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+
+            def request(method, token, payload=None):
+                connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+                body = json.dumps(payload) if payload is not None else None
+                headers = {
+                    "Cookie": f"open_dachs_session={token}",
+                    "Content-Type": "application/json",
+                }
+                connection.request(method, "/dachs/api/settings/maintenance", body=body, headers=headers)
+                response = connection.getresponse()
+                data = json.loads(response.read().decode("utf-8"))
+                connection.close()
+                return response.status, data
+
+            try:
+                self.assertEqual(request("GET", guest_token)[0], 403)
+                self.assertEqual(request("POST", guest_token, {"test_mode": False})[0], 403)
+                status, settings = request("GET", admin_token)
+                self.assertEqual(status, 200)
+                self.assertTrue(settings["test_mode"])
+                status, settings = request("POST", admin_token, {"test_mode": False})
+                self.assertEqual(status, 200)
+                self.assertFalse(settings["test_mode"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
 
     def test_dashboard_cards_are_validated_and_persisted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -313,6 +521,15 @@ class CoreTests(unittest.TestCase):
             connection.close()
 
             connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+            connection.request("GET", "/dachs/static/dachs-generator-motor.png")
+            response = connection.getresponse()
+            generator_png = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Content-Type"), "image/png")
+            self.assertEqual(generator_png[:8], b"\x89PNG\r\n\x1a\n")
+            connection.close()
+
+            connection = http.client.HTTPConnection(*server.server_address, timeout=2)
             connection.request("GET", "/healthz")
             response = connection.getresponse()
             response.read()
@@ -448,7 +665,7 @@ class CoreTests(unittest.TestCase):
     def test_version_fields_are_grouped_but_expand_back_to_writable_bytes(self):
         pack = PackRepository()
         payload = bytearray(70)
-        payload[25:29] = bytes((1, 2, 3, 4))
+        payload[26:30] = bytes((1, 2, 3, 4))
 
         fields = pack.display_fields(20, bytes(payload))
         version = next(field for field in fields if field.key == "Hka_Bd_Stat.bSoftwareVersionUeberw")
@@ -461,9 +678,9 @@ class CoreTests(unittest.TestCase):
         ])
 
         pack.encode_value(payload, version.key, "U 56.007.008", block=20)
-        self.assertEqual(bytes(payload[25:29]), bytes((5, 6, 7, 8)))
+        self.assertEqual(bytes(payload[26:30]), bytes((5, 6, 7, 8)))
         pack.encode_value(payload, version.key, "9.10.11.12", block=20)
-        self.assertEqual(bytes(payload[25:29]), bytes((9, 10, 11, 12)))
+        self.assertEqual(bytes(payload[26:30]), bytes((9, 10, 11, 12)))
         block, key, metadata = pack.resolve_key("Hka_Bd_Stat.bSoftwareVersionUeberw", 20)
         self.assertEqual((block, key), (20, "Hka_Bd_Stat.bSoftwareVersionUeberw"))
         self.assertEqual(metadata["type"], "version")
@@ -471,9 +688,9 @@ class CoreTests(unittest.TestCase):
     def test_all_version_styles_are_consistent_and_remain_writable(self):
         pack = PackRepository()
         payload = bytearray(70)
-        payload[25:29] = bytes((0, 0, 0, 3))
-        payload[29:33] = bytes((50, 0, 0, 2))
-        payload[33:38] = bytes((5, 0, 48, 48, 4))
+        payload[26:30] = bytes((0, 0, 0, 3))
+        payload[30:34] = bytes((50, 0, 0, 2))
+        payload[34:39] = bytes((5, 0, 48, 48, 4))
 
         fields = {field.key: field for field in pack.display_fields(20, bytes(payload))}
         self.assertEqual(fields["Hka_Bd_Stat.bSoftwareVersionUeberw"].value, "U 00.000.003")
@@ -481,9 +698,9 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(fields["Hka_Bd_Stat.bSoftwareVersionRegler"].value, "R 500.048.004")
 
         pack.encode_value(payload, "Hka_Bd_Stat.bSoftwareVersionRegler", "R 501.049.005", block=20)
-        self.assertEqual(bytes(payload[33:38]), bytes((5, 0, 49, 49, 5)))
+        self.assertEqual(bytes(payload[34:39]), bytes((5, 0, 49, 49, 5)))
         pack.encode_value(payload, "Hka_Bd_Stat.bSoftwareVersionMessen", "M 1.001.003", block=20)
-        self.assertEqual(bytes(payload[29:33]), bytes((50, 1, 1, 3)))
+        self.assertEqual(bytes(payload[30:34]), bytes((50, 1, 1, 3)))
 
     def test_hydraulic_code_is_one_grouped_writable_field(self):
         pack = PackRepository()
@@ -601,6 +818,55 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(decoded["Hka_Mw1.bZusatzplatinen"].raw, 5)
         self.assertEqual(decoded["Hka_Mw1.ulMotorlaufsekunden"].raw, 3600)
 
+    def test_block20_offsets_include_original_genehmigung_byte(self):
+        pack = PackRepository()
+        payload = bytearray(70)
+        payload[24] = 0b00000001
+        payload[39:42] = bytes((30, 51, 1))
+        payload = bytes(payload)
+        fields = pack.field_map(20)
+        decoded = {field.key: field for field in pack.decode(20, payload)}
+
+        self.assertEqual(len(payload), 70)
+        self.assertEqual(fields["Hka_Bd_Stat.Reserve1"]["offset"], 25)
+        self.assertEqual(fields["Hka_Bd_Stat.bSoftwareVersionUeberw[0]"]["offset"], 26)
+        self.assertEqual(fields["Hka_Bd_Stat.bSoftwareVersionMessen[0]"]["offset"], 30)
+        self.assertEqual(fields["Hka_Bd_Stat.bSoftwareVersionRegler[0]"]["offset"], 34)
+        self.assertEqual(decoded["Hka_Bd_Stat.bDispHelligkeit"].raw, 30)
+        self.assertEqual(decoded["Hka_Bd_Stat.bDispKontrast"].raw, 51)
+        self.assertEqual(decoded["Hka_Bd_Stat.bZeitsyncAktiv"].raw, 1)
+        self.assertEqual(decoded["Hka_Bd_Stat.bZeitsyncAktiv"].value, "1 (aktiv)")
+        self.assertEqual(decoded["Hka_Bd_Stat.bZeitsyncAktiv"].label, "Zeitsynchronisierung aktiv")
+        self.assertEqual(fields["Hka_Bd_Stat.bRes[27]"]["offset"], 69)
+
+    def test_fuel_type_uses_exact_original_labels(self):
+        pack = PackRepository()
+        expected = {
+            0: "unbekannt",
+            8: "Heizöl EL",
+            9: "Rapsester",
+            10: "Rapsöl",
+            11: "Heizöl EL",
+            128: "Gas",
+            144: "Gas",
+            160: "Biogas",
+            176: "Erdgas",
+            192: "Flüssiggas (Propan)",
+            208: "Erdgas",
+        }
+        for raw, text in expected.items():
+            with self.subTest(raw=raw):
+                payload = bytearray(70)
+                payload[54] = raw
+                field = {item.key: item for item in pack.decode(24, bytes(payload))}["Hka_Mw1.bKraftstofftyp"]
+                self.assertEqual(field.label, "Kraftstofftyp")
+                self.assertEqual(field.value, f"{raw} ({text})")
+        payload = bytearray(70)
+        payload[54] = 77
+        unknown = {item.key: item for item in pack.decode(24, bytes(payload))}["Hka_Mw1.bKraftstofftyp"]
+        self.assertEqual(unknown.value, "77 (unbekannter Rohwert)")
+        self.assertEqual(pack.label("Hka_Mw1.Temp.sKapsel", 24), "Kapseltemperatur")
+
     def test_oil_refill_history_is_an_array_of_ten_byte_records(self):
         pack = PackRepository()
         payload = bytearray(70)
@@ -629,7 +895,7 @@ class CoreTests(unittest.TestCase):
         p28[0] = 0
         p28[9] = 3  # starts for physical ring slot 7
         p30[12] = 0b11000000  # slot 7, 00:00 and 00:15 active (MSB first)
-        p30[26:28] = (12).to_bytes(2, "little")
+        p30[26:28] = (0xBFFF).to_bytes(2, "little")
         p30[28:32] = (787899872).to_bytes(4, "little")
         for offset, value in ((0, 7200), (4, 8), (8, 123000), (12, 456000), (16, 789000), (20, 1_500_000)):
             p32[offset:offset + 4] = value.to_bytes(4, "little")
@@ -641,7 +907,21 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(history["days"][1]["starts"], 3)
         self.assertEqual(history["summary"]["electric_work_kwh"], 123.0)
         self.assertEqual(history["summary"]["thermal_work_condenser_kwh"], 789.0)
-        self.assertEqual(history["shutdowns"][0]["code"], 12)
+        self.assertEqual(history["shutdowns"][0]["code"], 0xBFFF)
+        self.assertEqual(history["shutdowns"][0]["code_hex"], "0xBFFF")
+        self.assertEqual(history["shutdowns"][0]["reason"], "Dachs ausgeschaltet")
+
+        p30[26:28] = (0xFFEF).to_bytes(2, "little")
+        fault = pack.run_history({28: bytes(p28), 30: bytes(p30), 31: bytes(p31), 32: bytes(p32)})
+        self.assertEqual(fault["shutdowns"][0]["reason"], "Anlagenstörung")
+
+        p30[26:28] = (0xEFFF).to_bytes(2, "little")
+        external = pack.run_history({28: bytes(p28), 30: bytes(p30), 31: bytes(p31), 32: bytes(p32)})
+        self.assertEqual(external["shutdowns"][0]["reason"], "Keine Modulfreigabe extern")
+
+        p30[26:28] = (0xBFEF).to_bytes(2, "little")
+        combined = pack.run_history({28: bytes(p28), 30: bytes(p30), 31: bytes(p31), 32: bytes(p32)})
+        self.assertEqual(combined["shutdowns"][0]["reason"], "Anlagenstörung; Dachs ausgeschaltet")
 
     def test_service_history_codes_use_bundled_fault_catalogue(self):
         pack = PackRepository()
@@ -693,6 +973,43 @@ class CoreTests(unittest.TestCase):
         pack.encode_value(payload, "Adresse3.aModemTelLegacy", "MODEM", block=114)
         self.assertEqual(bytes(payload[:5]), b"MODEM")
         self.assertEqual(bytes(payload[17:34]), bytes(range(17, 34)))
+
+    def test_fixed_strings_preserve_their_existing_padding_style(self):
+        pack = PackRepository()
+
+        block50 = bytearray(70)
+        block50[45:47] = b"0 "
+        before50 = bytes(block50)
+        pack.encode_value(block50, "Hka_Ew.ModemKonfigLegacy.uchAmtsholung", "0", block=50)
+        self.assertEqual(bytes(block50), before50)
+        pack.encode_value(block50, "Hka_Ew.ModemKonfigLegacy.uchAmtsholung", "9", block=50)
+        self.assertEqual(block50[45:47], b"9 ")
+
+        block112 = bytearray(70)
+        block112[20:55] = b" " * 35
+        before112 = bytes(block112)
+        pack.encode_value(block112, "Adresse2.aEmail", "", block=112)
+        self.assertEqual(bytes(block112), before112)
+        pack.encode_value(block112, "Adresse2.aEmail", "mail@example.test", block=112)
+        self.assertEqual(block112[20:55], b"mail@example.test" + b" " * 18)
+
+        block114 = bytearray(70)
+        block114[0:17] = b" " * 17
+        block114[17:34] = b"123" + b"\x00" * 14
+        block114[34:51] = b" " * 17
+        block114[51:61] = b"11111" + b" " * 5
+        before114 = bytes(block114)
+        for key, value in (
+            ("Adresse3.aModemTelLegacy", ""),
+            ("Adresse3.aServiceTel2", ""),
+            ("Adresse3.aPLZ", "11111"),
+        ):
+            pack.encode_value(block114, key, value, block=114)
+        self.assertEqual(bytes(block114), before114)
+        pack.encode_value(block114, "Adresse3.aServiceTel1", "456", block=114)
+        self.assertEqual(block114[17:34], b"456" + b"\x00" * 14)
+        pack.encode_value(block114, "Adresse3.aPLZ", "22222", block=114)
+        self.assertEqual(block114[51:61], b"22222" + b" " * 5)
 
     def test_motor_diagnostic_pad_is_preserved_with_explicit_offsets(self):
         pack = PackRepository()
@@ -928,6 +1245,300 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(rows["first"][0]["field_key"], "field.a")
             self.assertEqual(rows["second"][0]["field_key"], "field.b")
 
+    def test_history_persists_selected_fast_blocks_as_one_snapshot_per_cycle(self):
+        self.assertEqual(DEFAULT_FAST_MONITOR_BLOCKS, (22, 24))
+        self.assertIn(20, DEFAULT_SLOW_MONITOR_BLOCKS)
+        self.assertEqual(DEFAULT_HISTORY_SAMPLE_INTERVAL, 0.0)
+        self.assertEqual(len(HISTORY_SERIES), 21)
+        self.assertEqual({block for block, _key in HISTORY_MEASUREMENT_KEYS}, {22, 24})
+        self.assertIn((22, "Hka_Bd.ulBetriebssekunden"), HISTORY_MEASUREMENT_KEYS)
+        self.assertIn((24, "Hka_Mw1.sWirkleistung"), HISTORY_MEASUREMENT_KEYS)
+        app = object.__new__(DachsWebApp)
+        app.history_interval = DEFAULT_HISTORY_SAMPLE_INTERVAL
+        app._last_history_sample = 100.0
+        self.assertTrue(app._history_sample_due(100.0))
+        app.history_interval = 0.75
+        self.assertFalse(app._history_sample_due(100.749))
+        self.assertTrue(app._history_sample_due(100.75))
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = DachsStore(Path(directory) / "history.db")
+            now = datetime.now(timezone.utc)
+            snapshot_rows = [
+                {
+                    "block": block,
+                    "key": key,
+                    "label": title,
+                    "raw": index,
+                    "value": index / 10,
+                    "unit": unit,
+                    "rtt_ms": 1.5,
+                }
+                for index, (_series_id, title, block, key, unit, _color) in enumerate(HISTORY_SERIES)
+            ]
+            store.record_history_snapshot(now.isoformat(), snapshot_rows)
+            with store.database() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM history_samples").fetchone()[0], 1)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM measurements").fetchone()[0], 0)
+            store.record((now - timedelta(seconds=10)).isoformat(), [{
+                "block": 22,
+                "key": "Hka_Bd.ulBetriebssekunden",
+                "label": "Betriebsstunden gesamt",
+                "raw": 1,
+                "value": 1,
+                "unit": "h",
+                "rtt_ms": 1,
+            }])
+            rows = store.measurements_batch(
+                [
+                    ("hours", 22, "Hka_Bd.ulBetriebssekunden"),
+                    ("power", 24, "Hka_Mw1.sWirkleistung"),
+                ],
+                now - timedelta(minutes=1),
+                now + timedelta(minutes=1),
+                100,
+            )
+            self.assertEqual(len(rows["hours"]), 2)
+            self.assertEqual(rows["hours"][0]["field_key"], "Hka_Bd.ulBetriebssekunden")
+            self.assertEqual(rows["power"][0]["field_key"], "Hka_Mw1.sWirkleistung")
+
+    def test_adaptive_history_keeps_motor_window_and_rolls_idle_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = DachsStore(Path(directory) / "history.db")
+            now = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
+
+            def rows(rpm, temperature):
+                return [
+                    {"block": 24, "key": "Hka_Mw1.usDrehzahl", "label": "Drehzahl", "raw": rpm, "value": rpm, "unit": "1/min", "type": "u16"},
+                    {"block": 24, "key": "Hka_Mw1.Temp.sbMotor", "label": "Motortemperatur", "raw": temperature, "value": temperature, "unit": "°C", "type": "s8"},
+                ]
+
+            far_idle = now - timedelta(hours=27)
+            pre_start = now - timedelta(hours=25, minutes=15)
+            motor_start = now - timedelta(hours=24, minutes=30)
+            motor_stop = now - timedelta(hours=24, minutes=20)
+            store.record_adaptive_snapshot(far_idle.isoformat(), rows(0, 42))
+            store.record_adaptive_snapshot(pre_start.isoformat(), rows(0, 44))
+            store.record_adaptive_snapshot(motor_start.isoformat(), rows(1500, 78))
+            store.record_adaptive_snapshot(motor_stop.isoformat(), rows(0, 75))
+
+            with store.database() as db:
+                preserved = db.execute(
+                    "SELECT preserve FROM adaptive_raw_samples WHERE recorded_at=?", (pre_start.isoformat(),)
+                ).fetchone()[0]
+            self.assertEqual(preserved, 1)
+
+            result = store.compact_adaptive_history(now, max_buckets=16)
+            self.assertGreaterEqual(result["compacted_rows"], 1)
+            with store.database() as db:
+                self.assertIsNone(db.execute(
+                    "SELECT 1 FROM adaptive_raw_samples WHERE recorded_at=?", (far_idle.isoformat(),)
+                ).fetchone())
+                self.assertIsNotNone(db.execute(
+                    "SELECT 1 FROM adaptive_raw_samples WHERE recorded_at=?", (pre_start.isoformat(),)
+                ).fetchone())
+                self.assertGreater(db.execute("SELECT COUNT(*) FROM adaptive_rollups").fetchone()[0], 0)
+
+            points = store.adaptive_history_between(
+                24,
+                "Hka_Mw1.Temp.sbMotor",
+                now - timedelta(hours=28),
+                now,
+                100,
+            )
+            self.assertIn("rollup", {item["kind"] for item in points})
+            self.assertIn("raw", {item["kind"] for item in points})
+            rollup = next(item for item in points if item["kind"] == "rollup")
+            self.assertEqual(rollup["first"], 42)
+            self.assertEqual(rollup["last"], 42)
+
+    def test_api_tokens_are_hashed_scoped_revocable_and_settings_are_safe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            created = app.store.create_api_token("admin", "EDOMI Heizung", ["read", "history", "write"])
+            self.assertTrue(created["token"].startswith("odm_"))
+            listed = app.store.api_tokens()[0]
+            self.assertNotIn("token", listed)
+            self.assertEqual(listed["scopes"], ["history", "read", "write"])
+            principal = app.store.authenticate_api_token(created["token"])
+            self.assertEqual(principal["name"], "EDOMI Heizung")
+            self.assertFalse(app.api_settings()["write_enabled"])
+            enabled = app.set_api_settings({"write_enabled": True, "auth_level": 4})
+            self.assertTrue(enabled["write_enabled"])
+            app.store.update_api_token(created["id"], scopes=["read"], enabled=False)
+            self.assertIsNone(app.store.authenticate_api_token(created["token"]))
+            app.store.delete_api_token(created["id"])
+            self.assertEqual(app.store.api_tokens(), [])
+
+    def test_api_request_id_is_atomic_payload_bound_and_replayable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            created = app.store.create_api_token("admin", "EDOMI Idempotenz", ["write"])
+            principal = app.store.authenticate_api_token(created["token"])
+            app.set_api_settings({"write_enabled": True, "auth_level": 4})
+            started = threading.Event()
+            release = threading.Event()
+            writes = []
+
+            def slow_write(*args):
+                writes.append(args)
+                started.set()
+                release.wait(timeout=2)
+                return {"written": True, "readback_ok": True, "error": None}
+
+            app.write_block = slow_write
+            payload = {
+                "block": 50,
+                "key": "Hka_Ew.usAufstellhoehe",
+                "value": 100,
+                "request_id": "parallel-1",
+            }
+            first = {}
+
+            def execute_first():
+                try:
+                    first["result"] = app.execute_api_set_value(principal, payload)
+                except Exception as exc:  # pragma: no cover - asserted below
+                    first["error"] = exc
+
+            thread = threading.Thread(target=execute_first)
+            thread.start()
+            self.assertTrue(started.wait(timeout=1))
+
+            before = time.monotonic()
+            self.assertEqual(len(app.store.api_tokens()), 1)
+            self.assertLess(time.monotonic() - before, 0.5)
+            with self.assertRaises(APIRequestConflictError):
+                app.store.delete_api_token(created["id"])
+            with self.assertRaises(APIRequestConflictError):
+                app.execute_api_set_value(principal, payload)
+
+            release.set()
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+            self.assertNotIn("error", first)
+            self.assertEqual(len(writes), 1)
+
+            replay = app.execute_api_set_value(principal, payload)
+            self.assertTrue(replay["replayed"])
+            self.assertEqual(len(writes), 1)
+            with self.assertRaises(APIRequestConflictError):
+                app.execute_api_set_value(principal, {**payload, "value": 200})
+            self.assertEqual(len(writes), 1)
+
+    def test_legacy_api_request_schema_is_migrated_conservatively(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "legacy.db"
+            db = sqlite3.connect(database)
+            try:
+                db.execute(
+                    "CREATE TABLE api_requests ("
+                    "token_id INTEGER NOT NULL, request_id TEXT NOT NULL, "
+                    "created_at TEXT NOT NULL, response_json TEXT NOT NULL, "
+                    "PRIMARY KEY(token_id, request_id))"
+                )
+                db.execute(
+                    "INSERT INTO api_requests(token_id,request_id,created_at,response_json) "
+                    "VALUES(1,'legacy-1','2026-08-10T00:00:00+00:00','{\"ok\":true}')"
+                )
+                db.commit()
+            finally:
+                db.close()
+
+            store = DachsStore(database)
+            with store.database() as db:
+                columns = {
+                    row["name"]: row for row in db.execute("PRAGMA table_info(api_requests)")
+                }
+                migrated = db.execute(
+                    "SELECT request_hash,status FROM api_requests WHERE request_id='legacy-1'"
+                ).fetchone()
+            self.assertIn("request_hash", columns)
+            self.assertIn("status", columns)
+            self.assertEqual(migrated["request_hash"], "")
+            self.assertEqual(migrated["status"], "completed")
+            with self.assertRaises(APIRequestConflictError):
+                store.reserve_api_request(1, "legacy-1", "new-fingerprint")
+
+    def test_api_offline_validation_uses_the_complete_block_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            key = "Hka_Bd.MaxTemp.sbRaumKreis2"
+            metadata = app.pack.field_map(22)[key]
+            self.assertGreater(int(metadata["offset"]) + int(metadata["size"]), 70)
+            app._validate_api_value_offline(22, 0, key, 42)
+
+    def test_edomi_api_requires_bearer_scope_and_keeps_writes_disabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            created = app.store.create_api_token("admin", "EDOMI Test", ["read", "write"])
+            server = DachsHTTPServer(("127.0.0.1", 0), app)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+
+            def request(method, path, *, token=None, body=None):
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+                headers = {"Content-Type": "application/json"}
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+                connection.request(method, path, body=json.dumps(body or {}) if body is not None else None, headers=headers)
+                response = connection.getresponse()
+                payload = json.loads(response.read().decode("utf-8"))
+                connection.close()
+                return response.status, payload
+
+            try:
+                self.assertEqual(request("GET", "/api/v1/live")[0], 401)
+                status, live = request("GET", "/api/v1/live", token=created["token"])
+                self.assertEqual(status, 200)
+                self.assertEqual(live["schema"], "open-dachs-api-live/v1")
+                status, denied = request(
+                    "POST",
+                    "/api/v1/actions/set-value",
+                    token=created["token"],
+                    body={"block": 50, "key": "Hka_Ew.usSollGenerator", "value": 4.7, "request_id": "test-1"},
+                )
+                self.assertEqual(status, 403)
+                self.assertIn("deaktiviert", denied["error"])
+
+                app.set_api_settings({"write_enabled": True, "auth_level": 4})
+                writes = []
+
+                def checked_write(*args):
+                    writes.append(args)
+                    return {"written": True, "readback_ok": True, "error": None}
+
+                app.write_block = checked_write
+                action = {
+                    "block": 50,
+                    "key": "Hka_Ew.usAufstellhoehe",
+                    "value": 100,
+                    "request_id": "http-idempotent-1",
+                }
+                status, written = request(
+                    "POST", "/api/v1/actions/set-value",
+                    token=created["token"], body=action,
+                )
+                self.assertEqual(status, 200)
+                self.assertFalse(written["replayed"])
+                status, replay = request(
+                    "POST", "/api/v1/actions/set-value",
+                    token=created["token"], body=action,
+                )
+                self.assertEqual(status, 200)
+                self.assertTrue(replay["replayed"])
+                status, conflict = request(
+                    "POST", "/api/v1/actions/set-value",
+                    token=created["token"], body={**action, "value": 200},
+                )
+                self.assertEqual(status, 409)
+                self.assertIn("andere Aktion", conflict["error"])
+                self.assertEqual(len(writes), 1)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
     def test_maintenance_traffic_light_uses_remaining_values(self):
         self.assertEqual(maintenance_status({"Wartung_Cache.sDeltaBh": 800, "Wartung_Cache.sDeltaTage": 90})["level"], "green")
         self.assertEqual(maintenance_status({"Wartung_Cache.sDeltaBh": 199, "Wartung_Cache.sDeltaTage": 60})["level"], "yellow")
@@ -1094,9 +1705,10 @@ class CoreTests(unittest.TestCase):
         pack = PackRepository()
 
         class Service:
-            def __init__(self, failed=()):
+            def __init__(self, failed=(), fuel_raw=8):
                 self.blocks = []
                 self.failed = set(failed)
+                self.fuel_raw = fuel_raw
                 self.sessions = 0
 
             @contextmanager
@@ -1109,7 +1721,7 @@ class CoreTests(unittest.TestCase):
                 payload = bytearray(70)
                 if block == 24:
                     key = "Hka_Mw1.bKraftstofftyp"
-                    payload[pack.field_map(24)[key]["offset"]] = 8
+                    payload[pack.field_map(24)[key]["offset"]] = self.fuel_raw
                 ok = block not in self.failed
                 result = SimpleNamespace(
                     ok=ok,
@@ -1143,6 +1755,13 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(item["snapshot"]["complete"])
             self.assertFalse(item["report"]["blocks"]["38"]["ok"])
             self.assertEqual(store.maintenance_reports()[0]["snapshot"]["attempted_blocks"], pack.addressable_blocks())
+
+            unknown_service = Service(fuel_raw=0)
+            app.service = unknown_service
+            with self.assertRaisesRegex(RuntimeError, "Kraftstoffart wurde nicht eindeutig ermittelt"):
+                DachsWebApp.create_maintenance_report(app, "admin")
+            self.assertEqual(unknown_service.sessions, 1)
+            self.assertEqual(len(store.maintenance_reports()), 1)
 
     def test_maintenance_start_requires_core_snapshot_blocks(self):
         pack = PackRepository()

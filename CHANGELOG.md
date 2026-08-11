@@ -1,5 +1,50 @@
 # Changelog
 
+## V3 1.1.0 - 2026-08-10
+
+- eigener, ausschließlich für Administratoren sichtbarer Hauptbereich
+  **System**, getrennt von den Dachs-Einstellungen, mit den Registern
+  **Benutzer & Berechtigungen**, **API & Tokens** und **Wartungsabschluss**
+- mehrere Benutzerkonten mit Rolle, Aktivstatus und eigenständigem
+  Passwortwechsel; Schutz vor dem Löschen oder Deaktivieren des letzten
+  Administrators
+- lokale EDOMI-API mit nur einmal angezeigten, gehasht gespeicherten
+  Bearer-Tokens sowie getrennten Lese-, Historien- und Schreibrechten
+- API-Schreiben standardmäßig global deaktiviert; übergeben werden nur
+  logische Aktionen, während Authentifizierung, PW4, Schreiben, ACK, Readback,
+  Idempotenz und Audit vollständig im Server bleiben
+- atomare, inhaltsgebundene `request_id`-Reservierung verhindert parallele
+  Doppelwrites und lehnt die Wiederverwendung für andere Aktionen mit HTTP 409 ab
+- kraftstoffabhängige Originalgrenzen der Generatornennleistung werden für die
+  dokumentierten Anlagentypen vor Authentifizierung und Serialwrite geprüft
+- adaptive Historie für alle regulären Livewerte: volle Auflösung zunächst
+  24 Stunden sowie dauerhaft für eine Stunde vor Motorstart, die gesamte
+  Laufzeit und eine Stunde Nachlauf; übrige Stillstandszeit wird in
+  15-Minuten-Fenster mit Anfang, Ende, Minimum, Maximum und Mittelwert
+  verdichtet
+- Webdienst bleibt lokales HTTP; externes HTTPS ist Aufgabe eines
+  vorgeschalteten nginx
+- Block-20-Mapping anhand der Originalstruktur um das ausgelassene
+  Genehmigungsbyte korrigiert: Display-Kontrast bleibt Offset 40,
+  Zeitsynchronisierung liegt korrekt an Offset 41
+- exakte Kraftstoffbezeichnungen, eindeutige Kapseltemperatur und dokumentierter
+  Hinweis zum unskalierten barometrischen Luftdruck in Block 24; unbekannter
+  Kraftstoff bricht den Wartungsstart sicher ab, statt als Gas zu gelten
+- Abschaltcodes der gemeinsamen Laufhistorie als aktive-low Freigabemaske mit
+  Hexwert und deutschen Original-Klartexten dekodiert
+
+## V3 1.0.1 - 2026-08-09
+
+- Historisierung auf 21 ausgewählte Betriebs- und Messwerte aus den beiden
+  schnellen Blöcken 22/24 begrenzt und pro Livezyklus als ein gemeinsamer
+  kompakter SQLite-Snapshot gespeichert; Block 20 mit seinen weitgehend
+  statischen Geräteinformationen läuft nur noch im langsamen Zyklus
+- das konfigurierte Intervall von 0,75 s ist jetzt der Zielabstand kompletter
+  Zyklen statt einer zusätzlichen Pause nach sämtlichen seriellen Reads
+- feste MSR2-Textfelder bewahren bei No-op- und geänderten Writes ihre bereits
+  vorhandene Space- oder NUL-Paddingart, statt Space-Padding unbemerkt durch
+  NUL-Bytes zu ersetzen
+
 ## V3 1.0 - 2026-08-09
 
 - erster stabiler öffentlicher 1.0-Stand mit der seit V3 0.9.0 erweiterten
