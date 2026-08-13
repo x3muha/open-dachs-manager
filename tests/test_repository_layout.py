@@ -5,7 +5,9 @@ import subprocess
 import tomllib
 import unittest
 
+from open_dachs_manager import __version__
 from open_dachs_manager.serial_worker import DEFAULT_SERIAL_WORKER_SOCKET
+from open_dachs_manager.web import DachsRequestHandler
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +17,14 @@ class RepositoryLayoutTests(unittest.TestCase):
     def test_distribution_and_commands_use_open_dachs_name(self):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(project["project"]["name"], "open-dachs-manager")
+        self.assertEqual(project["project"]["dynamic"], ["version"])
+        self.assertNotIn("version", project["project"])
+        self.assertEqual(
+            project["tool"]["setuptools"]["dynamic"]["version"],
+            {"attr": "open_dachs_manager.__version__"},
+        )
+        self.assertEqual(__version__, "1.1.1")
+        self.assertEqual(DachsRequestHandler.server_version, f"OpenDachsManager/{__version__}")
         scripts = project["project"]["scripts"]
         self.assertEqual(scripts["open-dachs"], "open_dachs_manager.cli:main")
         self.assertEqual(
@@ -159,7 +169,7 @@ class RepositoryLayoutTests(unittest.TestCase):
     def test_technical_hmi_rows_and_changelog_popup_are_wired(self):
         index = (ROOT / "src/open_dachs_manager/web/index.html").read_text(encoding="utf-8")
         app = (ROOT / "src/open_dachs_manager/web/app.js").read_text(encoding="utf-8")
-        self.assertIn('data-open-changelog aria-haspopup="dialog">V3 1.1.0</button>', index)
+        self.assertEqual(index.count("V3 __OPEN_DACHS_VERSION__"), 3)
         self.assertIn('id="changelogModal" class="modal-backdrop" hidden', index)
         self.assertIn('aria-labelledby="changelogTitle"', index)
         self.assertIn('function openChangelog(event)', app)

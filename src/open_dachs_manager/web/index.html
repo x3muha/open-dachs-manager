@@ -10,7 +10,7 @@
 <body>
   <div id="loginView" class="login-shell">
     <div class="login-card">
-      <p class="eyebrow">OPEN · LOCAL · SERIAL · <button class="version-changelog-button" type="button" data-open-changelog aria-haspopup="dialog">V3 1.1.0</button></p>
+      <p class="eyebrow">OPEN · LOCAL · SERIAL · <button class="version-changelog-button" type="button" data-open-changelog aria-haspopup="dialog">V3 __OPEN_DACHS_VERSION__</button></p>
       <h1>Open Dachs Manager</h1>
       <p class="muted">Lokale Überwachung und geschützte Einstellungen.</p>
       <form id="loginForm">
@@ -26,7 +26,7 @@
     <header class="topbar">
       <div class="topbar-inner">
         <div class="brand">
-          <p class="eyebrow">MSR2 · SERIAL · <button class="version-changelog-button" type="button" data-open-changelog aria-haspopup="dialog">V3 1.1.0</button></p>
+          <p class="eyebrow">MSR2 · SERIAL · <button class="version-changelog-button" type="button" data-open-changelog aria-haspopup="dialog">V3 __OPEN_DACHS_VERSION__</button></p>
           <h1>Open Dachs Manager</h1>
         </div>
         <nav class="main-tabs" aria-label="Bereiche">
@@ -736,7 +736,11 @@
       </div>
       <div class="changelog-list">
         <article class="changelog-entry current">
-          <header><strong>V3 1.1.0</strong><time datetime="2026-08-10">10.08.2026</time><span>Aktuell</span></header>
+          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-08-13">13.08.2026</time><span>Aktuell</span></header>
+          <ul><li>Patch-Release mit einer einzigen zentralen Laufzeitversion für CLI, Healthcheck, Serverkennung, Oberfläche und Wartungsberichte.</li><li>Der bereits geprüfte Funktionsstand von 1.1.0 bleibt unverändert; Protokoll, Mapping, Schreibschutz, API und Historisierung erhalten keine neuen Semantiken.</li><li>Die Aktualisierung selbst öffnet keine serielle Schreibsitzung und ändert keine Reglerwerte.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.1.0</strong><time datetime="2026-08-10">10.08.2026</time></header>
           <ul><li>Eigener Admin-Hauptbereich „System“ für Benutzer, API-Tokens und den Wartungs-Testmodus.</li><li>Token-geschützte EDOMI-API mit Lese-, Historien- und serverseitig kontrollierten Schreibaktionen.</li><li>Alle Livewerte bleiben 24 Stunden roh; Motorlauf sowie je eine Stunde davor und danach bleiben hochauflösend, übriger Stillstand wird verdichtet.</li><li>Block-20-Zeitsync, Kraftstofftexte und Abschaltgründe werden anhand der Originalstrukturen korrekt dekodiert.</li></ul>
         </article>
         <article class="changelog-entry">

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from open_dachs_manager import __version__
 from open_dachs_manager.mapping import PackRepository, WriteAllowlist
 from open_dachs_manager.auth import authenticate, calculate_pw4
 from open_dachs_manager.service import DachsService, write_json_atomic
@@ -509,6 +510,7 @@ class CoreTests(unittest.TestCase):
             health = json.loads(response.read().decode("utf-8"))
             self.assertEqual(response.status, 200)
             self.assertEqual(health["base_path"], "/dachs")
+            self.assertEqual(health["version"], __version__)
             connection.close()
 
             connection = http.client.HTTPConnection(*server.server_address, timeout=2)
@@ -518,6 +520,8 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertIn('content="/dachs"', body)
             self.assertIn('href="static/style.css', body)
+            self.assertIn(f">V3 {__version__}</button>", body)
+            self.assertNotIn("__OPEN_DACHS_VERSION__", body)
             connection.close()
 
             connection = http.client.HTTPConnection(*server.server_address, timeout=2)
@@ -1695,6 +1699,7 @@ class CoreTests(unittest.TestCase):
         }
         html = report_html(report, protocol, completion)
         self.assertEqual(html.count(b"<section class='page'>"), 3)
+        self.assertIn(f"Open Dachs Manager · V3 {__version__}".encode(), html)
         self.assertIn("DEMOLAUF · KEIN REGLERWRITE".encode(), html)
         self.assertIn("Keine Reglerdaten geschrieben".encode(), html)
         pdf = report_pdf(report, protocol, completion)

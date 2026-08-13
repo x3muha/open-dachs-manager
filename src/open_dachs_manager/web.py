@@ -30,6 +30,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 import zlib
 
+from . import __version__
 from .auth import calculate_pw4
 from .maintenance import (
     CHECKLIST_RAW_VALUES,
@@ -2967,7 +2968,7 @@ class DachsWebApp:
 
 
 class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
-    server_version = "OpenDachsManager/1.1.0"
+    server_version = f"OpenDachsManager/{__version__}"
 
     @property
     def app(self) -> DachsWebApp:
@@ -3080,7 +3081,7 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
             return self._error(404, "not found")
         try:
             if path == "/healthz":
-                return self._json({"ok": True, "version": "1.1.0", "base_path": self.base_path})
+                return self._json({"ok": True, "version": __version__, "base_path": self.base_path})
             if path.startswith("/api/v1/"):
                 if path == "/api/v1/live":
                     principal = self._require_api("read")
@@ -3473,6 +3474,7 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
         body = target.read_bytes()
         if target.name == "index.html":
             body = body.replace(b"__OPEN_DACHS_BASE_PATH__", self.base_path.encode("ascii"))
+            body = body.replace(b"__OPEN_DACHS_VERSION__", __version__.encode("ascii"))
         self._send(200, body, content_type + ("; charset=utf-8" if content_type.startswith("text/") or content_type == "application/javascript" else ""))
 
 

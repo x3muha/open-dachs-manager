@@ -1,5 +1,20 @@
 # Changelog
 
+## V3 1.1.1 - 2026-08-13
+
+- Patch-Release des unveränderten Funktionsstands von V3 1.1.0 mit
+  konsistenter Kennzeichnung als 1.1.1 in Paket, CLI, HTTP-Healthcheck,
+  Serverkennung, Weboberfläche, Wartungsberichten und Dokumentation
+- zentrale Laufzeit-Versionsquelle in `open_dachs_manager.__version__`; Paketbau,
+  Webdienst und Berichte leiten ihre Kennzeichnung daraus ab, damit sich
+  installierte und sichtbare Version nicht mehr unbemerkt auseinanderentwickeln
+- eigener Eintrag im direkt in der Weboberfläche erreichbaren Änderungsverlauf,
+  der den reinen Wartungscharakter dieses Patch-Releases vom Funktionsumfang
+  der V3 1.1.0 trennt
+- keine Änderung an MSR2-Protokoll, Feldmapping, Authentifizierung,
+  Schreibfreigabe, ACK/Readback, API-Semantik, Historisierung oder lokalen
+  Betriebsdaten; das Update selbst führt keinen Regler-Write aus
+
 ## V3 1.1.0 - 2026-08-10
 
 - eigener, ausschließlich für Administratoren sichtbarer Hauptbereich
