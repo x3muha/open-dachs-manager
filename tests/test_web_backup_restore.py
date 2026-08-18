@@ -258,7 +258,7 @@ class WebBackupRestoreTests(unittest.TestCase):
         self.assertIn('value="4"', index)
 
         self.assertIn(
-            'backup: { image: null, inspection: null, busy: false, importGeneration: 0 }',
+            'backup: { image: null, inspection: null, busy: false, importGeneration: 0, archive: [], archiveLoaded: false }',
             app,
         )
         self.assertIn('api("/api/backup/create"', app)

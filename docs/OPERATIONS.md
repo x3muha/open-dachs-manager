@@ -144,7 +144,25 @@ sudo systemctl start open-dachs-manager-web.service
 ```
 
 Das Archiv geschützt aufbewahren. Es enthält Passwort-Hashes, Anlagenwerte,
-Wartungsberichte und Audit-Informationen.
+Wartungsberichte, automatische Reglerabbilder und Audit-Informationen.
+
+Automatische Wartungsbackups liegen einzeln unter
+`/var/lib/open-dachs-manager/backup-archive/`. Das Verzeichnis gehört
+`open-dachs:open-dachs` und hat Modus `0700`; jede JSON-Datei hat Modus `0600`.
+Jeder Eintrag muss Metadaten, Datei, Abbild-SHA-256 und Datei-SHA-256
+konsistent binden und 38 erfolgreiche von 38 angeforderten Zielen ausweisen.
+Das Löschen eines Wartungsberichts löscht dieses Sicherungsabbild nicht.
+Die Dateien werden nicht automatisch ausgedünnt. Das lokale Archiv liegt auf
+demselben Datenträger wie die Anwendung und ersetzt daher keine regelmäßige
+Sicherung des gesamten Datenverzeichnisses auf ein anderes System oder Medium.
+
+Prüfen, ohne Inhalte auszugeben:
+
+```bash
+sudo stat -c '%U:%G %a %n' /var/lib/open-dachs-manager/backup-archive
+sudo find /var/lib/open-dachs-manager/backup-archive -maxdepth 1 -type f \
+  -printf '%u:%g %m %f\n'
+```
 
 Regler-Backup über den Serialworker:
 
@@ -153,6 +171,12 @@ open-dachs backup create \
   --all-blocks \
   --output open-dachs-controller-backup.json
 ```
+
+Ein Wartungsabschluss mit Status `completing` darf nicht erneut gestartet
+oder gelöscht werden. `uncertain` bedeutet, dass ein möglicher Schreibversuch
+nicht eindeutig durch ACK und Rückleseprüfung abgeschlossen wurde. In diesem
+Fall Reglerzustand und Audit zuerst fachlich prüfen; keinen blinden Wiederholungs-
+oder Löschversuch ausführen.
 
 ## Fehlerbehebung
 

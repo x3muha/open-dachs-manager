@@ -1,6 +1,6 @@
 # Open Dachs Manager – Bedienungsanleitung
 
-Stand: 17.08.2026 · Version V3 1.4.0
+Stand: 18.08.2026 · Version V3 1.5.0
 
 Diese Anleitung beschreibt den täglichen Betrieb der Weboberfläche, CLI und
 TUI. Installation und Migration stehen ausführlich in
@@ -92,15 +92,19 @@ voller Auflösung erhalten. Übrige Stillstandszeiten werden danach in
 
 ### Wartung
 
-`Wartung starten & Anlage einlesen` liest alle seriell adressierbaren Blöcke
-in einer gemeinsamen Sitzung. Der Snapshot enthält Rohdaten, dekodierte
+`Wartung starten & Pflichtbackup erstellen` liest alle 38 freigegebenen
+Sicherungsziele genau einmal in einer gemeinsamen seriellen Sitzung. Derselbe
+eingefrorene Lesezustand speist gleichzeitig das vollständige JSON-Abbild und
+den Anlagenstand des Berichts; es folgt keine zweite Blockrunde. Nur wenn das
+Abbild atomar gespeichert und über Abbild- sowie Datei-SHA-256 geprüft ist,
+entsteht der Wartungsentwurf. Der Anlagenstand enthält Rohdaten, dekodierte
 Felder, Lauf-/Servicehistorien und einzelne Lesefehler.
 
 Der daraus erzeugte Entwurf wird lokal gespeichert. Checkliste, zusätzliche
 lokale Arbeitsliste, Monteur, Messwerte und Bemerkungen lassen sich fortlaufend
 ergänzen. HTML-, dreiseitiger PDF-Bericht und JSON-Export stehen zur Verfügung.
 
-V3 1.4.0 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
+V3 1.5.0 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
 die Oberfläche die exakte Eingabe `DEMO ABSCHLIESSEN`. Danach wird der Bericht
 lokal validiert, unveränderlich archiviert und deutlich als Demo gekennzeichnet.
 Der Abschluss öffnet keine Serialworker-Sitzung, schreibt weder Block 100 noch
@@ -124,11 +128,19 @@ Wartungswerte übertragen, zurückgelesen und danach das Bestätigungsbit separa
 gesetzt und nochmals gelesen. Freitext, Zusatzarbeiten und vollständige
 Historie verbleiben immer lokal.
 
-Admins können im lokalen Archiv sowohl offene Entwürfe als auch abgeschlossene
-Wartungen über `Löschen` entfernen. Vorher erscheint eine Sicherheitsabfrage.
-Gelöscht werden der lokale Snapshot, das Protokoll und seine Exporte. Ein
-bereits ausgeführter MSR2-Abschluss wird dadurch nicht rückgängig gemacht;
-vorhandene Schreib-Audits bleiben erhalten.
+Admins können im lokalen Archiv offene Entwürfe und abgeschlossene Wartungen
+über `Löschen` entfernen. Vorher erscheint eine Sicherheitsabfrage. Gelöscht
+werden der lokale Anlagenstand, das Protokoll und seine Exporte. Das beim
+Wartungsstart erzeugte Pflichtbackup bleibt getrennt im geschützten
+Backup-Archiv erhalten. Ein bereits ausgeführter MSR2-Abschluss wird dadurch
+nicht rückgängig gemacht; vorhandene Schreib-Audits bleiben erhalten.
+
+Während eines echten Abschlusses zeigt die Liste `Abschluss läuft`. Dieser
+Zustand kann weder erneut abgeschlossen noch gelöscht werden. Konnte nach
+einem Schreibversuch kein eindeutiges Endergebnis belegt werden, erscheint
+`Zielzustand unklar – prüfen` in Rot. Auch dieser Bericht bleibt gesperrt, bis
+Reglerzustand, positive Bestätigung, Rückleseprüfung und Audit fachlich geklärt
+sind.
 
 ### Backup und Wiederherstellung
 
@@ -139,6 +151,16 @@ Regler-CPU 0 sowie Block 16 der Netzschutz-CPU 1 und der Netzschutz-CPU 2. Über
 beliebige Teilmenge zusammengestellt werden. `Backup erstellen und
 herunterladen` liest nur diese Ziele in einer gemeinsamen Serialworker-Sitzung
 und speichert ein JSON-Abbild. Einzelne Lesefehler bleiben darin sichtbar.
+
+Administratoren sehen darüber das geschützte Wartungsbackup-Archiv. Jede Karte
+nennt Backup-ID, Zeitpunkt und Ersteller, Herkunft, verknüpften
+Wartungsbericht, Zustand, Integrität, Größe, Packrevision, das Ergebnis 38/38
+sowie Abbild- und Datei-SHA-256. Es gibt bewusst weder Löschen noch einen Knopf
+für manuelle Autoarchivierung. `JSON herunterladen` liefert die archivierte
+V3-Datei unverändert. `Für Wiederherstellung laden` lädt dieselbe Datei und
+prüft sie erneut über die bestehende Abbildprüfung. Nur 38/38 Ziele mit
+Prüfsummen, passender Packrevision und Gerätebindung werden übernommen; die
+Zielauswahl bleibt leer und der Dry-Run aktiv.
 
 Im Abbild wird jedes Ziel als eindeutiges Paar aus CPU und Blocknummer geführt.
 Dadurch bleiben `CPU 1 · Block 16` und `CPU 2 · Block 16` trotz gleicher
@@ -383,7 +405,9 @@ open-dachs backup create \
 ```
 
 Backups enthalten Geräte- und Konfigurationsdaten und dürfen nicht ungeprüft
-veröffentlicht werden.
+veröffentlicht werden. Automatische Wartungsbackups liegen ausschließlich im
+geschützten Serverarchiv; die Weboberfläche erlaubt dort nur Anzeige,
+unveränderten Download und erneutes Prüfen für die Wiederherstellung.
 
 ## 7. Authentifizierung
 

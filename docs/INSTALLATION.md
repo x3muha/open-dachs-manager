@@ -80,6 +80,7 @@ Der Installer legt folgende Komponenten an:
 | `/opt/open-dachs-manager/venv` | isolierte Python-Installation |
 | `/etc/open-dachs-manager/open-dachs-manager.env` | von root verwaltete Konfiguration |
 | `/var/lib/open-dachs-manager` | Benutzer, SQLite-Historie und Berichte |
+| `/var/lib/open-dachs-manager/backup-archive` | automatische Wartungsbackups; Verzeichnis `0700`, Dateien `0600`, Besitzer `open-dachs:open-dachs` |
 | `/var/lib/open-dachs-manager/maintenance_settings.json` | persistenter Wartungs-Testmodus nach der ersten Änderung |
 | `/var/lib/open-dachs-manager/dashboard_settings.json` | gemeinsame Auswahl und Reihenfolge der Übersichtskacheln |
 | `/var/lib/open-dachs-manager/soot_filter_settings.json` | lokale Temperaturkennlinie der geschätzten Rußfilteranzeige |
@@ -90,6 +91,9 @@ Der Installer legt folgende Komponenten an:
 
 Die Dienste laufen als unprivilegierter Systembenutzer `open-dachs`. Der
 Installer fügt diesen Benutzer der erkannten Gerätegruppe des Adapters hinzu.
+Bei jeder Installation oder Aktualisierung stellt er außerdem sicher, dass das
+Backup-Archiv als `open-dachs:open-dachs` mit Verzeichnisrechten `0700`
+existiert. Das Archiv wird bei Updates nicht geleert.
 
 ## Integrierter Fehlerkatalog und optionale Diagnosedetails
 
@@ -181,9 +185,9 @@ git pull --ff-only
 sudo ./install.sh
 ```
 
-Lokale Datenbank und Benutzerdatei bleiben erhalten. Die beiden Dienste werden
-erst neu gestartet, nachdem Paket und Konfiguration vollständig installiert
-wurden.
+Lokale Datenbank, Benutzerdatei und das getrennte Verzeichnis
+`backup-archive` bleiben erhalten. Die beiden Dienste werden erst neu
+gestartet, nachdem Paket und Konfiguration vollständig installiert wurden.
 
 ## Deinstallieren
 

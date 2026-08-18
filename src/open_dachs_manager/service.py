@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -12,7 +13,13 @@ import re
 import time
 
 from . import __version__
-from .auth import AuthInputs, AuthResult, authenticate, read_auth_inputs
+from .auth import (
+    AuthInputs,
+    AuthResult,
+    auth_inputs_from_payloads,
+    authenticate,
+    read_auth_inputs,
+)
 from .mapping import PackRepository, WriteAllowlist
 from .network_protection import (
     NETWORK_PROTECTION_BLOCK,
@@ -30,6 +37,30 @@ BACKUP_PRODUCT_NAME = "Open Dachs Manager"
 BACKUP_PACK_NAME = "MSR2 Dachs Runtime Pack"
 MAX_RESTORE_PAYLOAD_LENGTH = 4094
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+
+# One reviewed recovery scope for browser backups, maintenance captures and
+# archive verification.  Layout-4 network blocks 20/21 deliberately stay out:
+# B20 has not completed a physical restore acceptance test and B21 is live
+# telemetry without a write service.
+BACKUP_CPU0_BLOCKS = (
+    18, 20, 22, 24, 26, 28, 30, 31, 32, 34, 36, 38, 46, 50, 52, 54, 56,
+    60, 62, 66, 70, 76, 80, 82, 84, 86, 88, 90, 92, 94, 100, 102, 104,
+    110, 112, 114,
+)
+BACKUP_TARGETS = tuple((0, block) for block in BACKUP_CPU0_BLOCKS) + (
+    (1, NETWORK_PROTECTION_BLOCK),
+    (2, NETWORK_PROTECTION_BLOCK),
+)
+BACKUP_PAYLOAD_LENGTHS = {
+    target: (
+        NETWORK_PROTECTION_PAYLOAD_LENGTH
+        if target[0]
+        else {31: 14, 36: 30, 38: 2, 46: 10}.get(target[1], 70)
+    )
+    for target in BACKUP_TARGETS
+}
+if len(BACKUP_TARGETS) != 38 or len(set(BACKUP_TARGETS)) != 38:  # pragma: no cover
+    raise RuntimeError("the reviewed backup target set must contain exactly 38 targets")
 
 
 def _canonical_json(data: dict) -> bytes:
@@ -127,6 +158,17 @@ def _image_digest_data(image: dict) -> dict:
         "controller": controller,
         "records": records,
     }
+    if "maintenance_archive" in image:
+        raw_context = image.get("maintenance_archive")
+        semantic["maintenance_archive"] = (
+            {
+                "version": raw_context.get("version"),
+                "source": _digest_text(raw_context.get("source")),
+                "created_by": _digest_text(raw_context.get("created_by")),
+            }
+            if isinstance(raw_context, dict)
+            else raw_context
+        )
     if target_format:
         # Target-aware images were introduced after the original CPU-0-only
         # digest contract.  Their capture time is therefore safe to bind,
@@ -504,7 +546,7 @@ class DachsService:
                 if cpu:
                     record["critical"] = True
             network_values = None
-            if result.ok and cpu:
+            if record["ok"] and cpu:
                 try:
                     if len(payload) != NETWORK_PROTECTION_PAYLOAD_LENGTH:
                         raise ValueError(
@@ -572,6 +614,169 @@ class DachsService:
                 }
         image["image_sha256"] = _image_sha256(image)
         return image
+
+    def maintenance_backup(
+        self,
+        session: SerialSession,
+        *,
+        decode: bool = True,
+        created_by: str = "system",
+    ) -> tuple[dict, dict[tuple[int, int], dict]]:
+        """Capture the reviewed 38-target image exactly once in one session.
+
+        The returned capture is the sole source for the maintenance report.
+        Controller identity is decoded from the already captured CPU-0 blocks
+        20 and 22; this method never authenticates, writes, or performs hidden
+        identity reads.
+        """
+        capture: dict[tuple[int, int], dict] = {}
+        records: list[dict] = []
+        for cpu, block in BACKUP_TARGETS:
+            target = (cpu, block)
+            block_name = self._backup_target_name(cpu, block)
+            try:
+                result = self.read_block(session, block, cpu=cpu)
+            except Exception as exc:
+                error = str(exc) or exc.__class__.__name__
+                record = {
+                    "cpu": cpu,
+                    "block": block,
+                    "target_key": f"{cpu}:{block}",
+                    "block_name": block_name,
+                    "ok": False,
+                    "error": error,
+                }
+                if cpu:
+                    record["critical"] = True
+                capture[target] = {
+                    "cpu": cpu,
+                    "block": block,
+                    "target_key": f"{cpu}:{block}",
+                    "name": block_name,
+                    "ok": False,
+                    "status": None,
+                    "payload": b"",
+                    "fields": [],
+                    "error": error,
+                    "rtt_ms": None,
+                }
+                records.append(record)
+                continue
+
+            payload = bytes(result.payload)
+            response = getattr(result, "response", None)
+            ok = bool(result.ok)
+            error = None if ok else "keine gültige serielle Antwort"
+            decoded_values: list | None = None
+            if ok:
+                try:
+                    expected_length = BACKUP_PAYLOAD_LENGTHS[target]
+                    if len(payload) != expected_length:
+                        raise ValueError(
+                            f"erwartet {expected_length} Byte, empfangen {len(payload)} Byte"
+                        )
+                    if cpu:
+                        decoded_values = decode_network_protection(cpu, payload)
+                    elif decode:
+                        decoded_values = self.pack.display_fields(block, payload)
+                except Exception as exc:
+                    ok = False
+                    error = str(exc) or exc.__class__.__name__
+
+            record = {
+                "cpu": cpu,
+                "block": block,
+                "target_key": f"{cpu}:{block}",
+                "block_name": block_name,
+                "ok": ok,
+                "status": result.status,
+                "payload_hex": payload.hex().upper(),
+                "payload_len": len(payload),
+                "payload_sha256": _payload_sha256(payload),
+                "rtt_ms": round(float(getattr(response, "elapsed_ms", 0.0)), 1),
+                "crc_errors": int(getattr(response, "crc_errors", 0)),
+                "protocol_errors": int(getattr(response, "protocol_errors", 0)),
+            }
+            if cpu:
+                record["critical"] = True
+            if error:
+                record["error"] = error
+            if decode and ok:
+                if cpu:
+                    record["values"] = decoded_values
+                else:
+                    record["values"] = [
+                        {
+                            "key": item.key,
+                            "label": item.label,
+                            "raw": item.raw,
+                            "value": item.value,
+                            "unit": item.unit,
+                        }
+                        for item in (decoded_values or [])
+                    ]
+            capture[target] = {
+                "cpu": cpu,
+                "block": block,
+                "target_key": f"{cpu}:{block}",
+                "name": block_name,
+                "ok": ok,
+                "status": result.status,
+                "payload": payload,
+                "fields": decoded_values or [],
+                "error": error,
+                "rtt_ms": record["rtt_ms"],
+            }
+            records.append(record)
+
+        controller: dict
+        try:
+            identity = auth_inputs_from_payloads(
+                self.pack,
+                capture[(0, 20)]["payload"],
+                capture[(0, 22)]["payload"],
+            )
+            if not capture[(0, 20)]["ok"] or not capture[(0, 22)]["ok"]:
+                raise RuntimeError("identity blocks are not valid capture records")
+            controller = {
+                "available": True,
+                "serial_number": identity.serial_number,
+                "operating_hours": identity.operating_hours,
+            }
+        except Exception as exc:
+            controller = {
+                "available": False,
+                "error": str(exc) or exc.__class__.__name__,
+            }
+
+        image = {
+            "schema": BACKUP_SCHEMA,
+            "schema_version": BACKUP_SCHEMA_VERSION,
+            "product": {"name": BACKUP_PRODUCT_NAME, "version": __version__},
+            "pack": {
+                "name": BACKUP_PACK_NAME,
+                "schema": str(self.pack.data.get("schema") or ""),
+                "revision": self.pack.pack_rev,
+            },
+            "controller": controller,
+            "maintenance_archive": {
+                "version": 1,
+                "source": "maintenance",
+                "created_by": _short_text(created_by, "maintenance_archive.created_by", 128),
+            },
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "port": self.port,
+            "baud": self.baud,
+            "requested_blocks": len(BACKUP_TARGETS),
+            "successful_blocks": sum(bool(record["ok"]) for record in records),
+            "failed_blocks": sum(not bool(record["ok"]) for record in records),
+            "requested_targets": [
+                {"cpu": cpu, "block": block} for cpu, block in BACKUP_TARGETS
+            ],
+            "blocks": records,
+        }
+        image["image_sha256"] = _image_sha256(image)
+        return image, capture
 
     def inspect_backup(self, image: dict | str | bytes) -> dict:
         """Validate an image and return only restore-relevant metadata.
@@ -1105,3 +1310,57 @@ def write_json_atomic(path: str | Path, data: dict) -> None:
             os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def write_json_exclusive(path: str | Path, data: dict) -> bytes:
+    """Durably create one JSON file without replacing any existing inode.
+
+    A hard-link inside an already opened, non-symlink directory provides the
+    atomic no-replace publication step available on all supported Linux/Python
+    combinations.  Both file data and the final directory entry are fsynced.
+    The returned bytes are exactly those stored and can therefore be used for
+    the archive-level ``file_sha256``.
+    """
+    import os
+    import secrets
+    import stat
+
+    destination = Path(path)
+    if destination.name in {"", ".", ".."} or destination.parent == destination:
+        raise ValueError("invalid archive destination")
+    payload = (
+        json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(destination.parent, directory_flags)
+    temporary_name = f".{destination.name}.{secrets.token_hex(12)}.tmp"
+    published = False
+    try:
+        directory_stat = os.fstat(directory_fd)
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            raise OSError("archive parent is not a directory")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        file_fd = os.open(temporary_name, flags, 0o600, dir_fd=directory_fd)
+        try:
+            with os.fdopen(file_fd, "wb", closefd=True) as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(
+                temporary_name,
+                destination.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            published = True
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary_name, dir_fd=directory_fd)
+        if published:
+            os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return payload

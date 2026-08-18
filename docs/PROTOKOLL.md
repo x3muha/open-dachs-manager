@@ -218,6 +218,20 @@ JSON-RPC-Aufträge über einen lokalen Unix-Socket. Jede Socket-Sitzung ist ein
 FIFO-Auftrag und behält den seriellen Zugriff bis zum Sitzungsende. Dadurch
 werden mehrstufige Abläufe nicht von einem zweiten Client unterbrochen.
 
+## Wartungsbackup und Anlagenstand
+
+Ein Wartungsstart liest die 36 freigegebenen Blöcke der Regler-CPU 0 sowie
+Block 16 der Netzüberwachungs-CPU 1 und 2 in genau einer exklusiven Sitzung.
+Diese 38 Antworten bilden gleichzeitig das vollständige Sicherungsabbild und
+den CPU-0-Anlagenstand des Wartungsberichts. Für den Bericht wird keine zweite
+serielle Blockrunde gestartet.
+
+Archiv-ID, Wartungsbericht-ID, Dateiname, Ersteller, Packrevision und
+SHA-256-Werte sind lokale Speichermetadaten. Sie verändern weder Telegramme
+noch Zieladressen. Ein Archivdownload liefert das gespeicherte
+`dachs-msr2-backup/v3`-JSON unverändert; erst „Für Wiederherstellung laden“
+prüft dessen Schema, Zielpaare, Prüfsummen, Pack- und Gerätebindung erneut.
+
 ## Grenzen des derzeitigen Wissens
 
 - Die Adressierung und die hier genannten Rahmenformate sind praktisch

@@ -205,6 +205,32 @@ fi
 
 install -d -m 0755 -o root -g root "$ODM_INSTALL_ROOT"
 install -d -m 0750 -o "$ODM_SERVICE_USER" -g "$ODM_SERVICE_USER" "$ODM_DATA_DIR"
+python3 - "$ODM_DATA_DIR" "$ODM_SERVICE_USER" <<'PY' || die "Backup-Archiv konnte nicht sicher angelegt werden"
+import os
+import pwd
+import stat
+import sys
+
+data_dir, service_user = sys.argv[1:]
+account = pwd.getpwnam(service_user)
+directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+parent_fd = os.open(data_dir, directory_flags)
+try:
+    try:
+        os.mkdir("backup-archive", mode=0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+    archive_fd = os.open("backup-archive", directory_flags, dir_fd=parent_fd)
+    try:
+        if not stat.S_ISDIR(os.fstat(archive_fd).st_mode):
+            raise NotADirectoryError("backup-archive ist kein Verzeichnis")
+        os.fchown(archive_fd, account.pw_uid, account.pw_gid)
+        os.fchmod(archive_fd, 0o700)
+    finally:
+        os.close(archive_fd)
+finally:
+    os.close(parent_fd)
+PY
 install -d -m 0750 -o root -g "$ODM_SERVICE_USER" "$ODM_CONFIG_DIR"
 
 ODM_INSTALLED_SERVICE_CODES="$ODM_DATA_DIR/servicecodes_de.properties"
@@ -291,7 +317,9 @@ systemctl stop "$ODM_WEB_SERVICE" "$ODM_SERIAL_SERVICE" 2>/dev/null || true
 if ((ODM_REPLACE_LEGACY)); then
   systemctl stop "$ODM_LEGACY_WEB_SERVICE" "$ODM_LEGACY_SERIAL_SERVICE" 2>/dev/null || true
   systemctl disable "$ODM_LEGACY_WEB_SERVICE" "$ODM_LEGACY_SERIAL_SERVICE" 2>/dev/null || true
-  if [[ -d "$ODM_LEGACY_DATA_DIR" ]] && [[ -z "$(find "$ODM_DATA_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  # The new empty archive directory is created before service handling; it
+  # must not make an otherwise fresh data directory look already populated.
+  if [[ -d "$ODM_LEGACY_DATA_DIR" ]] && [[ -z "$(find "$ODM_DATA_DIR" -mindepth 1 -maxdepth 1 ! -name 'backup-archive' -print -quit)" ]]; then
     cp -a "$ODM_LEGACY_DATA_DIR/." "$ODM_DATA_DIR/"
     chown -R "$ODM_SERVICE_USER:$ODM_SERVICE_USER" "$ODM_DATA_DIR"
     printf 'Lokale Webdaten aus %s wurden übernommen.\n' "$ODM_LEGACY_DATA_DIR"

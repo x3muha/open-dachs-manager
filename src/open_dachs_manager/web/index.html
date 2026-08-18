@@ -612,19 +612,20 @@
 
       <section id="maintenanceView" class="app-view" hidden>
         <header class="page-head">
-          <div><p class="eyebrow">WARTUNG &amp; ANLAGENBERICHT</p><h2>Geführte Dachs-Wartung</h2><p class="muted">Beim Wartungsstart wird der gesamte seriell adressierbare Anlagenzustand zusammenhängend gelesen und mit dem Online-Protokoll lokal archiviert.</p></div>
-          <div class="page-head-actions"><button id="maintenanceRefresh" type="button">Aktualisieren</button><button id="maintenanceCreate" class="primary maintenance-admin" type="button">Wartung starten &amp; Anlage einlesen</button></div>
+          <div><p class="eyebrow">WARTUNG &amp; ANLAGENBERICHT</p><h2>Geführte Dachs-Wartung</h2><p class="muted">Beim Wartungsstart speist ein einziger gemeinsamer 38-Ziele-Lesevorgang zugleich das vollständige, geprüfte Backup und den Anlagenstand. Backup und Online-Protokoll bleiben lokal verknüpft archiviert.</p></div>
+          <div class="page-head-actions"><button id="maintenanceRefresh" type="button">Aktualisieren</button><button id="maintenanceCreate" class="primary maintenance-admin" type="button">Wartung starten &amp; Pflichtbackup erstellen</button></div>
         </header>
         <section id="maintenanceStatusPanel" class="panel maintenance-status-panel maintenance-unknown">
           <div class="maintenance-light large" aria-hidden="true"><i></i></div>
           <div><p class="eyebrow">LIVE · BLOCK 104</p><h3 id="maintenanceStatusTitle">Wartungsstatus noch nicht gelesen</h3><div id="maintenanceStatusMetrics" class="maintenance-status-metrics"></div></div>
         </section>
         <section class="panel">
-          <div class="section-head"><div><p class="eyebrow">LOKALES ARCHIV AUF DEM PI</p><h3>Anlagen-Snapshots und Online-Wartungsprotokolle</h3><p class="muted">Jeder Wartungsstart erzeugt einen schreibfreien Gesamtzustand. Snapshot, Checkliste, Messwerte und Bemerkungen bleiben lokal in SQLite gespeichert.</p></div></div>
-          <div class="table-wrap"><table class="data-table"><thead><tr><th>Nr.</th><th>Erstellt</th><th>Status</th><th>Monteur</th><th>Betriebsstunden</th><th>Exporte</th><th>Aktionen</th></tr></thead><tbody id="maintenanceReportRows"><tr><td colspan="7" class="muted">Noch keine Berichte.</td></tr></tbody></table></div>
+          <div class="section-head"><div><p class="eyebrow">LOKALES ARCHIV AUF DEM PI</p><h3>Anlagen-Snapshots und Online-Wartungsprotokolle</h3><p class="muted">Jeder Wartungsstart erzeugt einen schreibfreien Gesamtzustand und ein unveränderliches 38-Ziele-Sicherungsabbild. Snapshot, Checkliste, Messwerte und Bemerkungen bleiben lokal in SQLite gespeichert; das Backup bleibt auch nach dem Löschen eines Berichts erhalten.</p></div></div>
+          <div class="table-wrap"><table class="data-table"><thead><tr><th>Nr.</th><th>Erstellt</th><th>Status</th><th>Monteur</th><th>Betriebsstunden</th><th>Pflichtbackup</th><th>Exporte</th><th>Aktionen</th></tr></thead><tbody id="maintenanceReportRows"><tr><td colspan="8" class="muted">Noch keine Berichte.</td></tr></tbody></table></div>
         </section>
         <section id="maintenanceEditor" class="panel maintenance-editor" hidden>
           <div class="section-head"><div><p class="eyebrow">WARTUNGSPROTOKOLL <span id="maintenanceReportNumber"></span></p><h3 id="maintenanceReportTitle">Bericht bearbeiten</h3><p id="maintenanceReportMeta" class="muted"></p></div><div class="report-export-actions"><a id="maintenanceExportHtml" class="button-link" href="#">HTML</a><a id="maintenanceExportPdf" class="button-link" href="#">PDF</a><a id="maintenanceExportJson" class="button-link" href="#">JSON</a></div></div>
+          <div id="maintenanceBackupSummary" class="maintenance-backup-summary"></div>
           <div id="maintenanceComparison" class="maintenance-comparison"></div>
           <form id="maintenanceForm">
             <div class="maintenance-form-head"><label>Kraftstoffart<select id="maintenanceFuelType"><option value="gas">Gas</option><option value="oil">Heizöl</option></select></label><label>Monteur / Firma<input id="maintenanceTechnician" maxlength="19" autocomplete="name"></label><label class="maintenance-notes">Bemerkung<textarea id="maintenanceNotes" rows="3" maxlength="8000"></textarea></label></div>
@@ -646,6 +647,15 @@
           <div><p class="eyebrow">MSR2 SICHERUNGSABBILD</p><h2>Backup &amp; Wiederherstellung</h2><p class="muted">Alle 36 Reglerblöcke auf CPU 0 sowie Netzschutz-Block 16 auf CPU 1 und CPU 2 sichern – vollständig oder als freie Auswahl. Ein Abbild wird vor einer Wiederherstellung vollständig geprüft; erst danach lassen sich enthaltene Ziele auswählen.</p></div>
           <span class="status-pill neutral">CPU 0 / 1 / 2 · Blockweise</span>
         </header>
+
+        <section id="backupArchivePanel" class="panel backup-archive-panel backup-admin" hidden>
+          <div class="section-head backup-section-head">
+            <div><p class="eyebrow">WARTUNGSBACKUPS · ADMIN</p><h3>Geschütztes Backup-Archiv</h3><p class="muted">Bei jedem Wartungsstart entsteht automatisch ein vollständiges 38-Ziele-Abbild. Das Archiv ist nur lesbar: Es gibt hier weder einen Löschknopf noch eine manuelle Autoarchivierung.</p></div>
+            <button id="backupArchiveRefresh" type="button">Archiv aktualisieren</button>
+          </div>
+          <div id="backupArchiveStatus" class="backup-status backup-status-neutral">Archiv wurde noch nicht geladen.</div>
+          <div id="backupArchiveList" class="backup-archive-list" aria-live="polite"><p class="muted">Noch keine Wartungsbackups geladen.</p></div>
+        </section>
 
         <section class="panel backup-panel">
           <div class="section-head backup-section-head">
@@ -772,7 +782,11 @@
       </div>
       <div class="changelog-list">
         <article class="changelog-entry current">
-          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-08-17">17.08.2026</time><span>Aktuell</span></header>
+          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-08-18">18.08.2026</time><span>Aktuell</span></header>
+          <ul><li>Jeder Wartungsstart erzeugt vor dem Bericht automatisch ein vollständiges und geprüftes Backup aller 38 freigegebenen CPU-/Blockziele.</li><li>Das geschützte Archiv zeigt Integrität, Zielergebnis, Packrevision und SHA-256-Bindungen und verknüpft jedes Abbild mit seinem Wartungsbericht.</li><li>Archivierte Abbilder lassen sich unverändert herunterladen oder nach erneuter serverseitiger Prüfung mit leerer Auswahl in den sicheren Wiederherstellungs-Dry-Run laden.</li><li>Das Löschen eines Wartungsberichts entfernt das zugehörige Backup ausdrücklich nicht.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.4.0</strong><time datetime="2026-08-17">17.08.2026</time></header>
           <ul><li>Block 16 mit 18 Feldern und Block 20 mit 39 Feldern sind auf beiden Netzüberwachungs-CPUs schreibbar; das sind insgesamt 114 eindeutig adressierte Feldinstanzen.</li><li>Die originale Layout-4-Datenzuordnung belegt für Block 20 den Vollblock-Schreibdienst 21. Lesen, Kodierung, Authentifizierung, bytegenauer Ausgangszustandsvergleich, positive Bestätigung und exakte Vollblock-Rückleseprüfung bleiben zwingend.</li><li>Mehrdeutige Anzeigen werden nicht geraten und können nur ausdrücklich als <code>raw:&lt;Wert&gt;</code> eingegeben werden. Die Kodierung wurde schreibfrei geprüft; ein physischer Block-20-Schreibvorgang an der Anlage steht noch aus.</li><li>Block 21 bleibt ohne Schreibdienst strikt nur lesbar. Block 20 bleibt bis zur realen Abnahme außerhalb von Sicherung und Wiederherstellung; deren Umfang bleibt bei 38 Zielen.</li><li>Weitere Standardblöcke sind in den geprüften Definitionen nicht enthalten. Die zusätzlich gelesenen Diagnosedienste 17 und 18 bleiben mangels belegter Feldstruktur reine Rohdaten.</li></ul>
         </article>
         <article class="changelog-entry">

@@ -15,7 +15,12 @@ from types import SimpleNamespace
 from open_dachs_manager import __version__
 from open_dachs_manager.mapping import PackRepository, WriteAllowlist
 from open_dachs_manager.auth import authenticate, calculate_pw4
-from open_dachs_manager.service import DachsService, write_json_atomic
+from open_dachs_manager.service import (
+    BACKUP_PAYLOAD_LENGTHS,
+    BACKUP_TARGETS,
+    DachsService,
+    write_json_atomic,
+)
 from open_dachs_manager.maintenance import (
     MAINTENANCE_CONFIRMATION,
     MAINTENANCE_DEMO_CONFIRMATION,
@@ -24,6 +29,7 @@ from open_dachs_manager.maintenance import (
     report_comparison,
     report_html,
     report_pdf,
+    report_text_lines,
     supplemental_definition,
     validate_protocol,
 )
@@ -108,6 +114,88 @@ class NoisySerial(FakeSerial):
                 dst=request.raw[1],
             ))
         return len(data)
+
+
+class SyntheticMaintenanceService(DachsService):
+    """Deterministic, hardware-free service for the 38-target maintenance flow."""
+
+    def __init__(self, pack, *, failed=(), fuel_raw=8):
+        super().__init__("synthetic", 19200, 0.9, pack)
+        self.failed = set(failed)
+        self.fuel_raw = fuel_raw
+        self.sessions = 0
+        self.reads = []
+        self.writes = []
+
+    @contextmanager
+    def session(self):
+        self.sessions += 1
+        yield object()
+
+    def read_block(self, _session, block, cpu=0):
+        target = (cpu, block)
+        self.reads.append(target)
+        payload = bytearray(BACKUP_PAYLOAD_LENGTHS.get(target, 70))
+        if target == (0, 20):
+            self.pack.encode_value(
+                payload, "Hka_Bd_Stat.uchSeriennummer", "1234567890", block=20
+            )
+        elif target == (0, 22):
+            self.pack.encode_value(
+                payload,
+                "Hka_Bd.ulBetriebssekunden",
+                str(1234 * 3600),
+                raw_mode=True,
+                block=22,
+            )
+        elif target == (0, 24):
+            self.pack.encode_value(
+                payload,
+                "Hka_Mw1.bKraftstofftyp",
+                str(self.fuel_raw),
+                raw_mode=True,
+                block=24,
+            )
+        elif target == (0, 100):
+            payload[34] = 0xA8
+            payload[36] = 0xA1
+            payload[37] = 0x5A
+        elif target == (0, 104):
+            payload[0] = 0xA1
+        ok = target not in self.failed
+        response = SimpleNamespace(
+            elapsed_ms=1.25, crc_errors=0, protocol_errors=0
+        )
+        return SimpleNamespace(
+            ok=ok,
+            payload=bytes(payload) if ok else b"",
+            status=0 if ok else None,
+            response=response,
+        )
+
+    def authenticate(self, _session, level, _pass4):
+        return SimpleNamespace(
+            ok=True,
+            granted_level=level,
+            serial_number="1234567890",
+        )
+
+    def write_payload(
+        self, _session, block, before, after, changed_keys, _allowlist, dry_run
+    ):
+        self.writes.append(
+            (block, bytes(before), bytes(after), tuple(changed_keys), dry_run)
+        )
+        return SimpleNamespace(
+            as_dict=lambda: {
+                "block": block,
+                "written": True,
+                "write_attempted": True,
+                "readback_ok": True,
+                "ack_positive": True,
+                "changed_keys": list(changed_keys),
+            }
+        )
 
 
 class CoreTests(unittest.TestCase):
@@ -1721,96 +1809,124 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(pdf.startswith(b"%PDF-1.4"))
         self.assertEqual(pdf.count(b"/Type /Page\n"), 3)
 
-    def test_maintenance_start_archives_every_addressable_block_in_one_session(self):
-        pack = PackRepository()
+    def test_uncertain_report_never_claims_a_successful_controller_write(self):
+        from reportlab import rl_config
 
-        class Service:
-            def __init__(self, failed=(), fuel_raw=8):
-                self.blocks = []
-                self.failed = set(failed)
-                self.fuel_raw = fuel_raw
-                self.sessions = 0
+        report = {
+            "generated_at": "2026-08-03T12:00:00+00:00",
+            "generated_by": "admin",
+            "pack_rev": "50",
+            "blocks": {},
+            "snapshot": {
+                "attempted_blocks": [20, 22],
+                "captured_blocks": [20, 22],
+                "failed_blocks": [],
+            },
+            "maintenance_status": {"title": "Wartung im Plan"},
+        }
+        protocol = {
+            "fuel_type": "gas",
+            "technician": "Firma",
+            "notes": "Zustand prüfen",
+            "checklist": {},
+            "supplemental": {},
+            "measurements": {},
+        }
+        completion = {
+            "mode": "live",
+            "controller_written": True,
+            "uncertain": True,
+            "completed_at": "2026-08-03T12:30:00+00:00",
+            "username": "admin",
+        }
 
-            @contextmanager
-            def session(self):
-                self.sessions += 1
-                yield object()
+        text = "\n".join(report_text_lines(report, protocol, completion))
+        html = report_html(report, protocol, completion).decode("utf-8")
+        self.assertIn("ZIELZUSTAND UNKLAR", text)
+        self.assertIn("Zustand unklar", html)
+        self.assertNotIn("geschrieben + Readback", text)
+        self.assertNotIn("geschrieben + Readback", html)
+        self.assertNotIn(">kontrolliert<", html)
 
-            def decoded_block(self, session, block):
-                self.blocks.append(block)
-                payload = bytearray(70)
-                if block == 24:
-                    key = "Hka_Mw1.bKraftstofftyp"
-                    payload[pack.field_map(24)[key]["offset"]] = self.fuel_raw
-                ok = block not in self.failed
-                result = SimpleNamespace(
-                    ok=ok,
-                    payload=bytes(payload) if ok else b"",
-                    status=0 if ok else None,
-                    response=SimpleNamespace(elapsed_ms=1.25),
-                )
-                fields = pack.display_fields(block, bytes(payload)) if ok else []
-                return result, fields
+        old_compression = rl_config.pageCompression
+        rl_config.pageCompression = 0
+        try:
+            pdf = report_pdf(report, protocol, completion)
+        finally:
+            rl_config.pageCompression = old_compression
+        self.assertEqual(pdf.count(b"/Type /Page\n"), 3)
+        self.assertIn(b"Zustand unklar", pdf)
+        self.assertNotIn(b"geschrieben + Readback", pdf)
+        self.assertNotIn(b"kontrolliert", pdf)
 
+    def test_maintenance_export_is_blocked_while_live_completion_is_in_flight(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = DachsStore(Path(directory) / "history.db")
-            service = Service(failed={38})
-            app = SimpleNamespace(
-                state_lock=threading.Lock(), serial_lock=threading.Lock(), serial_enabled=True,
-                service=service, store=store, pack=pack,
-            )
-            app._report_field = DachsWebApp._report_field
-            app.maintenance_report = lambda item_id: DachsWebApp.maintenance_report(app, item_id)
+            app = DachsWebApp(data_dir=directory, interval=60)
+            report_id = app.store.create_maintenance_report(
+                "admin",
+                "gas",
+                {"blocks": {}, "maintenance_status": {}},
+                {
+                    "fuel_type": "gas",
+                    "technician": "Firma",
+                    "notes": "",
+                    "checklist": {},
+                    "supplemental": {},
+                    "measurements": {},
+                },
+            )["id"]
+            with app.store.lock, app.store.database() as database:
+                database.execute(
+                    "UPDATE maintenance_reports SET status='completing' WHERE id=?",
+                    (report_id,),
+                )
+            for export_type in ("json", "html", "pdf"):
+                with self.subTest(export_type=export_type):
+                    with self.assertRaisesRegex(ValueError, "abschluss läuft"):
+                        app.maintenance_export(report_id, export_type)
 
-            item = DachsWebApp.create_maintenance_report(app, "admin")
+    def test_maintenance_start_archives_every_addressable_block_in_one_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            service = SyntheticMaintenanceService(app.pack, fuel_raw=8)
+            app.service = service
+
+            item = app.create_maintenance_report("admin")
 
             self.assertEqual(service.sessions, 1)
-            self.assertEqual(service.blocks, pack.addressable_blocks())
+            self.assertEqual(service.reads, list(BACKUP_TARGETS))
             self.assertEqual(item["status"], "draft")
             self.assertEqual(item["fuel_type"], "oil")
             self.assertEqual(item["protocol"]["fuel_type"], "oil")
-            self.assertEqual(len(item["report"]["blocks"]), len(pack.addressable_blocks()))
-            self.assertEqual(item["snapshot"]["captured_blocks"], [block for block in pack.addressable_blocks() if block != 38])
-            self.assertEqual(item["snapshot"]["failed_blocks"][0]["block"], 38)
-            self.assertFalse(item["snapshot"]["complete"])
-            self.assertFalse(item["report"]["blocks"]["38"]["ok"])
-            self.assertEqual(store.maintenance_reports()[0]["snapshot"]["attempted_blocks"], pack.addressable_blocks())
+            self.assertEqual(len(item["report"]["blocks"]), len(BACKUP_TARGETS))
+            self.assertEqual(len(item["snapshot"]["captured_targets"]), 38)
+            self.assertEqual(item["snapshot"]["failed_blocks"], [])
+            self.assertTrue(item["snapshot"]["complete"])
+            archive = item["backup_archive"]
+            self.assertTrue(archive["ready"])
+            self.assertTrue(archive["verified"])
+            self.assertEqual(archive["successful_targets"], 38)
+            archive_path = Path(directory) / "backup-archive" / archive["filename"]
+            self.assertEqual(archive_path.stat().st_mode & 0o777, 0o600)
 
-            unknown_service = Service(fuel_raw=0)
+            unknown_service = SyntheticMaintenanceService(app.pack, fuel_raw=0)
             app.service = unknown_service
             with self.assertRaisesRegex(RuntimeError, "Kraftstoffart wurde nicht eindeutig ermittelt"):
-                DachsWebApp.create_maintenance_report(app, "admin")
+                app.create_maintenance_report("admin")
             self.assertEqual(unknown_service.sessions, 1)
-            self.assertEqual(len(store.maintenance_reports()), 1)
+            self.assertEqual(len(app.store.maintenance_reports()), 1)
+            self.assertEqual(len(list((Path(directory) / "backup-archive").glob("*.json"))), 1)
 
     def test_maintenance_start_requires_core_snapshot_blocks(self):
-        pack = PackRepository()
-
-        class Service:
-            @contextmanager
-            def session(self):
-                yield object()
-
-            def decoded_block(self, session, block):
-                ok = block != 100
-                payload = bytes(70) if ok else b""
-                return SimpleNamespace(
-                    ok=ok,
-                    payload=payload,
-                    status=0 if ok else None,
-                    response=SimpleNamespace(elapsed_ms=1.0),
-                ), (pack.display_fields(block, payload) if ok else [])
-
         with tempfile.TemporaryDirectory() as directory:
-            store = DachsStore(Path(directory) / "history.db")
-            app = SimpleNamespace(
-                state_lock=threading.Lock(), serial_lock=threading.Lock(), serial_enabled=True,
-                service=Service(), store=store, pack=pack,
+            app = DachsWebApp(data_dir=directory, interval=60)
+            app.service = SyntheticMaintenanceService(app.pack, failed={(0, 100)})
+            with self.assertRaisesRegex(ValueError, "nicht vollständig verifiziert"):
+                app.create_maintenance_report("admin")
+            self.assertEqual(app.store.maintenance_reports(), [])
+            self.assertEqual(
+                list((Path(directory) / "backup-archive").glob("*.json")), []
             )
-            app._report_field = DachsWebApp._report_field
-            with self.assertRaisesRegex(RuntimeError, "Pflichtblöcke fehlen: 100"):
-                DachsWebApp.create_maintenance_report(app, "admin")
-            self.assertEqual(store.maintenance_reports(), [])
 
     def test_maintenance_report_comparison_calculates_counter_deltas(self):
         def report(hours, starts):
@@ -1828,59 +1944,29 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(rows["starts"]["delta"], 3)
 
     def test_maintenance_completion_writes_values_then_only_confirmation_bit(self):
-        class Audit:
-            def __init__(self, block, after, keys):
-                self.block, self.after, self.keys = block, after, keys
-
-            def as_dict(self):
-                return {"block": self.block, "written": True, "readback_ok": True, "ack_positive": True, "changed_keys": self.keys}
-
-        class Service:
-            def __init__(self):
-                self.writes = []
-
-            @contextmanager
-            def session(self):
-                yield object()
-
-            def authenticate(self, session, level, pass4):
-                return SimpleNamespace(ok=True, granted_level=level)
-
-            def read_block(self, session, block):
-                payload = bytearray(70)
-                if block == 100:
-                    payload[34] = 0xA8
-                    payload[36] = 0xA1
-                    payload[37] = 0x5A
-                if block == 104:
-                    payload[0] = 0xA1
-                return SimpleNamespace(ok=True, payload=bytes(payload))
-
-            def write_payload(self, session, block, before, after, changed_keys, allowlist, dry_run):
-                self.writes.append((block, bytes(before), bytes(after), tuple(changed_keys), dry_run))
-                return Audit(block, after, list(changed_keys))
-
         with tempfile.TemporaryDirectory() as directory:
-            store = DachsStore(Path(directory) / "history.db")
-            report = {"blocks": {}, "maintenance_status": {}}
-            protocol = {
-                "fuel_type": "gas", "technician": "Service", "notes": "fertig",
-                "checklist": {item["id"]: "yes" for item in checklist_definition("gas")},
-                "measurements": {"Wartung_Ew1.Vorher.bOelstand": "5.0"},
+            app = DachsWebApp(
+                data_dir=directory, interval=60, maintenance_live_writes=True
+            )
+            app.service = SyntheticMaintenanceService(app.pack, fuel_raw=128)
+            report = app.create_maintenance_report("admin")
+            protocol = report["protocol"]
+            protocol.update({"technician": "Service", "notes": "fertig"})
+            protocol["checklist"] = {
+                item["id"]: "yes" for item in checklist_definition("gas")
+            }
+            protocol["measurements"] = {
+                "Wartung_Ew1.Vorher.bOelstand": "5.0"
             }
             protocol["checklist"]["geraeusch"] = "corrected"
             protocol["checklist"]["kabelbaum"] = "no"
-            report_id = store.create_maintenance_report("admin", "gas", report, protocol)["id"]
-            app = SimpleNamespace(
-                state_lock=threading.Lock(), serial_lock=threading.Lock(), serial_enabled=True,
-                service=Service(), store=store, pack=PackRepository(),
-            )
-            app.maintenance_report = lambda item_id: DachsWebApp.maintenance_report(app, item_id)
-            result = DachsWebApp.complete_maintenance(
-                app, "admin", report_id, protocol, 4, "1234", MAINTENANCE_CONFIRMATION,
+            result = app.complete_maintenance(
+                "admin", report["id"], protocol, 4, "1234", MAINTENANCE_CONFIRMATION,
             )
             self.assertEqual(result["status"], "completed")
             self.assertEqual([item[0] for item in app.service.writes], [100, 104])
+            self.assertEqual(app.service.reads.count((0, 100)), 2)
+            self.assertEqual(app.service.reads.count((0, 104)), 2)
             before100, after100, changed100 = app.service.writes[0][1:4]
             self.assertEqual(after100[:7], b"Service")
             self.assertEqual(after100[20], 50)
@@ -1896,6 +1982,88 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(before104[0], 0xA1)
             self.assertEqual(after104[0], 0xA3)
             self.assertEqual(after104[1:], before104[1:])
+
+    def test_live_completion_rejects_controller_mismatch_before_any_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(
+                data_dir=directory, interval=60, maintenance_live_writes=True
+            )
+            service = SyntheticMaintenanceService(app.pack, fuel_raw=128)
+            app.service = service
+            report = app.create_maintenance_report("admin")
+            protocol = report["protocol"]
+            protocol.update({"technician": "Service", "notes": "fertig"})
+            protocol["checklist"] = {
+                item["id"]: "yes" for item in checklist_definition("gas")
+            }
+            service.authenticate = lambda _session, level, _pass4: SimpleNamespace(
+                ok=True,
+                granted_level=level,
+                serial_number="9999999999",
+            )
+
+            with self.assertRaisesRegex(PermissionError, "Regleridentität"):
+                app.complete_maintenance(
+                    "admin",
+                    report["id"],
+                    protocol,
+                    4,
+                    "1234",
+                    MAINTENANCE_CONFIRMATION,
+                )
+
+            self.assertEqual(service.writes, [])
+            self.assertEqual(app.store.maintenance_report(report["id"])["status"], "draft")
+
+    def test_attempted_live_write_failure_makes_report_uncertain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(
+                data_dir=directory, interval=60, maintenance_live_writes=True
+            )
+            service = SyntheticMaintenanceService(app.pack, fuel_raw=128)
+            app.service = service
+            report = app.create_maintenance_report("admin")
+            protocol = report["protocol"]
+            protocol.update({"technician": "Service", "notes": "fertig"})
+            protocol["checklist"] = {
+                item["id"]: "yes" for item in checklist_definition("gas")
+            }
+
+            def failed_write(
+                _session, block, before, after, changed_keys, _allowlist, dry_run
+            ):
+                service.writes.append(
+                    (block, bytes(before), bytes(after), tuple(changed_keys), dry_run)
+                )
+                return SimpleNamespace(
+                    as_dict=lambda: {
+                        "block": block,
+                        "written": False,
+                        "write_attempted": True,
+                        "readback_ok": False,
+                        "ack_positive": None,
+                        "error": "synthetischer Readback-Fehler",
+                        "changed_keys": list(changed_keys),
+                    }
+                )
+
+            service.write_payload = failed_write
+            with self.assertRaisesRegex(RuntimeError, "synthetischer Readback-Fehler"):
+                app.complete_maintenance(
+                    "admin",
+                    report["id"],
+                    protocol,
+                    4,
+                    "1234",
+                    MAINTENANCE_CONFIRMATION,
+                )
+
+            recovered = app.store.maintenance_report(report["id"])
+            self.assertEqual(recovered["status"], "uncertain")
+            self.assertTrue(recovered["completion"]["uncertain"])
+            self.assertEqual([item[0] for item in service.writes], [100])
+            with self.assertRaisesRegex(ValueError, "unklarem Abschlusszustand"):
+                app.delete_maintenance_report(report["id"])
 
     def test_maintenance_demo_completion_never_opens_serial_or_writes(self):
         class NoHardwareService:

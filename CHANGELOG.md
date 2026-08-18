@@ -1,5 +1,26 @@
 # Änderungsverlauf
 
+## V3 1.5.0 - 2026-08-18
+
+- jeder Wartungsstart erzeugt automatisch ein vollständiges Sicherungsabbild
+  aller 38 freigegebenen CPU-/Blockziele; ein unvollständiges oder nicht
+  prüfbares Abbild lässt keinen neuen Wartungsbericht entstehen
+- Sicherungsabbilder werden atomar und mit Rechten `0600` im nur für den
+  Dienstbenutzer zugänglichen Verzeichnis `backup-archive` abgelegt; Metadaten,
+  Dateiinhalt und Abbild sind per SHA-256 gebunden
+- der nur für Administratoren sichtbare Backup-Bereich zeigt Zeitpunkt,
+  Ersteller, Herkunft, Wartungsbericht, Größe, Packrevision, Integrität und das
+  Ergebnis 38/38; Abbilder können unverändert heruntergeladen werden
+- „Für Wiederherstellung laden“ lädt die archivierte Datei erneut, prüft sie
+  noch einmal über die bestehende Abbildprüfung und übernimmt sie mit leerer
+  Zielauswahl sowie schreibfreiem Probelauf als sicherem Standard
+- Wartungsansicht und Bericht nennen Backup-ID, Zeitpunkt, 38/38-Ergebnis und
+  SHA-256; das Löschen eines Wartungsberichts lässt das getrennte
+  Sicherungsabbild ausdrücklich erhalten
+- die Zwischenzustände `Abschluss läuft` und `Zielzustand unklar` verhindern
+  erneutes Abschließen und Löschen; ein unklarer Reglerzustand muss anhand von
+  Bestätigung, Rückleseprüfung und Prüfprotokoll fachlich geklärt werden
+
 ## V3 1.4.0 - 2026-08-17
 
 - Block 16 mit 18 Feldern und Block 20 mit 39 Feldern sind auf beiden

@@ -8,6 +8,9 @@ from .mapping import PackRepository
 from .transport import SerialSession
 
 
+AUTH_INPUT_BLOCK_LENGTHS = {20: 70, 22: 70}
+
+
 def calculate_pw4(serial_number: str, operating_hours: int) -> str:
     """Calculate the four-digit daily MSR2 password (PW4).
 
@@ -30,6 +33,50 @@ class AuthInputs:
     operating_hours: int
 
 
+def auth_inputs_from_payloads(
+    pack: PackRepository,
+    block20_payload: bytes,
+    block22_payload: bytes,
+) -> AuthInputs:
+    """Derive PW4 inputs from an existing, complete controller capture.
+
+    Maintenance backups already contain CPU-0 blocks 20 and 22.  Keeping this
+    decoding separate from :func:`read_auth_inputs` prevents an otherwise
+    easy-to-miss second read of both blocks while still applying the same
+    fail-closed identity checks.
+    """
+    payload20 = bytes(block20_payload)
+    payload22 = bytes(block22_payload)
+    expected20 = AUTH_INPUT_BLOCK_LENGTHS[20]
+    expected22 = AUTH_INPUT_BLOCK_LENGTHS[22]
+    if len(payload20) != expected20:
+        raise RuntimeError(
+            f"block 20 payload has {len(payload20)} bytes, expected {expected20}"
+        )
+    if len(payload22) != expected22:
+        raise RuntimeError(
+            f"block 22 payload has {len(payload22)} bytes, expected {expected22}"
+        )
+    try:
+        values20 = {item.key: item.raw for item in pack.decode(20, payload20)}
+        values22 = {item.key: item.raw for item in pack.decode(22, payload22)}
+    except Exception as exc:
+        raise RuntimeError("cannot decode authentication inputs from blocks 20 and 22") from exc
+    serial_number = str(values20.get("Hka_Bd_Stat.uchSeriennummer", "")).strip()
+    raw_operating_seconds = values22.get("Hka_Bd.ulBetriebssekunden")
+    if not serial_number:
+        raise RuntimeError("block 20 did not contain a Dachs serial number")
+    if raw_operating_seconds is None:
+        raise RuntimeError("block 22 did not contain total operating seconds")
+    try:
+        operating_seconds = int(raw_operating_seconds)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("block 22 contained invalid total operating seconds") from exc
+    if operating_seconds < 0:
+        raise RuntimeError("block 22 contained negative total operating seconds")
+    return AuthInputs(serial_number, operating_seconds // 3600)
+
+
 def read_auth_inputs(
     session: SerialSession,
     pack: PackRepository,
@@ -40,6 +87,10 @@ def read_auth_inputs(
     block22 = session.read_block(22, packet=None, timeout=timeout)
     if not block20.ok or not block22.ok:
         raise RuntimeError("cannot read authentication inputs from blocks 20 and 22")
+    # Keep interactive authentication compatible with controllers/tests that
+    # expose only the decoded prefix.  The maintenance archive uses the strict
+    # full-payload helper above because it must prove a complete 38-target
+    # capture before it is allowed to become a recovery image.
     values20 = {item.key: item.raw for item in pack.decode(20, block20.payload)}
     values22 = {item.key: item.raw for item in pack.decode(22, block22.payload)}
     serial_number = str(values20.get("Hka_Bd_Stat.uchSeriennummer", "")).strip()

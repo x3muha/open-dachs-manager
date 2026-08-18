@@ -69,6 +69,36 @@ ohne eindeutige positive Bestätigung und vollständige Rückleseprüfung gilt d
 Zielzustand als unklar; vor einem weiteren Versuch ist der Block frisch zu
 lesen und fachlich zu prüfen.
 
+## Geschütztes Wartungsbackup-Archiv
+
+Jeder Wartungsstart verwendet einen einzigen exklusiven Lesevorgang für alle
+38 freigegebenen CPU-/Blockziele. Erst wenn daraus ein vollständiges
+`dachs-msr2-backup/v3`-Abbild entstanden ist, dessen Abbild- und
+Datei-SHA-256 geprüft wurden und dessen Datei atomar gespeichert ist, darf der
+zugehörige Wartungsbericht angelegt werden. Der Anlagenstand des Berichts wird
+aus denselben CPU-0-Antworten gebildet; eine zweite Blockrunde könnte bereits
+einen anderen Reglerzeitpunkt abbilden und wird deshalb vermieden.
+
+`/var/lib/open-dachs-manager/backup-archive` gehört dem Dienstbenutzer und hat
+Modus `0700`; Dateien haben `0600`. Der Installer öffnet Eltern- und
+Archivverzeichnis mit `O_DIRECTORY|O_NOFOLLOW` und setzt Eigentümer sowie
+Rechte nur über den geöffneten Dateideskriptor. Ein vorgelegter symbolischer
+Link oder ein anderes Nicht-Verzeichnis führt zum Abbruch, statt als root ein
+fremdes Ziel umzueignen oder dessen Rechte zu ändern.
+
+Listen- und Download-API sind nur für Administratoren erreichbar. Es gibt
+bewusst keinen Archiv-Löschweg. Das Löschen eines Wartungsberichts lässt sein
+Sicherungsabbild bestehen. Vor der Übernahme in die Wiederherstellung werden
+Download, Abbildprüfsumme, Packrevision, Gerätebindung und exakt 38/38
+wiederherstellbare Ziele erneut geprüft. Danach bleibt die Zielauswahl leer und
+der schreibfreie Probelauf aktiv.
+
+Ein echter Wartungsabschluss wird vor dem ersten möglichen Reglerwrite als
+`completing` gespeichert. Dieser Zustand ist gegen Wiederholung und Löschen
+gesperrt. Kann ein gesendeter Auftrag nicht eindeutig per ACK und Readback
+bestätigt werden, bleibt der Bericht als `uncertain` gesperrt und verlangt eine
+fachliche Prüfung; die Oberfläche bietet keinen Wiederholen- oder Löschknopf.
+
 ## Netzschutz-CPUs
 
 CPU 0 (Regler), CPU 1 und CPU 2 (Netzüberwachung) haben voneinander getrennte
@@ -128,7 +158,7 @@ URLs, Browser-Lesezeichen oder öffentliche Fehlerberichte gelangen.
 
 ## Reifegrad
 
-Version 1.4.0 basiert auf dem ersten stabilen öffentlichen Stand und wird ohne
+Version 1.5.0 basiert auf dem ersten stabilen öffentlichen Stand und wird ohne
 Garantie bereitgestellt. Gerätevarianten und Packstände können abweichen.
 Leseergebnisse und Feldlagen am tatsächlichen Zielgerät verifizieren, bevor
 Schreibvorgänge freigegeben werden.

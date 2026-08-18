@@ -23,7 +23,7 @@ const state = {
   maintenance: { reports: [], current: null, autosaveTimer: null },
   dashboard: { settings: null, editCards: [], draggedIndex: null },
   system: { selectedTab: "users", users: [], tokens: [], apiSettings: null },
-  backup: { image: null, inspection: null, busy: false, importGeneration: 0 },
+  backup: { image: null, inspection: null, busy: false, importGeneration: 0, archive: [], archiveLoaded: false },
   serviceCatalogTimer: null,
   serviceCatalogLoaded: false,
   changelogTrigger: null,
@@ -83,6 +83,8 @@ function showLogin(message = "") {
   state.backup.inspection = null;
   state.backup.busy = false;
   state.backup.importGeneration += 1;
+  state.backup.archive = [];
+  state.backup.archiveLoaded = false;
   if (state.refreshTimer) clearInterval(state.refreshTimer);
   if (state.chartTimer) clearInterval(state.chartTimer);
   if ($("writeEnabled")) $("writeEnabled").checked = false;
@@ -745,6 +747,7 @@ function showView(viewId) {
   if (viewId === "backupView") {
     renderBackupBlockList();
     updateRestoreMode();
+    if (state.user?.role === "admin") refreshBackupArchive();
   }
 }
 
@@ -781,10 +784,78 @@ function renderMaintenanceReports() {
     const captured = (snapshot.captured_blocks || []).length;
     const attempted = (snapshot.attempted_blocks || []).length;
     const snapshotText = attempted ? `<small>Snapshot ${captured}/${attempted} Blöcke</small>` : "";
-    const status = item.status !== "completed" ? "Entwurf" : item.completion_mode === "demo" ? "Demo abgeschlossen" : "Abgeschlossen";
-    const deleteAction = isAdmin ? `<button class="danger report-delete" type="button" data-maintenance-delete="${item.id}">Löschen</button>` : "—";
-    return `<tr><td><button class="history-ring" type="button" data-maintenance-report="${item.id}">#${item.id}</button></td><td>${escapeHtml(new Date(item.created_at).toLocaleString("de-DE"))}${snapshotText}</td><td><span class="status-pill ${item.status === "completed" ? "ok" : "warn"}">${status}</span></td><td>${escapeHtml(item.technician || "—")}</td><td>${formatValue(summary.operating_hours, "Bh")}</td><td class="report-links"><a href="${appUrl(`/api/maintenance/reports/${item.id}/export/html`)}">HTML</a><a href="${appUrl(`/api/maintenance/reports/${item.id}/export/pdf`)}">PDF</a><a href="${appUrl(`/api/maintenance/reports/${item.id}/export/json`)}">JSON</a></td><td>${deleteAction}</td></tr>`;
-  }).join("") || `<tr><td colspan="7" class="muted">Noch keine Berichte.</td></tr>`;
+    const presentation = maintenanceStatusPresentation(item);
+    const backup = maintenanceBackupMetadata(item);
+    const backupCell = backup ? maintenanceBackupTableMarkup(backup) : `<span class="status-pill neutral">Altbericht ohne Backup</span>`;
+    const deletable = ["draft", "completed"].includes(item.status);
+    const deleteAction = isAdmin && deletable ? `<button class="danger report-delete" type="button" data-maintenance-delete="${escapeHtml(item.id)}">Löschen</button>` : "—";
+    const exportLinks = item.status === "completing"
+      ? `<span class="muted">Nach Abschluss verfügbar</span>`
+      : `<a href="${escapeHtml(appUrl(`/api/maintenance/reports/${encodeURIComponent(item.id)}/export/html`))}">HTML</a><a href="${escapeHtml(appUrl(`/api/maintenance/reports/${encodeURIComponent(item.id)}/export/pdf`))}">PDF</a><a href="${escapeHtml(appUrl(`/api/maintenance/reports/${encodeURIComponent(item.id)}/export/json`))}">JSON</a>`;
+    return `<tr class="maintenance-report-${escapeHtml(item.status || "unknown")}"><td><button class="history-ring" type="button" data-maintenance-report="${escapeHtml(item.id)}">#${escapeHtml(item.id)}</button></td><td>${escapeHtml(formatArchiveDate(item.created_at))}${snapshotText}</td><td><span class="status-pill ${presentation.tone}">${escapeHtml(presentation.label)}</span></td><td>${escapeHtml(item.technician || "—")}</td><td>${formatValue(summary.operating_hours, "Bh")}</td><td>${backupCell}</td><td class="report-links">${exportLinks}</td><td>${deleteAction}</td></tr>`;
+  }).join("") || `<tr><td colspan="8" class="muted">Noch keine Berichte.</td></tr>`;
+}
+
+function maintenanceStatusPresentation(item = {}) {
+  if (item.status === "completed") return { label: item.completion_mode === "demo" ? "Demo abgeschlossen" : "Abgeschlossen", tone: "ok" };
+  if (item.status === "completing") return { label: "Abschluss läuft", tone: "warn" };
+  if (item.status === "uncertain") return { label: "Zielzustand unklar – prüfen", tone: "error" };
+  if (item.status === "draft") return { label: "Entwurf", tone: "warn" };
+  return { label: item.status || "Unbekannt", tone: "error" };
+}
+
+function maintenanceBackupMetadata(item = {}) {
+  const primary = item.backup_archive;
+  const fallback = item.maintenance_backup ?? item.backup;
+  const candidate = primary && typeof primary === "object" ? primary
+    : fallback && typeof fallback === "object" ? fallback : {};
+  const id = candidate.id ?? (typeof primary !== "object" ? primary : null) ?? item.backup_archive_id ?? item.backup_id;
+  if (id === null || id === undefined || id === "") return null;
+  return {
+    ...candidate,
+    id,
+    created_at: candidate.created_at ?? item.backup_created_at,
+    requested_targets: candidate.requested_targets ?? item.backup_requested_targets,
+    successful_targets: candidate.successful_targets ?? item.backup_successful_targets,
+    failed_targets: candidate.failed_targets ?? item.backup_failed_targets,
+    image_sha256: candidate.image_sha256 ?? item.backup_image_sha256,
+    file_sha256: candidate.file_sha256 ?? item.backup_file_sha256,
+  };
+}
+
+function maintenanceBackupTableMarkup(backup) {
+  const requested = archiveTargetCount(backup, "requested");
+  const successful = archiveTargetCount(backup, "successful");
+  const failed = archiveTargetCount(backup, "failed");
+  const complete = archiveEntryReady(backup);
+  const identity = state.user?.role === "admin"
+    ? `<button type="button" class="button-link" data-open-backup="${escapeHtml(backup.id)}">Backup #${escapeHtml(backup.id)}</button>`
+    : `<strong>Backup #${escapeHtml(backup.id)}</strong>`;
+  return `<div class="maintenance-backup-cell">
+    ${identity}
+    <small class="${complete ? "backup-integrity-ok" : "backup-integrity-error"}">${successful}/${requested || 38}${failed ? ` · ${failed} Fehler` : ""}</small>
+  </div>`;
+}
+
+function renderMaintenanceBackupSummary(item) {
+  const container = $("maintenanceBackupSummary");
+  if (!container) return;
+  const backup = maintenanceBackupMetadata(item);
+  if (!backup) {
+    container.innerHTML = `<div class="maintenance-backup-card legacy"><div><p class="eyebrow">SICHERHEITSBACKUP</p><strong>Altbericht ohne verknüpftes Pflichtbackup</strong><small>Berichte aus früheren Versionen bleiben weiterhin lesbar.</small></div></div>`;
+    return;
+  }
+  const requested = archiveTargetCount(backup, "requested") || 38;
+  const successful = archiveTargetCount(backup, "successful");
+  const failed = archiveTargetCount(backup, "failed");
+  const ready = archiveEntryReady(backup);
+  const digest = String(backup.image_sha256 || "");
+  const archiveAction = state.user?.role === "admin" ? `<button type="button" data-open-backup="${escapeHtml(backup.id)}">Im Backup-Archiv anzeigen</button>` : "";
+  container.innerHTML = `<div class="maintenance-backup-card ${ready ? "verified" : "invalid"}">
+    <div><p class="eyebrow">SICHERHEITSBACKUP #${escapeHtml(backup.id)}</p><strong>${ready ? "Vollständig und geprüft" : "Backupstatus prüfen"}</strong><small>${escapeHtml(formatArchiveDate(backup.created_at))} · ${successful}/${requested} Ziele${failed ? ` · ${failed} fehlgeschlagen` : ""}</small></div>
+    <code title="${escapeHtml(digest)}">SHA-256 ${escapeHtml(digest || "nicht gemeldet")}</code>
+    ${archiveAction}
+  </div>`;
 }
 
 async function refreshMaintenance(reloadCurrent = false) {
@@ -813,10 +884,13 @@ async function createMaintenanceReport() {
     state.maintenance.current = item;
     renderMaintenanceEditor();
     await refreshMaintenance(false);
+    if (state.user?.role === "admin") await refreshBackupArchive(true);
     const snapshot = item.snapshot || {};
-    toast(`Anlagenzustand schreibfrei gelesen: ${(snapshot.captured_blocks || []).length}/${(snapshot.attempted_blocks || []).length} Blöcke lokal archiviert.`);
+    const backup = maintenanceBackupMetadata(item);
+    const backupText = backup ? ` Pflichtbackup #${backup.id}: ${archiveTargetCount(backup, "successful")}/${archiveTargetCount(backup, "requested") || 38} Ziele geprüft.` : "";
+    toast(`Anlagenzustand schreibfrei gelesen: ${(snapshot.captured_blocks || []).length}/${(snapshot.attempted_blocks || []).length} Blöcke lokal archiviert.${backupText}`);
   } catch (error) { toast(error.message); }
-  finally { button.disabled = false; button.textContent = "Wartung starten & Anlage einlesen"; }
+  finally { button.disabled = false; button.textContent = "Wartung starten & Pflichtbackup erstellen"; }
 }
 
 async function loadMaintenanceReport(reportId) {
@@ -831,8 +905,16 @@ async function loadMaintenanceReport(reportId) {
 async function deleteMaintenanceReport(reportId) {
   if (state.user?.role !== "admin") return;
   const item = (state.maintenance.reports || []).find((candidate) => Number(candidate.id) === Number(reportId));
+  if (item && !["draft", "completed"].includes(item.status)) {
+    toast(item.status === "uncertain" ? "Dieser Bericht hat einen unklaren Zielzustand und darf nicht gelöscht oder erneut abgeschlossen werden." : "Ein laufender Wartungsabschluss darf nicht gelöscht oder erneut gestartet werden.", "error");
+    return;
+  }
   const status = item?.status === "completed" ? "abgeschlossen" : "offen";
-  const question = `Wartung #${reportId} (${status}) wirklich dauerhaft löschen? Snapshot, Protokoll und Exporte werden aus dem lokalen Pi-Archiv entfernt. Ein bereits erfolgter MSR2-Abschluss wird dadurch nicht rückgängig gemacht.`;
+  const backup = maintenanceBackupMetadata(item || {});
+  const backupNotice = backup
+    ? ` Das verknüpfte Backup #${backup.id} bleibt unverändert im geschützten Backup-Archiv erhalten.`
+    : " Bereits vorhandene Sicherheitsbackups bleiben unverändert im geschützten Backup-Archiv erhalten.";
+  const question = `Wartung #${reportId} (${status}) wirklich dauerhaft löschen? Snapshot, Protokoll und Exporte werden aus dem lokalen Pi-Archiv entfernt. Ein bereits erfolgter MSR2-Abschluss wird dadurch nicht rückgängig gemacht.${backupNotice}`;
   if (!window.confirm(question)) return;
   clearTimeout(state.maintenance.autosaveTimer);
   state.maintenance.autosaveTimer = null;
@@ -845,7 +927,7 @@ async function deleteMaintenanceReport(reportId) {
       renderMaintenanceEditor();
     }
     await refreshMaintenance(false);
-    toast(`Wartung #${reportId} wurde aus dem lokalen Archiv gelöscht.`);
+    toast(`Wartung #${reportId} wurde gelöscht. Das Backup-Archiv blieb erhalten.`);
   } catch (error) {
     toast(error.message);
     if (button) button.disabled = false;
@@ -854,16 +936,33 @@ async function deleteMaintenanceReport(reportId) {
 
 function renderMaintenanceEditor() {
   const item = state.maintenance.current;
-  if (!item) { $("maintenanceEditor").hidden = true; return; }
+  if (!item) { $("maintenanceEditor").hidden = true; $("maintenanceBackupSummary").innerHTML = ""; return; }
   $("maintenanceEditor").hidden = false;
   $("maintenanceReportNumber").textContent = `#${item.id}`;
-  $("maintenanceReportTitle").textContent = item.status !== "completed" ? "Wartungsentwurf bearbeiten" : item.completion_mode === "demo" ? "Abgeschlossener Demo-Wartungsbericht" : "Abgeschlossener Wartungsbericht";
+  $("maintenanceReportTitle").textContent = item.status === "draft" ? "Wartungsentwurf bearbeiten"
+    : item.status === "completing" ? "Wartungsabschluss läuft"
+    : item.status === "uncertain" ? "Zielzustand unklar – fachlich prüfen"
+    : item.completion_mode === "demo" ? "Abgeschlossener Demo-Wartungsbericht" : "Abgeschlossener Wartungsbericht";
   const snapshot = item.snapshot || {};
   const snapshotText = (snapshot.attempted_blocks || []).length ? ` · Snapshot ${(snapshot.captured_blocks || []).length}/${snapshot.attempted_blocks.length} Blöcke` : "";
   $("maintenanceReportMeta").textContent = `Anlagenstand ${new Date(item.created_at).toLocaleString("de-DE")} · Seriennummer ${item.summary?.serial_number || "—"} · ${item.summary?.operating_hours || "—"} Bh${snapshotText}`;
+  renderMaintenanceBackupSummary(item);
   const comparison = item.comparison;
   $("maintenanceComparison").innerHTML = comparison ? `<div class="section-head"><div><p class="eyebrow">VERGLEICH MIT BERICHT #${comparison.report_id}</p><h4>Zählerentwicklung seit ${escapeHtml(new Date(comparison.created_at).toLocaleString("de-DE"))}</h4></div></div><div class="maintenance-comparison-grid">${(comparison.rows || []).map((row) => `<div><span>${escapeHtml(row.label)}</span><strong>${row.delta === null || row.delta === undefined ? "—" : `${numeric(row.delta) >= 0 ? "+" : ""}${escapeHtml(row.delta)}`}</strong><small>${escapeHtml(row.previous ?? "—")} → ${escapeHtml(row.current ?? "—")}</small></div>`).join("")}</div>` : `<p class="source-note">Dies ist der erste archivierte Bericht; ein Zählervergleich erscheint ab dem nächsten Bericht.</p>`;
-  ["Html", "Pdf", "Json"].forEach((name) => { $(`maintenanceExport${name}`).href = appUrl(`/api/maintenance/reports/${item.id}/export/${name.toLowerCase()}`); });
+  ["Html", "Pdf", "Json"].forEach((name) => {
+    const link = $(`maintenanceExport${name}`);
+    if (item.status === "completing") {
+      link.removeAttribute("href");
+      link.setAttribute("aria-disabled", "true");
+      link.setAttribute("tabindex", "-1");
+      link.classList.add("disabled");
+      return;
+    }
+    link.href = appUrl(`/api/maintenance/reports/${encodeURIComponent(item.id)}/export/${name.toLowerCase()}`);
+    link.removeAttribute("aria-disabled");
+    link.removeAttribute("tabindex");
+    link.classList.remove("disabled");
+  });
   const protocol = item.protocol || {};
   $("maintenanceFuelType").value = protocol.fuel_type || "gas";
   $("maintenanceTechnician").value = protocol.technician || "";
@@ -891,7 +990,10 @@ function renderMaintenanceEditor() {
   $("maintenanceComplete").textContent = liveCompletion ? "Wartung endgültig abschließen" : "Demolauf abschließen";
   $("maintenanceComplete").classList.toggle("danger", liveCompletion);
   $("maintenanceComplete").classList.toggle("primary", !liveCompletion);
-  $("maintenanceSaveHint").textContent = item.status !== "completed" ? "Änderungen werden lokal auf dem Pi gespeichert." : item.completion_mode === "demo" ? `Demolauf lokal abgeschlossen am ${new Date(item.completed_at).toLocaleString("de-DE")} · MSR2 unverändert` : `Abgeschlossen am ${new Date(item.completed_at).toLocaleString("de-DE")}`;
+  $("maintenanceSaveHint").textContent = item.status === "draft" ? "Änderungen werden lokal auf dem Pi gespeichert."
+    : item.status === "completing" ? "Abschluss läuft. Nicht neu laden, löschen oder erneut ausführen."
+    : item.status === "uncertain" ? "Zielzustand unklar – vor jedem weiteren Schritt Regler, ACK, Readback und Audit fachlich prüfen."
+    : item.completion_mode === "demo" ? `Demolauf lokal abgeschlossen am ${new Date(item.completed_at).toLocaleString("de-DE")} · MSR2 unverändert` : `Abgeschlossen am ${new Date(item.completed_at).toLocaleString("de-DE")}`;
 }
 
 function maintenanceProtocolFromForm() {
@@ -958,8 +1060,15 @@ async function completeMaintenance() {
     await refreshMaintenance(false);
     await refreshAudit();
     toast(liveCompletion ? "Wartung geschrieben, bestätigt und per Readback geprüft." : "Demolauf lokal abgeschlossen. Es wurden keine Reglerdaten geschrieben.");
-  } catch (error) { toast(error.message); }
-  finally { button.disabled = false; }
+  } catch (error) {
+    try {
+      state.maintenance.current = await api(`/api/maintenance/reports/${item.id}`);
+      renderMaintenanceEditor();
+      await refreshMaintenance(false);
+    } catch (_) { /* Der ursprüngliche Fehler bleibt maßgeblich. */ }
+    toast(error.message, "error");
+  }
+  finally { button.disabled = state.maintenance.current?.status !== "draft"; }
 }
 
 function renderRegisterTabs() {
@@ -1990,6 +2099,203 @@ function countItems(value) {
   return Number.isFinite(count) ? count : 0;
 }
 
+function archiveTargetCount(item, kind) {
+  const aliases = {
+    requested: ["requested_targets", "requested_blocks", "requested_count"],
+    successful: ["successful_targets", "successful_blocks", "successful_count"],
+    failed: ["failed_targets", "failed_blocks", "failed_count"],
+  };
+  for (const key of aliases[kind] || []) {
+    if (item?.[key] !== undefined && item?.[key] !== null) return countItems(item[key]);
+  }
+  return countItems(item?.summary?.[kind]);
+}
+
+function archiveIntegrityOk(item) {
+  const integrity = item?.integrity;
+  if (typeof integrity === "boolean") return integrity;
+  if (typeof integrity === "string") {
+    const normalized = integrity.toLowerCase();
+    if (["ok", "valid", "verified", "intact", "passed"].includes(normalized)) return true;
+    if (["failed", "invalid", "mismatch", "corrupt", "unknown", "unchecked"].includes(normalized)) return false;
+  }
+  if (integrity && typeof integrity === "object") {
+    if (typeof integrity.ok === "boolean") return integrity.ok;
+    if (typeof integrity.verified === "boolean") return integrity.verified;
+  }
+  return false;
+}
+
+function archiveEntryReady(item) {
+  const requested = archiveTargetCount(item, "requested");
+  const successful = archiveTargetCount(item, "successful");
+  const failed = archiveTargetCount(item, "failed");
+  const archiveState = String(item?.state || "").toLowerCase();
+  const stateReady = !archiveState || archiveState === "ready";
+  return archiveIntegrityOk(item)
+    && item?.pack_compatible === true
+    && stateReady
+    && requested === 38
+    && successful === 38
+    && failed === 0;
+}
+
+function formatArchiveDate(value) {
+  const date = new Date(value || "");
+  return Number.isFinite(date.getTime()) ? date.toLocaleString("de-DE") : "Zeitpunkt unbekannt";
+}
+
+function formatArchiveBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "Größe unbekannt";
+  if (bytes < 1024) return `${bytes} B`;
+  return `${new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 }).format(bytes / 1024)} KiB`;
+}
+
+function shortArchiveDigest(value) {
+  const digest = String(value || "");
+  return digest ? `${digest.slice(0, 12)}…` : "nicht gemeldet";
+}
+
+function archiveItems(response) {
+  if (Array.isArray(response)) return response;
+  if (Array.isArray(response?.items)) return response.items;
+  if (Array.isArray(response?.backups)) return response.backups;
+  return [];
+}
+
+function renderBackupArchive() {
+  const container = $("backupArchiveList");
+  if (!container) return;
+  const items = [...(state.backup.archive || [])].sort((left, right) => {
+    const rightTime = new Date(right?.created_at || 0).getTime() || 0;
+    const leftTime = new Date(left?.created_at || 0).getTime() || 0;
+    return rightTime - leftTime;
+  });
+  if (!items.length) {
+    container.innerHTML = `<p class="muted backup-archive-empty">Noch kein Wartungsbackup im geschützten Archiv.</p>`;
+    setBackupStatus("backupArchiveStatus", "Noch keine Wartungsbackups vorhanden. Beim nächsten Wartungsstart wird automatisch eines erstellt.", "neutral");
+    return;
+  }
+  container.innerHTML = items.map((item) => {
+    const id = item?.id ?? "";
+    const requested = archiveTargetCount(item, "requested");
+    const successful = archiveTargetCount(item, "successful");
+    const failed = archiveTargetCount(item, "failed");
+    const ready = archiveEntryReady(item);
+    const reportId = item?.maintenance_report_id;
+    const filename = String(item?.filename || `open-dachs-maintenance-backup-${id}.json`).split(/[\\/]/).pop() || "open-dachs-backup.json";
+    const downloadUrl = appUrl(`/api/backup/archive/${encodeURIComponent(id)}/download`);
+    const source = item?.source === "maintenance" ? "Wartungsstart" : (item?.source || "Archiv");
+    const stateText = item?.state || (ready ? "vollständig" : "prüfen");
+    const reportLink = reportId === null || reportId === undefined || reportId === ""
+      ? `<span class="muted">Kein Bericht verknüpft</span>`
+      : `<button type="button" class="button-link" data-open-maintenance-report="${escapeHtml(reportId)}">Wartungsbericht #${escapeHtml(reportId)}</button>`;
+    return `<article class="backup-archive-card ${ready ? "verified" : "invalid"}" data-backup-archive-item="${escapeHtml(id)}">
+      <header><div><p class="eyebrow">BACKUP #${escapeHtml(id)}</p><h4>${escapeHtml(formatArchiveDate(item?.created_at))}</h4></div><span class="status-pill ${ready ? "ok" : "warn"}">${ready ? "Integrität geprüft" : "Nicht vollständig geprüft"}</span></header>
+      <div class="backup-archive-metrics">
+        <div><span>Ziele</span><strong>${successful}/${requested || 38}</strong><small>${failed ? `${failed} fehlgeschlagen` : "38 von 38 erforderlich"}</small></div>
+        <div><span>Status</span><strong>${escapeHtml(stateText)}</strong><small>${escapeHtml(source)} · ${escapeHtml(item?.created_by || "unbekannt")}</small></div>
+        <div><span>Packrevision</span><strong>${escapeHtml(item?.pack_revision || "—")}</strong><small>${escapeHtml(formatArchiveBytes(item?.size_bytes))}</small></div>
+      </div>
+      <dl class="backup-archive-hashes"><div><dt>Abbild-SHA-256</dt><dd title="${escapeHtml(item?.image_sha256 || "")}">${escapeHtml(shortArchiveDigest(item?.image_sha256))}</dd></div><div><dt>Datei-SHA-256</dt><dd title="${escapeHtml(item?.file_sha256 || "")}">${escapeHtml(shortArchiveDigest(item?.file_sha256))}</dd></div></dl>
+      <footer><div>${reportLink}<small>${escapeHtml(filename)}</small></div><div class="backup-archive-actions"><a class="button-link" href="${escapeHtml(downloadUrl)}" download="${escapeHtml(filename)}">JSON herunterladen</a><button type="button" data-load-backup-archive="${escapeHtml(id)}" ${ready ? "" : "disabled"}>Für Wiederherstellung laden</button></div></footer>
+    </article>`;
+  }).join("");
+  const complete = items.filter(archiveEntryReady).length;
+  setBackupStatus("backupArchiveStatus", `${items.length} Wartungsbackup${items.length === 1 ? "" : "s"} archiviert · ${complete} vollständig mit 38/38 Zielen und geprüfter Integrität.`, complete === items.length ? "ok" : "warn");
+}
+
+async function refreshBackupArchive(silent = false) {
+  if (state.user?.role !== "admin") return;
+  const requestGeneration = state.backup.importGeneration;
+  if (!silent) setBackupStatus("backupArchiveStatus", "Lade geschütztes Backup-Archiv …", "neutral");
+  try {
+    const response = await api("/api/backup/archive");
+    if (requestGeneration !== state.backup.importGeneration || state.user?.role !== "admin") return;
+    state.backup.archive = archiveItems(response);
+    state.backup.archiveLoaded = true;
+    renderBackupArchive();
+  } catch (error) {
+    if (requestGeneration !== state.backup.importGeneration || state.user?.role !== "admin") return;
+    state.backup.archiveLoaded = false;
+    setBackupStatus("backupArchiveStatus", `Backup-Archiv konnte nicht geladen werden: ${error.message}`, "error");
+  }
+}
+
+async function showBackupArchiveEntry(archiveId) {
+  if (state.user?.role !== "admin") return;
+  showView("backupView");
+  await refreshBackupArchive(true);
+  const card = Array.from(document.querySelectorAll("[data-backup-archive-item]"))
+    .find((element) => String(element.dataset.backupArchiveItem) === String(archiveId));
+  if (!card) return toast(`Backup #${archiveId} wurde im Archiv nicht gefunden.`, "error");
+  card.classList.add("highlight");
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  setTimeout(() => card.classList.remove("highlight"), 1800);
+}
+
+async function loadBackupArchiveForRestore(archiveId, button = null) {
+  if (state.user?.role !== "admin" || archiveId === null || archiveId === undefined || archiveId === "") return;
+  const archived = (state.backup.archive || []).find((item) => String(item?.id) === String(archiveId));
+  if (!archived || !archiveEntryReady(archived)) {
+    return setBackupStatus("backupArchiveStatus", `Backup #${archiveId} ist nicht als vollständig, bereit und 38/38 geprüft freigegeben.`, "error");
+  }
+  if ($("restoreFile")) $("restoreFile").value = "";
+  clearRestoreImage(`Lade Backup #${archiveId} aus dem geschützten Archiv …`);
+  const importGeneration = state.backup.importGeneration;
+  if (button) button.disabled = true;
+  setRestoreBusy(true);
+  try {
+    const image = await api(`/api/backup/archive/${encodeURIComponent(archiveId)}/download`);
+    if (importGeneration !== state.backup.importGeneration) return;
+    if (!image || typeof image !== "object" || Array.isArray(image)) throw new Error("Das Archiv lieferte kein gültiges JSON-Backup-Image");
+    setBackupStatus("restoreImageStatus", `Prüfe Backup #${archiveId} erneut über die Backup-Prüfung …`, "neutral");
+    const response = await api("/api/backup/inspect", {
+      method: "POST",
+      body: JSON.stringify({ image }),
+    });
+    if (importGeneration !== state.backup.importGeneration) return;
+    const inspection = response.inspection || response;
+    const requested = Number(inspection.requested_blocks);
+    const successful = Number(inspection.successful_blocks);
+    const failed = Number(inspection.failed_blocks);
+    const inspectedTargets = restoreInspectionBlocks(inspection);
+    if (!restoreIntegrityOk(inspection)
+      || inspection.digest_present !== true
+      || inspection.digest_verified !== true
+      || inspection.live_restore_compatible !== true
+      || requested !== 38
+      || successful !== 38
+      || failed !== 0
+      || inspectedTargets.length !== 38
+      || inspectedTargets.some((item) => item.restorable !== true)) {
+      throw new Error("Das Wartungsbackup erfüllt nach erneuter Prüfung nicht den vollständigen 38/38-Integritäts- und Gerätevertrag");
+    }
+    state.backup.image = image;
+    state.backup.inspection = inspection;
+    if ($("restoreWriteEnabled")) $("restoreWriteEnabled").checked = false;
+    if ($("restoreConfirmation")) $("restoreConfirmation").value = "";
+    if ($("restorePass4")) $("restorePass4").value = "";
+    if ($("restoreResults")) $("restoreResults").innerHTML = "";
+    renderRestoreBlockList();
+    setBackupStatus("restoreImageStatus", inspectionSummary(inspection, archived?.filename || `Backup #${archiveId}`), "ok");
+    setBackupStatus("restoreStatus", "Archivbackup erneut geprüft. Kein Ziel ist ausgewählt; Dry-Run bleibt der sichere Standard.", "ok");
+    updateRestoreMode();
+    $("restoreImageStatus")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  } catch (error) {
+    if (importGeneration !== state.backup.importGeneration) return;
+    state.backup.image = null;
+    state.backup.inspection = null;
+    renderRestoreBlockList();
+    setBackupStatus("restoreImageStatus", `Archivbackup abgelehnt: ${error.message}`, "error");
+    updateRestoreMode();
+  } finally {
+    if (importGeneration === state.backup.importGeneration) setRestoreBusy(false);
+    if (button && importGeneration === state.backup.importGeneration) button.disabled = false;
+  }
+}
+
 function backupImageText(image) {
   return typeof image === "string" ? image : `${JSON.stringify(image, null, 2)}\n`;
 }
@@ -2386,6 +2692,19 @@ document.addEventListener("DOMContentLoaded", () => {
   $("backupSelectNone").addEventListener("click", () => setBlockSelection("backup", false));
   $("backupBlockList").addEventListener("change", updateBackupSelectionStatus);
   $("backupCreate").addEventListener("click", createBackupImage);
+  $("backupArchiveRefresh").addEventListener("click", () => refreshBackupArchive());
+  $("backupArchiveList").addEventListener("click", (event) => {
+    const loadButton = event.target.closest("[data-load-backup-archive]");
+    if (loadButton) {
+      loadBackupArchiveForRestore(loadButton.dataset.loadBackupArchive, loadButton);
+      return;
+    }
+    const reportButton = event.target.closest("[data-open-maintenance-report]");
+    if (reportButton) {
+      showView("maintenanceView");
+      loadMaintenanceReport(Number(reportButton.dataset.openMaintenanceReport));
+    }
+  });
   $("restoreFile").addEventListener("change", inspectRestoreFile);
   $("restoreSelectAll").addEventListener("click", () => setBlockSelection("restore", true));
   $("restoreSelectNone").addEventListener("click", () => setBlockSelection("restore", false));
@@ -2447,6 +2766,11 @@ document.addEventListener("DOMContentLoaded", () => {
   $("maintenanceRefresh").addEventListener("click", () => refreshMaintenance(true));
   $("maintenanceCreate").addEventListener("click", createMaintenanceReport);
   $("maintenanceReportRows").addEventListener("click", (event) => {
+    const backupButton = event.target.closest("[data-open-backup]");
+    if (backupButton) {
+      showBackupArchiveEntry(backupButton.dataset.openBackup);
+      return;
+    }
     const deleteButton = event.target.closest("[data-maintenance-delete]");
     if (deleteButton) {
       deleteMaintenanceReport(Number(deleteButton.dataset.maintenanceDelete));
@@ -2454,6 +2778,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     const button = event.target.closest("[data-maintenance-report]");
     if (button) loadMaintenanceReport(Number(button.dataset.maintenanceReport));
+  });
+  $("maintenanceBackupSummary").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-open-backup]");
+    if (button) showBackupArchiveEntry(button.dataset.openBackup);
   });
   $("maintenanceForm").addEventListener("submit", saveMaintenanceDraft);
   $("maintenanceFuelType").addEventListener("change", () => saveMaintenanceDraft(null, true));

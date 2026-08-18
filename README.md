@@ -1,9 +1,9 @@
-# Open Dachs Manager · V3 1.4.0
+# Open Dachs Manager · V3 1.5.0
 
 Lokale Bedienung, Überwachung und Wartungsdokumentation für Dachs-Anlagen mit
 MSR2-Regler – über die optische serielle Schnittstelle und ohne Cloud-Zwang.
 
-> **Projektstatus: Version 1.4.0.** Lesen, Dekodieren, Wartungs-Testmodus und der
+> **Projektstatus: Version 1.5.0.** Lesen, Dekodieren, Wartungs-Testmodus und der
 > zentrale Serialworker sind an einer Anlage praktisch erprobt. Ein echter
 > Schreibvorgang erfordert immer die ausdrückliche Schreibfreigabe,
 > Authentifizierung, eine positive Antwort und die anschließende Rückleseprüfung.
@@ -18,8 +18,8 @@ Open Dachs Manager ist ein unabhängiges Open-Source-Community-Projekt.
 |---|---|
 | **Übersicht** | Wirkleistung Ist/Soll, Wartungsrestzeit, frei auswählbare Live-Kacheln und technisches Anlagenbild mit Rußfilterschätzung |
 | **Überwachung** | Live-Werte, Anlagenbild, Historien, Service- und Warnmeldungen |
-| **Wartung** | Schreibfreier Gesamtsnapshot, digitale Checkliste, Vorher-/Nachher-Werte, löschbares lokales Archiv und PDF/HTML/JSON |
-| **Backup** | Alle 36 Reglerblöcke und Block 16 beider Netzschutz-CPUs oder eine freie Auswahl sichern, Abbilder prüfen und ausgewählte Ziele im Dry-Run oder kontrolliert wiederherstellen |
+| **Wartung** | Vollständiges 38-Ziele-Pflichtbackup, schreibfreier Gesamtsnapshot, digitale Checkliste, Vorher-/Nachher-Werte und PDF/HTML/JSON |
+| **Backup** | Geschütztes Wartungsarchiv, alle 36 Reglerblöcke und Block 16 beider Netzschutz-CPUs sichern, Abbilder prüfen und ausgewählte Ziele im Dry-Run oder kontrolliert wiederherstellen |
 | **Einstellungen** | Vollständig dekodierte Register, kontrollierte Schreibvorgänge sowie je Netzschutz-CPU Legacy-Schutz, zusätzliche Schutzparameter und Live-Netzwerte |
 | **System** | Mehrere Benutzer, Rollen, Passwortverwaltung, API-Freigabe und Token-Manager |
 | **Werkzeuge** | Weboberfläche, CLI, TUI, JSON-Backups, Audit-Protokoll und systemd-Dienste |
@@ -38,6 +38,8 @@ Weitere Merkmale:
   und Nachlauf, 15-Minuten-Verdichtung für übrige Stillstandszeiten
 - ein gemeinsamer FIFO-Serialworker für Web, CLI und TUI
 - atomare Abläufe für Wartungssnapshots und `Auth → Write → ACK → Readback`
+- geschütztes Backup-Archiv: Jeder Wartungsstart verlangt ein vollständiges,
+  SHA-256-geprüftes Abbild aller 38 freigegebenen CPU-/Blockziele
 - umschaltbarer Testmodus: Wartung vollständig durchspielen und lokal
   abschließen, ohne den Regler zu verändern; nur ein Admin kann den
   kontrollierten Echtabschluss freischalten
@@ -54,23 +56,28 @@ Weitere Merkmale:
 
 ### Geführte Wartung
 
-Beim Start wird der gesamte seriell erreichbare Anlagenzustand in einer
-gemeinsamen Sitzung gelesen und lokal eingefroren. Checkliste, Messwerte und
-Bemerkungen werden automatisch gespeichert. Im standardmäßig aktiven
+Beim Start liest eine einzige gemeinsame serielle Sitzung alle 38 freigegebenen
+CPU-/Blockziele. Derselbe eingefrorene Lesezustand speist gleichzeitig das
+vollständige, geprüfte Backup und den Anlagenstand des Wartungsberichts; eine
+zweite Blockrunde ist nicht nötig. Checkliste, Messwerte und Bemerkungen werden
+automatisch gespeichert. Im standardmäßig aktiven
 Testmodus bleibt der Regler auch beim Abschluss unverändert. Ein Admin kann
 den Modus persistent unter `System → Wartungsabschluss` umschalten; der Echtabschluss
 verlangt weiterhin PW4, exakte Bestätigung, positives ACK und Readback.
-Offene und abgeschlossene Wartungen können nach einer Sicherheitsabfrage aus
-dem lokalen Archiv gelöscht werden; ein bereits erfolgter Reglerabschluss und
-das Schreib-Audit bleiben davon unberührt.
+Offene und abgeschlossene Wartungsberichte können nach einer Sicherheitsabfrage
+gelöscht werden; das verknüpfte Backup bleibt im geschützten Archiv erhalten.
+Ein bereits erfolgter Reglerabschluss und das Schreib-Audit bleiben ebenfalls
+unberührt. Ein Abschluss mit Zustand `Abschluss läuft` darf nicht wiederholt
+oder gelöscht werden; `Zielzustand unklar` verlangt eine fachliche Prüfung.
 
 ![Geführte Wartung mit lokalem Archiv](docs/assets/screenshots/wartung.png)
 
 ### Kompakter Wartungsbericht
 
 Der Bericht fasst Anlagenstand, Prüfpunkte, Vorher-/Nachher-Messwerte und das
-Ergebnis kompakt zusammen. Ein technischer Anlagenanhang kann zusätzlich
-ausgegeben werden.
+Ergebnis kompakt zusammen. Backup-ID, Erstellzeit, 38/38-Ergebnis und
+Abbild-SHA-256 sind Teil der Herkunftsinformation. Ein technischer
+Anlagenanhang kann zusätzlich ausgegeben werden.
 
 <p align="center">
   <img src="docs/assets/screenshots/wartungsbericht.png" alt="Vorschau des digitalen Wartungsnachweises" width="620">

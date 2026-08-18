@@ -25,13 +25,14 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import stat
 import threading
 import time
 from urllib.parse import parse_qs, urlparse
 import zlib
 
 from . import __version__
-from .auth import calculate_pw4
+from .auth import auth_inputs_from_payloads, calculate_pw4
 from .maintenance import (
     CHECKLIST_RAW_VALUES,
     CHECKLIST_STATUS,
@@ -68,7 +69,13 @@ from .network_protection import (
     validate_network_cpu,
 )
 from .serial_worker import DEFAULT_SERIAL_WORKER_SOCKET
-from .service import DachsService, write_json_atomic
+from .service import (
+    BACKUP_PAYLOAD_LENGTHS,
+    BACKUP_TARGETS,
+    DachsService,
+    write_json_atomic,
+    write_json_exclusive,
+)
 from .transport import TransportError, validate_block
 
 
@@ -87,6 +94,10 @@ MOTOR_SPEED_KEY = "Hka_Mw1.usDrehzahl"
 API_TOKEN_SCOPES = frozenset({"read", "history", "write"})
 API_DEFAULT_AUTH_LEVEL = 4
 BACKUP_RESTORE_CONFIRMATION = "SICHERUNG WIEDERHERSTELLEN"
+BACKUP_ARCHIVE_MAX_BYTES = 2 * 1024 * 1024
+BACKUP_ARCHIVE_FILENAME = re.compile(
+    r"maintenance-[0-9]{8}T[0-9]{6}\.[0-9]{6}Z-[0-9a-f]{16}\.json"
+)
 # The browser accepts a 1 MiB image. Leave bounded room for the surrounding
 # JSON request object and restore selection without rejecting that image.
 MAX_JSON_BODY_BYTES = (1024 + 64) * 1024
@@ -533,6 +544,31 @@ class DachsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_maintenance_reports_created
                     ON maintenance_reports(created_at DESC);
+                CREATE TABLE IF NOT EXISTS backup_archives (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    verified INTEGER NOT NULL DEFAULT 0,
+                    pack_compatible INTEGER NOT NULL DEFAULT 0,
+                    filename TEXT NOT NULL UNIQUE,
+                    file_sha256 TEXT NOT NULL,
+                    image_sha256 TEXT NOT NULL,
+                    schema_name TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    pack_rev TEXT NOT NULL,
+                    controller_serial TEXT NOT NULL,
+                    target_count INTEGER NOT NULL,
+                    successful_count INTEGER NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    maintenance_report_id INTEGER UNIQUE,
+                    metadata_json TEXT NOT NULL,
+                    FOREIGN KEY(maintenance_report_id)
+                        REFERENCES maintenance_reports(id) ON DELETE SET NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_backup_archives_created
+                    ON backup_archives(created_at DESC);
                 CREATE TABLE IF NOT EXISTS api_tokens (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL UNIQUE,
@@ -569,6 +605,35 @@ class DachsStore:
                 db.execute(
                     "ALTER TABLE api_requests ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
                 )
+            archive_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(backup_archives)").fetchall()
+            }
+            if "pack_compatible" not in archive_columns:
+                db.execute(
+                    "ALTER TABLE backup_archives ADD COLUMN pack_compatible INTEGER NOT NULL DEFAULT 0"
+                )
+            interrupted_completion = {
+                "mode": "live",
+                "completed_at": _now(),
+                "username": "system-recovery",
+                "controller_written": None,
+                "hardware_unchanged": False,
+                "confirmation_bit_set": None,
+                "uncertain": True,
+                "error": "Prozessabbruch; möglicher Reglerwrite, Zustand prüfen",
+                "audits": [],
+            }
+            db.execute(
+                "UPDATE maintenance_reports SET status='uncertain',updated_at=?,"
+                "completed_at=COALESCE(completed_at,?),completion_json=? "
+                "WHERE status='completing'",
+                (
+                    interrupted_completion["completed_at"],
+                    interrupted_completion["completed_at"],
+                    json.dumps(interrupted_completion, ensure_ascii=False),
+                ),
+            )
             self._adaptive_series_cache = {
                 (int(row["block"]), str(row["field_key"])): int(row["id"])
                 for row in db.execute("SELECT id,block,field_key FROM adaptive_series").fetchall()
@@ -1288,6 +1353,37 @@ class DachsStore:
         return output
 
     @staticmethod
+    def _backup_archive_row(row: sqlite3.Row) -> dict:
+        columns = dict(row)
+        metadata_text = columns.pop("metadata_json", "{}")
+        try:
+            item = json.loads(metadata_text)
+        except (TypeError, ValueError):
+            item = {}
+        if not isinstance(item, dict):
+            item = {}
+        item.update(columns)
+        item["verified"] = bool(item.get("verified"))
+        item["pack_compatible"] = bool(item.get("pack_compatible"))
+        item["state"] = str(item.get("status") or "corrupt")
+        item["integrity"] = "verified" if item["verified"] else "unverified"
+        item["requested_targets"] = int(item.get("target_count") or 0)
+        item["successful_targets"] = int(item.get("successful_count") or 0)
+        item["failed_targets"] = max(
+            0, item["requested_targets"] - item["successful_targets"]
+        )
+        item["requested_count"] = item["requested_targets"]
+        item["failed_count"] = item["failed_targets"]
+        item["pack_revision"] = str(item.get("pack_rev") or "")
+        item["ready"] = bool(
+            item.get("status") == "ready"
+            and item["verified"]
+            and int(item.get("target_count") or 0) == len(BACKUP_TARGETS)
+            and int(item.get("successful_count") or 0) == len(BACKUP_TARGETS)
+        )
+        return item
+
+    @staticmethod
     def _maintenance_row(row: sqlite3.Row, *, full: bool) -> dict:
         item = dict(row)
         report = json.loads(item.pop("report_json"))
@@ -1299,9 +1395,56 @@ class DachsStore:
         item["technician"] = str(protocol.get("technician") or "")
         item["completion_mode"] = (completion or {}).get("mode")
         item["controller_written"] = (completion or {}).get("controller_written")
+        item["backup_archive"] = report.get("backup_archive")
         if full:
             item.update({"report": report, "protocol": protocol, "completion": completion})
         return item
+
+    @staticmethod
+    def _insert_backup_archive_db(
+        db: sqlite3.Connection,
+        metadata: dict,
+        maintenance_report_id: int | None,
+    ) -> dict:
+        payload = dict(metadata)
+        cursor = db.execute(
+            "INSERT INTO backup_archives("
+            "created_at,created_by,source,status,verified,pack_compatible,filename,file_sha256,image_sha256,"
+            "schema_name,schema_version,pack_rev,controller_serial,target_count,successful_count,"
+            "size_bytes,maintenance_report_id,metadata_json"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(payload["created_at"]),
+                str(payload["created_by"]),
+                str(payload["source"]),
+                str(payload["status"]),
+                1 if payload.get("verified") else 0,
+                1 if payload.get("pack_compatible") else 0,
+                str(payload["filename"]),
+                str(payload["file_sha256"]),
+                str(payload["image_sha256"]),
+                str(payload["schema"]),
+                int(payload["schema_version"]),
+                str(payload["pack_rev"]),
+                str(payload["controller_serial"]),
+                int(payload["target_count"]),
+                int(payload["successful_count"]),
+                int(payload["size_bytes"]),
+                int(maintenance_report_id) if maintenance_report_id is not None else None,
+                "{}",
+            ),
+        )
+        payload.update({
+            "id": int(cursor.lastrowid),
+            "maintenance_report_id": (
+                int(maintenance_report_id) if maintenance_report_id is not None else None
+            ),
+        })
+        db.execute(
+            "UPDATE backup_archives SET metadata_json=? WHERE id=?",
+            (json.dumps(payload, ensure_ascii=False), payload["id"]),
+        )
+        return payload
 
     def create_maintenance_report(self, username: str, fuel_type: str, report: dict, protocol: dict) -> dict:
         now = _now()
@@ -1313,6 +1456,107 @@ class DachsStore:
             )
             report_id = int(cursor.lastrowid)
         return self.maintenance_report(report_id)
+
+    def create_maintenance_report_with_archive(
+        self,
+        username: str,
+        fuel_type: str,
+        report: dict,
+        protocol: dict,
+        archive: dict,
+    ) -> dict:
+        """Atomically publish the report row and its already durable archive."""
+        now = _now()
+        report_payload = json.loads(json.dumps(report, ensure_ascii=False))
+        with self.lock, self.database() as db:
+            cursor = db.execute(
+                "INSERT INTO maintenance_reports(created_at,updated_at,created_by,status,fuel_type,report_json,protocol_json) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (
+                    now,
+                    now,
+                    username,
+                    "draft",
+                    fuel_type,
+                    json.dumps(report_payload, ensure_ascii=False),
+                    json.dumps(protocol, ensure_ascii=False),
+                ),
+            )
+            report_id = int(cursor.lastrowid)
+            archive_payload = self._insert_backup_archive_db(db, archive, report_id)
+            report_payload["backup_archive"] = archive_payload
+            db.execute(
+                "UPDATE maintenance_reports SET report_json=? WHERE id=?",
+                (json.dumps(report_payload, ensure_ascii=False), report_id),
+            )
+        return self.maintenance_report(report_id)
+
+    def create_orphan_backup_archive(self, archive: dict) -> dict:
+        """Index a verified immutable file left before its DB transaction."""
+        with self.lock, self.database() as db:
+            payload = self._insert_backup_archive_db(db, archive, None)
+        return self.backup_archive(payload["id"])
+
+    def backup_archives(self, limit: int = 200) -> list[dict]:
+        with self.lock, self.database() as db:
+            rows = db.execute(
+                "SELECT * FROM backup_archives ORDER BY id DESC LIMIT ?",
+                (min(1000, max(1, int(limit))),),
+            ).fetchall()
+        return [self._backup_archive_row(row) for row in rows]
+
+    def backup_archive(self, archive_id: int) -> dict:
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT * FROM backup_archives WHERE id=?", (int(archive_id),)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Backup-Archiv {archive_id} nicht gefunden")
+        return self._backup_archive_row(row)
+
+    def backup_archive_for_report(self, report_id: int) -> dict:
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT * FROM backup_archives WHERE maintenance_report_id=?",
+                (int(report_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Wartungsbericht {report_id} besitzt kein Backup-Archiv")
+        return self._backup_archive_row(row)
+
+    def backup_archive_filenames(self) -> set[str]:
+        with self.lock, self.database() as db:
+            rows = db.execute("SELECT filename FROM backup_archives").fetchall()
+        return {str(row["filename"]) for row in rows}
+
+    def set_backup_archive_status(
+        self,
+        archive_id: int,
+        status: str,
+        *,
+        verified: bool,
+        pack_compatible: bool | None = None,
+    ) -> None:
+        if status not in {"ready", "missing", "corrupt"}:
+            raise ValueError("ungültiger Backup-Archivstatus")
+        with self.lock, self.database() as db:
+            if pack_compatible is None:
+                cursor = db.execute(
+                    "UPDATE backup_archives SET status=?,verified=? WHERE id=?",
+                    (status, 1 if verified else 0, int(archive_id)),
+                )
+            else:
+                cursor = db.execute(
+                    "UPDATE backup_archives SET status=?,verified=?,pack_compatible=? WHERE id=?",
+                    (
+                        status,
+                        1 if verified else 0,
+                        1 if pack_compatible else 0,
+                        int(archive_id),
+                    ),
+                )
+            if cursor.rowcount != 1:
+                raise KeyError(f"Backup-Archiv {archive_id} nicht gefunden")
 
     def maintenance_reports(self, limit: int = 50) -> list[dict]:
         with self.lock, self.database() as db:
@@ -1337,6 +1581,10 @@ class DachsStore:
             ).fetchone()
             if row is None:
                 raise KeyError(f"Wartungsbericht {report_id} nicht gefunden")
+            if str(row["status"]) not in {"draft", "completed"}:
+                raise ValueError(
+                    "Wartungsbericht mit unklarem Abschlusszustand darf nicht gelöscht werden"
+                )
             db.execute("DELETE FROM maintenance_reports WHERE id=?", (report_id,))
         return {"id": report_id, "status": str(row["status"])}
 
@@ -1361,6 +1609,146 @@ class DachsStore:
             )
             if cursor.rowcount != 1:
                 raise ValueError("Wartungsbericht ist nicht mehr offen")
+        return self.maintenance_report(report_id)
+
+    def complete_demo_maintenance_report(
+        self, report_id: int, protocol: dict, completion: dict
+    ) -> dict:
+        now = _now()
+        with self.lock, self.database() as db:
+            cursor = db.execute(
+                "UPDATE maintenance_reports SET updated_at=?,fuel_type=?,protocol_json=?,"
+                "status='completed',completed_at=?,completion_json=? "
+                "WHERE id=? AND status='draft'",
+                (
+                    now,
+                    protocol["fuel_type"],
+                    json.dumps(protocol, ensure_ascii=False),
+                    now,
+                    json.dumps(completion, ensure_ascii=False),
+                    int(report_id),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Wartungsbericht ist nicht mehr offen")
+        return self.maintenance_report(report_id)
+
+    def claim_live_maintenance_completion(
+        self,
+        report_id: int,
+        protocol: dict,
+        archive: dict,
+    ) -> None:
+        """Atomically reserve one live completion with its ready 38/38 image."""
+        now = _now()
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT r.status AS report_status,a.* FROM maintenance_reports r "
+                "LEFT JOIN backup_archives a ON a.maintenance_report_id=r.id "
+                "WHERE r.id=?",
+                (int(report_id),),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Wartungsbericht {report_id} nicht gefunden")
+            if str(row["report_status"]) != "draft":
+                raise ValueError("Wartungsbericht ist nicht mehr offen")
+            if row["id"] is None:
+                raise ValueError("Live-Abschluss benötigt ein verknüpftes Backup-Archiv")
+            immutable_keys = (
+                "id",
+                "created_at",
+                "created_by",
+                "source",
+                "filename",
+                "file_sha256",
+                "image_sha256",
+                "schema_name",
+                "schema_version",
+                "pack_rev",
+                "controller_serial",
+                "target_count",
+                "successful_count",
+                "size_bytes",
+            )
+            for key in immutable_keys:
+                expected = archive.get(key)
+                actual = row[key]
+                if key in {
+                    "id",
+                    "schema_version",
+                    "target_count",
+                    "successful_count",
+                    "size_bytes",
+                }:
+                    matches = int(expected or -1) == int(actual or -1)
+                else:
+                    matches = hmac.compare_digest(
+                        str(expected or ""), str(actual or "")
+                    )
+                if not matches:
+                    raise ValueError(
+                        "Backup-Archiv wurde zwischen Prüfung und Reservierung verändert"
+                    )
+            if not (
+                str(row["status"]) == "ready"
+                and bool(row["verified"])
+                and bool(row["pack_compatible"])
+                and int(row["target_count"]) == len(BACKUP_TARGETS)
+                and int(row["successful_count"]) == len(BACKUP_TARGETS)
+            ):
+                raise ValueError("Live-Abschluss benötigt ein bereites, verifiziertes 38/38-Backup")
+            cursor = db.execute(
+                "UPDATE maintenance_reports SET updated_at=?,fuel_type=?,protocol_json=?,status='completing' "
+                "WHERE id=? AND status='draft'",
+                (
+                    now,
+                    protocol["fuel_type"],
+                    json.dumps(protocol, ensure_ascii=False),
+                    int(report_id),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Wartungsbericht wird bereits abgeschlossen")
+
+    def release_live_maintenance_completion(self, report_id: int) -> None:
+        with self.lock, self.database() as db:
+            db.execute(
+                "UPDATE maintenance_reports SET updated_at=?,status='draft' "
+                "WHERE id=? AND status='completing'",
+                (_now(), int(report_id)),
+            )
+
+    def fail_live_maintenance_completion(self, report_id: int, completion: dict) -> None:
+        now = _now()
+        with self.lock, self.database() as db:
+            cursor = db.execute(
+                "UPDATE maintenance_reports SET updated_at=?,status='uncertain',"
+                "completed_at=?,completion_json=? WHERE id=? AND status='completing'",
+                (
+                    now,
+                    now,
+                    json.dumps(completion, ensure_ascii=False),
+                    int(report_id),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Wartungsabschluss konnte nicht als unklar gesichert werden")
+
+    def finish_live_maintenance_completion(self, report_id: int, completion: dict) -> dict:
+        now = _now()
+        with self.lock, self.database() as db:
+            cursor = db.execute(
+                "UPDATE maintenance_reports SET updated_at=?,status='completed',"
+                "completed_at=?,completion_json=? WHERE id=? AND status='completing'",
+                (
+                    now,
+                    now,
+                    json.dumps(completion, ensure_ascii=False),
+                    int(report_id),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Wartungsbericht ist nicht reserviert")
         return self.maintenance_report(report_id)
 
     def purge(self, days: int = 90) -> None:
@@ -1404,6 +1792,11 @@ class DachsWebApp:
             port, baud, timeout, self.pack, serial_socket=serial_socket
         )
         self.store = DachsStore(self.data_dir / "dachs-web.db")
+        self.backup_archive_dir = self.data_dir / "backup-archive"
+        self.backup_archive_errors: list[str] = []
+        archive_fd = self._open_backup_archive_directory()
+        os.close(archive_fd)
+        self._reconcile_backup_archive()
         self.interval = max(0.3, float(interval))
         self.history_interval = max(0.0, float(history_interval))
         self.maintenance_settings_path = self.data_dir / "maintenance_settings.json"
@@ -1456,6 +1849,330 @@ class DachsWebApp:
             name="dachs-web-maintenance",
             daemon=True,
         )
+
+    def _open_backup_archive_directory(self) -> int:
+        """Open/create the private archive without following a symlink."""
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+        parent_fd = os.open(self.data_dir, directory_flags)
+        created = False
+        try:
+            try:
+                os.mkdir("backup-archive", 0o700, dir_fd=parent_fd)
+                created = True
+            except FileExistsError:
+                pass
+            archive_fd = os.open("backup-archive", directory_flags, dir_fd=parent_fd)
+            archive_stat = os.fstat(archive_fd)
+            if not stat.S_ISDIR(archive_stat.st_mode):
+                os.close(archive_fd)
+                raise OSError("backup-archive ist kein Verzeichnis")
+            if stat.S_IMODE(archive_stat.st_mode) != 0o700:
+                os.fchmod(archive_fd, 0o700)
+            os.fsync(archive_fd)
+            if created:
+                os.fsync(parent_fd)
+            return archive_fd
+        finally:
+            os.close(parent_fd)
+
+    @staticmethod
+    def _validate_backup_archive_filename(filename: object) -> str:
+        name = str(filename or "")
+        if not BACKUP_ARCHIVE_FILENAME.fullmatch(name) or Path(name).name != name:
+            raise ValueError("ungültiger Backup-Archivdateiname")
+        return name
+
+    def _read_backup_archive_file(self, filename: object) -> bytes:
+        """Read one held regular-file descriptor; symlinks fail closed."""
+        name = self._validate_backup_archive_filename(filename)
+        directory_fd = self._open_backup_archive_directory()
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            file_fd = os.open(name, flags, dir_fd=directory_fd)
+            try:
+                info = os.fstat(file_fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise OSError("Backup-Archiv ist keine reguläre Datei")
+                if stat.S_IMODE(info.st_mode) != 0o600:
+                    raise PermissionError("Backup-Archiv besitzt nicht Modus 0600")
+                if info.st_size <= 0 or info.st_size > BACKUP_ARCHIVE_MAX_BYTES:
+                    raise ValueError("Backup-Archiv besitzt eine ungültige Dateigröße")
+                chunks = []
+                remaining = int(info.st_size)
+                while remaining:
+                    chunk = os.read(file_fd, min(65536, remaining))
+                    if not chunk:
+                        raise OSError("Backup-Archiv wurde unvollständig gelesen")
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                if os.read(file_fd, 1):
+                    raise ValueError("Backup-Archiv wuchs während des Lesens")
+                return b"".join(chunks)
+            finally:
+                os.close(file_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _strict_backup_archive_inspection(
+        self, image: dict, *, require_current_pack: bool = False
+    ) -> dict:
+        context = image.get("maintenance_archive")
+        if (
+            not isinstance(context, dict)
+            or type(context.get("version")) is not int
+            or context.get("version") != 1
+        ):
+            raise ValueError("Datei ist kein Wartungs-Backup-Archiv")
+        created_by = context.get("created_by")
+        if (
+            context.get("source") != "maintenance"
+            or not isinstance(created_by, str)
+            or not created_by.strip()
+            or len(created_by.strip()) > 128
+        ):
+            raise ValueError("Wartungs-Backup besitzt keinen gebundenen Ursprung")
+        inspection = self.service.inspect_backup(image)
+        expected_targets = [
+            {"cpu": cpu, "block": block} for cpu, block in BACKUP_TARGETS
+        ]
+        if inspection.get("requested_targets") != expected_targets:
+            raise ValueError("Wartungs-Backup enthält nicht den exakten 38-Ziele-Satz")
+        if (
+            int(inspection.get("successful_blocks") or 0) != len(BACKUP_TARGETS)
+            or int(inspection.get("failed_blocks") or 0) != 0
+            or inspection.get("digest_present") is not True
+            or inspection.get("digest_verified") is not True
+        ):
+            raise ValueError("Wartungs-Backup ist nicht vollständig verifiziert")
+        if require_current_pack and inspection.get("pack_compatible") is not True:
+            raise ValueError("Wartungs-Backup ist nicht mit dem aktuellen Pack kompatibel")
+        records = list(inspection.get("records") or [])
+        if len(records) != len(BACKUP_TARGETS):
+            raise ValueError("Wartungs-Backup enthält nicht exakt 38 Datensätze")
+        for target, record in zip(BACKUP_TARGETS, records, strict=True):
+            if (int(record.get("cpu", -1)), int(record.get("block", -1))) != target:
+                raise ValueError("Wartungs-Backup-Zielreihenfolge ist nicht kanonisch")
+            if not record.get("restorable"):
+                raise ValueError("Wartungs-Backup enthält einen nicht restaurierbaren Datensatz")
+            if int(record.get("payload_len") or -1) != BACKUP_PAYLOAD_LENGTHS[target]:
+                raise ValueError(
+                    f"Wartungs-Backup CPU {target[0]}, Block {target[1]} hat eine falsche Länge"
+                )
+        controller = dict(inspection.get("controller") or {})
+        if controller.get("available") is not True or not str(
+            controller.get("serial_number") or ""
+        ).strip():
+            raise ValueError("Wartungs-Backup besitzt keine Regleridentität")
+        if inspection.get("pack_compatible") is True:
+            records_by_target = {
+                (int(record["cpu"]), int(record["block"])): record
+                for record in records
+            }
+            try:
+                identity = auth_inputs_from_payloads(
+                    self.pack,
+                    bytes.fromhex(str(records_by_target[(0, 20)]["payload_hex"])),
+                    bytes.fromhex(str(records_by_target[(0, 22)]["payload_hex"])),
+                )
+            except Exception as exc:
+                raise ValueError(
+                    "Wartungs-Backup-Regleridentität kann nicht aus B20/B22 abgeleitet werden"
+                ) from exc
+            declared_serial = str(controller.get("serial_number") or "").strip()
+            if not hmac.compare_digest(identity.serial_number, declared_serial):
+                raise ValueError(
+                    "Wartungs-Backup-Regleridentität widerspricht den B20/B22-Payloads"
+                )
+            declared_hours = controller.get("operating_hours")
+            if (
+                type(declared_hours) is not int
+                or declared_hours != identity.operating_hours
+            ):
+                raise ValueError(
+                    "Wartungs-Backup-Betriebsstunden widersprechen dem B22-Payload"
+                )
+        return inspection
+
+    def _verified_backup_archive_bytes(
+        self, raw: bytes, expected: dict | None = None
+    ) -> tuple[dict, dict, str]:
+        try:
+            image = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Backup-Archiv ist kein gültiges UTF-8-JSON") from exc
+        if not isinstance(image, dict):
+            raise ValueError("Backup-Archiv muss ein JSON-Objekt sein")
+        inspection = self._strict_backup_archive_inspection(image)
+        file_sha256 = hashlib.sha256(raw).hexdigest()
+        if expected is not None:
+            comparisons = {
+                "file_sha256": file_sha256,
+                "image_sha256": str(inspection.get("image_sha256") or ""),
+                "size_bytes": len(raw),
+            }
+            for key, actual in comparisons.items():
+                declared = expected.get(key)
+                if key == "size_bytes":
+                    matches = int(declared or -1) == actual
+                else:
+                    matches = hmac.compare_digest(str(declared or ""), str(actual))
+                if not matches:
+                    raise ValueError(f"Backup-Archiv {key} stimmt nicht mit dem Index überein")
+            controller = dict(inspection.get("controller") or {})
+            pack = dict(inspection.get("pack") or {})
+            context = dict(image.get("maintenance_archive") or {})
+            immutable = {
+                "schema_name": str(inspection.get("schema") or ""),
+                "schema_version": int(inspection.get("schema_version") or -1),
+                "pack_rev": str(pack.get("revision") or ""),
+                "controller_serial": str(controller.get("serial_number") or ""),
+                "target_count": int(inspection.get("requested_blocks") or 0),
+                "successful_count": int(inspection.get("successful_blocks") or 0),
+                "created_by": str(context.get("created_by") or ""),
+                "source": str(context.get("source") or ""),
+                "created_at": str(inspection.get("created_utc") or ""),
+            }
+            for key, actual in immutable.items():
+                declared = expected.get(key)
+                if key in {"schema_version", "target_count", "successful_count"}:
+                    matches = int(declared or -1) == actual
+                else:
+                    matches = hmac.compare_digest(str(declared or ""), str(actual))
+                if not matches:
+                    raise ValueError(
+                        f"Backup-Archivmetadatum {key} stimmt nicht mit der Datei überein"
+                    )
+        return image, inspection, file_sha256
+
+    def _archive_metadata(
+        self,
+        filename: str,
+        raw: bytes,
+        image: dict,
+        inspection: dict,
+        file_sha256: str,
+    ) -> dict:
+        controller = dict(inspection.get("controller") or {})
+        context = dict(image.get("maintenance_archive") or {})
+        return {
+            "created_at": str(inspection.get("created_utc") or _now()),
+            "created_by": str(context.get("created_by") or "recovery"),
+            "source": "maintenance",
+            "status": "ready",
+            "state": "ready",
+            "verified": True,
+            "integrity": "verified",
+            "pack_compatible": bool(inspection.get("pack_compatible")),
+            "filename": filename,
+            "file_sha256": file_sha256,
+            "image_sha256": str(inspection["image_sha256"]),
+            "schema": str(inspection["schema"]),
+            "schema_version": int(inspection["schema_version"]),
+            "pack_rev": str((inspection.get("pack") or {}).get("revision") or ""),
+            "controller_serial": str(controller["serial_number"]),
+            "target_count": len(BACKUP_TARGETS),
+            "successful_count": len(BACKUP_TARGETS),
+            "requested_targets": len(BACKUP_TARGETS),
+            "successful_targets": len(BACKUP_TARGETS),
+            "failed_targets": 0,
+            "requested_count": len(BACKUP_TARGETS),
+            "failed_count": 0,
+            "pack_revision": str((inspection.get("pack") or {}).get("revision") or ""),
+            "size_bytes": len(raw),
+        }
+
+    def _persist_maintenance_backup_archive(self, image: dict) -> dict:
+        inspection = self._strict_backup_archive_inspection(
+            image, require_current_pack=True
+        )
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        filename = f"maintenance-{stamp}-{secrets.token_hex(8)}.json"
+        raw = write_json_exclusive(self.backup_archive_dir / filename, image)
+        # Reopen through O_NOFOLLOW and verify the exact bytes that future
+        # downloads/completions will use before any database row is created.
+        stored = self._read_backup_archive_file(filename)
+        if not hmac.compare_digest(hashlib.sha256(raw).digest(), hashlib.sha256(stored).digest()):
+            raise OSError("Backup-Archiv änderte sich während der Veröffentlichung")
+        stored_image, stored_inspection, file_sha256 = self._verified_backup_archive_bytes(stored)
+        return self._archive_metadata(
+            filename, stored, stored_image, stored_inspection, file_sha256
+        )
+
+    def _load_verified_backup_archive(
+        self, archive_id: int
+    ) -> tuple[dict, bytes, dict, dict]:
+        archive = self.store.backup_archive(archive_id)
+        try:
+            raw = self._read_backup_archive_file(archive["filename"])
+        except FileNotFoundError:
+            self.store.set_backup_archive_status(
+                archive_id, "missing", verified=False, pack_compatible=False
+            )
+            raise ValueError("Backup-Archivdatei fehlt")
+        except Exception as exc:
+            self.store.set_backup_archive_status(
+                archive_id, "corrupt", verified=False, pack_compatible=False
+            )
+            raise ValueError(f"Backup-Archiv ist nicht sicher lesbar: {exc}") from exc
+        try:
+            image, inspection, _file_sha256 = self._verified_backup_archive_bytes(
+                raw, archive
+            )
+        except Exception as exc:
+            self.store.set_backup_archive_status(
+                archive_id, "corrupt", verified=False, pack_compatible=False
+            )
+            raise ValueError(f"Backup-Archivprüfung fehlgeschlagen: {exc}") from exc
+        pack_compatible = bool(inspection.get("pack_compatible"))
+        if (
+            archive.get("status") != "ready"
+            or not archive.get("verified")
+            or archive.get("pack_compatible") is not pack_compatible
+        ):
+            self.store.set_backup_archive_status(
+                archive_id,
+                "ready",
+                verified=True,
+                pack_compatible=pack_compatible,
+            )
+            archive = self.store.backup_archive(archive_id)
+        return archive, raw, image, inspection
+
+    def _reconcile_backup_archive(self) -> None:
+        """Reindex valid crash-orphans; never follow or silently trust files."""
+        self.backup_archive_errors = []
+        indexed = {item["filename"]: item for item in self.store.backup_archives(1000)}
+        for item in list(indexed.values()):
+            try:
+                self._load_verified_backup_archive(int(item["id"]))
+            except Exception as exc:
+                self.backup_archive_errors.append(f"{item['filename']}: {exc}")
+        known_names = self.store.backup_archive_filenames()
+        directory_fd = self._open_backup_archive_directory()
+        try:
+            entries = list(os.scandir(directory_fd))
+        finally:
+            os.close(directory_fd)
+        for entry in entries:
+            name = entry.name
+            if name in known_names or name.startswith("."):
+                continue
+            if not BACKUP_ARCHIVE_FILENAME.fullmatch(name):
+                self.backup_archive_errors.append(f"{name}: unbekannter Archivdateiname")
+                continue
+            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                self.backup_archive_errors.append(f"{name}: kein reguläres Archiv")
+                continue
+            try:
+                raw = self._read_backup_archive_file(name)
+                image, inspection, file_sha256 = self._verified_backup_archive_bytes(raw)
+                metadata = self._archive_metadata(
+                    name, raw, image, inspection, file_sha256
+                )
+                self.store.create_orphan_backup_archive(metadata)
+            except Exception as exc:
+                self.backup_archive_errors.append(f"{name}: {exc}")
 
     def _load_serial_enabled(self) -> bool:
         try:
@@ -3091,10 +3808,49 @@ class DachsWebApp:
         }
 
     def maintenance_reports(self) -> dict:
-        return {"items": self.store.maintenance_reports(), "status": self.live()["maintenance"]}
+        items = self.store.maintenance_reports()
+        archives = {
+            int(item["maintenance_report_id"]): item
+            for item in self.store.backup_archives(1000)
+            if item.get("maintenance_report_id") is not None
+        }
+        for item in items:
+            item["backup_archive"] = archives.get(int(item["id"]))
+        return {"items": items, "status": self.live()["maintenance"]}
+
+    def backup_archives(self) -> dict:
+        for item in self.store.backup_archives(1000):
+            try:
+                self._load_verified_backup_archive(int(item["id"]))
+            except Exception:
+                pass
+        return {
+            "schema": "open-dachs-manager-backup-archive/v1",
+            "items": self.store.backup_archives(1000),
+            "errors": list(self.backup_archive_errors),
+        }
+
+    def backup_archive_download(self, archive_id: int) -> tuple[bytes, str]:
+        archive, raw, _image, _inspection = self._load_verified_backup_archive(
+            int(archive_id)
+        )
+        return raw, str(archive["filename"])
 
     def maintenance_report(self, report_id: int) -> dict:
         item = self.store.maintenance_report(report_id)
+        try:
+            archive = self.store.backup_archive_for_report(report_id)
+            try:
+                archive, _raw, _image, _inspection = self._load_verified_backup_archive(
+                    int(archive["id"])
+                )
+            except Exception:
+                archive = self.store.backup_archive(int(archive["id"]))
+            item["backup_archive"] = archive
+            item["report"]["backup_archive"] = archive
+        except KeyError:
+            item["backup_archive"] = None
+            item["report"]["backup_archive"] = None
         settings_reader = getattr(self, "maintenance_settings", None)
         live_writes_enabled = (
             settings_reader()["maintenance_live_writes_enabled"]
@@ -3130,59 +3886,79 @@ class DachsWebApp:
         return item
 
     def create_maintenance_report(self, username: str) -> dict:
-        """Read every serially addressable block as one local snapshot."""
+        """Create one report and immutable 38/38 image from the same capture."""
         with self.state_lock:
             if not self.serial_enabled:
                 raise TransportError("serielle Verbindung ist getrennt")
         started_at = _now()
-        target_blocks = tuple(self.pack.addressable_blocks())
         snapshots: dict[str, dict] = {}
         payloads: dict[int, bytes] = {}
         failed_blocks: list[dict] = []
-        with self.serial_lock, self.service.session() as session:
-            for block in target_blocks:
-                try:
-                    result, fields = self.service.decoded_block(session, block)
-                except Exception as exc:
-                    error = str(exc) or exc.__class__.__name__
-                    failed_blocks.append({"block": block, "error": error})
-                    snapshots[str(block)] = {
-                        "block": block,
-                        "name": self.pack.block_name(block),
-                        "ok": False,
-                        "status": None,
-                        "error": error,
-                        "payload_hex": "",
-                        "rtt_ms": None,
-                        "fields": [],
-                    }
-                    continue
-                if not result.ok:
-                    error = "keine gültige serielle Antwort"
-                    failed_blocks.append({"block": block, "status": result.status, "error": error})
-                    snapshots[str(block)] = {
-                        "block": block,
-                        "name": self.pack.block_name(block),
-                        "ok": False,
-                        "status": result.status,
-                        "error": error,
-                        "payload_hex": "",
-                        "rtt_ms": round(result.response.elapsed_ms, 1),
-                        "fields": [],
-                    }
-                    continue
-                payloads[block] = bytes(result.payload)
-                snapshots[str(block)] = {
-                    "block": block,
-                    "name": self.pack.block_name(block),
-                    "ok": True,
-                    "status": result.status,
-                    "captured_at": _now(),
-                    "payload_hex": result.payload.hex(" ").upper(),
-                    "rtt_ms": round(result.response.elapsed_ms, 1),
-                    "fields": [self._report_field(field) for field in fields if web_field_visible(block, field.key, field.metadata)],
-                }
+        with self.serial_lock:
+            with self.state_lock:
+                if not self.serial_enabled:
+                    raise TransportError("serielle Verbindung ist getrennt")
+            with self.service.session() as session:
+                image, capture = self.service.maintenance_backup(
+                    session, decode=True, created_by=username
+                )
         completed_at = _now()
+        for cpu, block in BACKUP_TARGETS:
+            target = capture[(cpu, block)]
+            key = str(block) if cpu == 0 else f"{cpu}:{block}"
+            payload = bytes(target.get("payload") or b"")
+            if cpu == 0 and target.get("ok"):
+                payloads[block] = payload
+            if not target.get("ok"):
+                failed_blocks.append({
+                    "cpu": cpu,
+                    "block": block,
+                    "target_key": f"{cpu}:{block}",
+                    "status": target.get("status"),
+                    "error": target.get("error") or "keine gültige serielle Antwort",
+                })
+            if cpu == 0:
+                report_fields = [
+                    self._report_field(field)
+                    for field in target.get("fields") or []
+                    if web_field_visible(block, field.key, field.metadata)
+                ]
+            else:
+                report_fields = [
+                    {
+                        "key": str(field.get("key") or ""),
+                        "label": str(field.get("label") or field.get("key") or ""),
+                        "raw": _json_value(field.get("raw")),
+                        "value": _json_value(field.get("value")),
+                        "edit_value": _json_value(field.get("edit_value")),
+                        "unit": str(field.get("unit") or ""),
+                        "reserved": False,
+                    }
+                    for field in target.get("fields") or []
+                    if isinstance(field, dict)
+                ]
+            snapshots[key] = {
+                "cpu": cpu,
+                "block": block,
+                "target_key": f"{cpu}:{block}",
+                "name": target.get("name") or self._backup_target_name(cpu, block),
+                "ok": bool(target.get("ok")),
+                "status": target.get("status"),
+                "captured_at": completed_at if target.get("ok") else None,
+                "error": target.get("error"),
+                "payload_hex": payload.hex(" ").upper(),
+                "payload_len": len(payload),
+                "rtt_ms": target.get("rtt_ms"),
+                "fields": report_fields,
+            }
+        inspection = self._strict_backup_archive_inspection(
+            image, require_current_pack=True
+        )
+        if failed_blocks:
+            failed = ", ".join(
+                f"CPU {item['cpu']} Block {item['block']}" for item in failed_blocks
+            )
+            raise RuntimeError(f"Wartungsstart nicht möglich; Backup unvollständig: {failed}")
         missing_required = sorted(MAINTENANCE_REQUIRED_BLOCKS - payloads.keys())
         if missing_required:
             blocks = ", ".join(str(block) for block in missing_required)
@@ -3231,7 +4007,7 @@ class DachsWebApp:
                         block, payloads[block], service_history
                     )
         report = {
-            "version": 2,
+            "version": 3,
             "generated_at": completed_at,
             "generated_by": username,
             "pack_rev": self.pack.pack_rev,
@@ -3239,16 +4015,39 @@ class DachsWebApp:
             "snapshot": {
                 "started_at": started_at,
                 "completed_at": completed_at,
-                "attempted_blocks": list(target_blocks),
+                # Retain CPU-0 lists for old report consumers; target-aware
+                # fields are the authoritative 38-target provenance.
+                "attempted_blocks": [block for cpu, block in BACKUP_TARGETS if cpu == 0],
                 "captured_blocks": sorted(payloads),
                 "failed_blocks": failed_blocks,
-                "complete": not failed_blocks,
+                "attempted_targets": [
+                    {"cpu": cpu, "block": block} for cpu, block in BACKUP_TARGETS
+                ],
+                "captured_targets": [
+                    {"cpu": cpu, "block": block}
+                    for cpu, block in BACKUP_TARGETS
+                    if capture[(cpu, block)].get("ok")
+                ],
+                "complete": True,
             },
             "maintenance_status": maintenance_status(cache_values),
             "blocks": snapshots,
         }
         protocol = new_protocol(fuel_type, snapshots["100"]["fields"])
-        created = self.store.create_maintenance_report(username, fuel_type, report, protocol)
+        archive = self._persist_maintenance_backup_archive(image)
+        if not (
+            archive.get("status") == "ready"
+            and archive.get("verified") is True
+            and int(archive.get("successful_count") or 0) == len(BACKUP_TARGETS)
+            and hmac.compare_digest(
+                str(archive.get("image_sha256") or ""),
+                str(inspection.get("image_sha256") or ""),
+            )
+        ):
+            raise RuntimeError("Wartungsstart nicht möglich; Archivprüfung fehlgeschlagen")
+        created = self.store.create_maintenance_report_with_archive(
+            username, fuel_type, report, protocol, archive
+        )
         return self.maintenance_report(created["id"])
 
     def save_maintenance_report(self, report_id: int, protocol: dict) -> dict:
@@ -3270,7 +4069,6 @@ class DachsWebApp:
             if str(confirmation).strip() != MAINTENANCE_DEMO_CONFIRMATION:
                 raise ValueError(f"zur Demo-Bestätigung exakt {MAINTENANCE_DEMO_CONFIRMATION!r} eingeben")
             clean = validate_protocol(protocol, complete=True)
-            self.store.update_maintenance_protocol(report_id, clean)
             completion = {
                 "mode": "demo",
                 "completed_at": _now(),
@@ -3281,92 +4079,156 @@ class DachsWebApp:
                 "audits": [],
                 "note": "Demolauf lokal abgeschlossen; Block 100 und Block 104 blieben unverändert.",
             }
-            self.store.complete_maintenance_report(report_id, completion)
+            self.store.complete_demo_maintenance_report(report_id, clean, completion)
             return self.maintenance_report(report_id)
         if str(confirmation).strip() != MAINTENANCE_CONFIRMATION:
             raise ValueError(f"zur Bestätigung exakt {MAINTENANCE_CONFIRMATION!r} eingeben")
         if auth_level < 0:
             raise ValueError("Wartungsabschluss benötigt ein Auth-Level")
         clean = validate_protocol(protocol, complete=True)
-        self.store.update_maintenance_protocol(report_id, clean)
-        with self.state_lock:
-            if not self.serial_enabled:
-                raise TransportError("serielle Verbindung ist getrennt")
-        allowlist = WriteAllowlist()
-        audits: list[dict] = []
-        with self.serial_lock, self.service.session() as session:
-            auth = self.service.authenticate(session, auth_level, pass4 or None)
-            if not auth.ok:
-                raise PermissionError(f"Auth-Level {auth_level} wurde nicht gewährt")
-
-            current100 = self.service.read_block(session, 100)
-            if not current100.ok:
-                raise RuntimeError("Wartungsdatenblock 100 konnte nicht gelesen werden")
-            before100 = bytes(current100.payload)
-            after100 = bytearray(before100)
-            changed100 = ["Wartung_Ew1.abFaNameMonteur"]
-            self.pack.encode_value(after100, "Wartung_Ew1.abFaNameMonteur", clean["technician"], block=100)
-            for definition in checklist_definition(clean["fuel_type"]):
-                status = clean["checklist"][definition["id"]]
-                key = definition["controller_key"]
-                self.pack.encode_value(
-                    after100,
-                    key,
-                    str(CHECKLIST_RAW_VALUES[status]),
-                    raw_mode=True,
-                    block=100,
-                )
-                changed100.append(key)
-            for key, value in clean["measurements"].items():
-                if value == "":
-                    continue
-                if key not in MAINTENANCE_MEASUREMENT_KEYS:
-                    raise KeyError(f"unzulässiges Wartungsmessfeld {key}")
-                self.pack.encode_value(after100, key, value, block=100)
-                changed100.append(key)
-            audit100 = self.service.write_payload(
-                session, 100, before100, bytes(after100), changed100, allowlist, dry_run=False
-            ).as_dict()
-            audit100.update({"auth_level_requested": auth_level, "auth_level_granted": auth.granted_level})
-            self.store.audit(_now(), username, 100, audit100)
-            audits.append(audit100)
-            if not audit100.get("written") or not audit100.get("readback_ok"):
-                raise RuntimeError(audit100.get("error") or "Wartungsdaten konnten nicht bestätigt geschrieben werden")
-
-            current104 = self.service.read_block(session, 104)
-            if not current104.ok or not current104.payload:
-                raise RuntimeError("Wartungscache Block 104 konnte nicht gelesen werden")
-            before104 = bytes(current104.payload)
-            after104 = bytearray(before104)
-            self.pack.encode_value(
-                after104, "Wartung_Cache.fBestaetigt", "1", raw_mode=True, block=104
+        archive_index = self.store.backup_archive_for_report(report_id)
+        archive, _archive_raw, archive_image, archive_inspection = (
+            self._load_verified_backup_archive(int(archive_index["id"]))
+        )
+        self._strict_backup_archive_inspection(
+            archive_image, require_current_pack=True
+        )
+        if not archive.get("ready") or archive.get("pack_compatible") is not True:
+            raise ValueError(
+                "Live-Abschluss benötigt ein bereites, verifiziertes, pack-kompatibles 38/38-Backup"
             )
-            audit104 = self.service.write_payload(
-                session, 104, before104, bytes(after104),
-                ["Wartung_Cache.fBestaetigt"], allowlist, dry_run=False,
-            ).as_dict()
-            audit104.update({"auth_level_requested": auth_level, "auth_level_granted": auth.granted_level})
-            self.store.audit(_now(), username, 104, audit104)
-            audits.append(audit104)
-            if not audit104.get("written") or not audit104.get("readback_ok"):
-                raise RuntimeError(audit104.get("error") or "Wartungsbestätigung konnte nicht geschrieben werden")
+        self.store.claim_live_maintenance_completion(report_id, clean, archive)
+        claimed = True
+        audits: list[dict] = []
+        auth = None
+        try:
+            with self.state_lock:
+                if not self.serial_enabled:
+                    raise TransportError("serielle Verbindung ist getrennt")
+            allowlist = WriteAllowlist()
+            with self.serial_lock:
+                with self.state_lock:
+                    if not self.serial_enabled:
+                        raise TransportError("serielle Verbindung ist getrennt")
+                with self.service.session() as session:
+                    auth = self.service.authenticate(session, auth_level, pass4 or None)
+                    if not auth.ok:
+                        raise PermissionError(f"Auth-Level {auth_level} wurde nicht gewährt")
+                    authenticated_serial = str(
+                        getattr(auth, "serial_number", "") or ""
+                    ).strip()
+                    archived_serial = str(
+                        (archive_inspection.get("controller") or {}).get("serial_number")
+                        or ""
+                    ).strip()
+                    if not authenticated_serial or not archived_serial or not hmac.compare_digest(
+                        authenticated_serial, archived_serial
+                    ):
+                        raise PermissionError(
+                            "Regleridentität stimmt nicht mit dem Wartungs-Backup überein"
+                        )
 
-        completion = {
-            "mode": "live",
-            "completed_at": _now(),
-            "username": username,
-            "controller_written": True,
-            "hardware_unchanged": False,
-            "confirmation_bit_set": True,
-            "auth_level_requested": auth_level,
-            "auth_level_granted": auth.granted_level,
-            "audits": audits,
-        }
-        self.store.complete_maintenance_report(report_id, completion)
-        return self.maintenance_report(report_id)
+                    current100 = self.service.read_block(session, 100)
+                    if not current100.ok:
+                        raise RuntimeError("Wartungsdatenblock 100 konnte nicht gelesen werden")
+                    before100 = bytes(current100.payload)
+                    after100 = bytearray(before100)
+                    changed100 = ["Wartung_Ew1.abFaNameMonteur"]
+                    self.pack.encode_value(after100, "Wartung_Ew1.abFaNameMonteur", clean["technician"], block=100)
+                    for definition in checklist_definition(clean["fuel_type"]):
+                        status = clean["checklist"][definition["id"]]
+                        key = definition["controller_key"]
+                        self.pack.encode_value(
+                            after100,
+                            key,
+                            str(CHECKLIST_RAW_VALUES[status]),
+                            raw_mode=True,
+                            block=100,
+                        )
+                        changed100.append(key)
+                    for key, value in clean["measurements"].items():
+                        if value == "":
+                            continue
+                        if key not in MAINTENANCE_MEASUREMENT_KEYS:
+                            raise KeyError(f"unzulässiges Wartungsmessfeld {key}")
+                        self.pack.encode_value(after100, key, value, block=100)
+                        changed100.append(key)
+                    audit100 = self.service.write_payload(
+                        session, 100, before100, bytes(after100), changed100, allowlist, dry_run=False
+                    ).as_dict()
+                    audit100.update({"auth_level_requested": auth_level, "auth_level_granted": auth.granted_level})
+                    audits.append(audit100)
+                    self.store.audit(_now(), username, 100, audit100)
+                    if not audit100.get("written") or not audit100.get("readback_ok"):
+                        raise RuntimeError(audit100.get("error") or "Wartungsdaten konnten nicht bestätigt geschrieben werden")
+
+                    current104 = self.service.read_block(session, 104)
+                    if not current104.ok or not current104.payload:
+                        raise RuntimeError("Wartungscache Block 104 konnte nicht gelesen werden")
+                    before104 = bytes(current104.payload)
+                    after104 = bytearray(before104)
+                    self.pack.encode_value(
+                        after104, "Wartung_Cache.fBestaetigt", "1", raw_mode=True, block=104
+                    )
+                    audit104 = self.service.write_payload(
+                        session, 104, before104, bytes(after104),
+                        ["Wartung_Cache.fBestaetigt"], allowlist, dry_run=False,
+                    ).as_dict()
+                    audit104.update({"auth_level_requested": auth_level, "auth_level_granted": auth.granted_level})
+                    audits.append(audit104)
+                    self.store.audit(_now(), username, 104, audit104)
+                    if not audit104.get("written") or not audit104.get("readback_ok"):
+                        raise RuntimeError(audit104.get("error") or "Wartungsbestätigung konnte nicht geschrieben werden")
+
+            completion = {
+                "mode": "live",
+                "completed_at": _now(),
+                "username": username,
+                "controller_written": True,
+                "hardware_unchanged": False,
+                "confirmation_bit_set": True,
+                "auth_level_requested": auth_level,
+                "auth_level_granted": getattr(auth, "granted_level", None),
+                "backup_archive_id": int(archive["id"]),
+                "audits": audits,
+            }
+            self.store.finish_live_maintenance_completion(report_id, completion)
+            claimed = False
+            return self.maintenance_report(report_id)
+        except Exception as exc:
+            possible_write = any(
+                bool(audit.get("write_attempted") or audit.get("written"))
+                for audit in audits
+            )
+            if claimed:
+                if possible_write:
+                    failure = {
+                        "mode": "live",
+                        "completed_at": _now(),
+                        "username": username,
+                        "controller_written": any(
+                            bool(audit.get("written")) for audit in audits
+                        ),
+                        "hardware_unchanged": False,
+                        "confirmation_bit_set": None,
+                        "auth_level_requested": auth_level,
+                        "auth_level_granted": getattr(auth, "granted_level", None),
+                        "backup_archive_id": int(archive["id"]),
+                        "uncertain": True,
+                        "error": str(exc) or exc.__class__.__name__,
+                        "audits": audits,
+                    }
+                    self.store.fail_live_maintenance_completion(report_id, failure)
+                else:
+                    self.store.release_live_maintenance_completion(report_id)
+            raise
 
     def maintenance_export(self, report_id: int, export_type: str) -> tuple[bytes, str, str]:
-        item = self.store.maintenance_report(report_id)
+        item = self.maintenance_report(report_id)
+        if item.get("status") == "completing":
+            raise ValueError(
+                "Wartungsabschluss läuft; Export nach Abschluss erneut aufrufen"
+            )
         report, protocol, completion = item["report"], item["protocol"], item["completion"]
         if export_type == "json":
             return json_export(report, protocol, completion), "application/json; charset=utf-8", f"dachs-wartung-{report_id}.json"
@@ -3777,6 +4639,27 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     search = query.get("q", [""])[0]
                     limit = int(query.get("limit", ["250"])[0])
                     return self._json(self.app.pack.service_catalog(search, limit))
+                if path == "/api/backup/archive":
+                    if user.get("role") != "admin":
+                        return self._error(403, "admin role required")
+                    return self._json(self.app.backup_archives())
+                archive_download = re.fullmatch(
+                    r"/api/backup/archive/(\d+)/download", path
+                )
+                if archive_download:
+                    if user.get("role") != "admin":
+                        return self._error(403, "admin role required")
+                    body, filename = self.app.backup_archive_download(
+                        int(archive_download.group(1))
+                    )
+                    return self._send(
+                        200,
+                        body,
+                        "application/json; charset=utf-8",
+                        headers={
+                            "Content-Disposition": f'attachment; filename="{filename}"',
+                        },
+                    )
                 if path == "/api/maintenance/reports":
                     return self._json(self.app.maintenance_reports())
                 export_match = re.fullmatch(r"/api/maintenance/reports/(\d+)/export/(html|pdf|json)", path)
