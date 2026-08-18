@@ -60,11 +60,15 @@ from .network_protection import (
     NETWORK_PROTECTION_CPUS,
     decode_network_protection,
     encode_network_protection_value,
+    network_protection_name,
+    network_protection_payload_length,
     network_protection_schema,
+    network_protection_schemas,
+    validate_network_block,
     validate_network_cpu,
 )
 from .serial_worker import DEFAULT_SERIAL_WORKER_SOCKET
-from .service import DachsService
+from .service import DachsService, write_json_atomic
 from .transport import TransportError, validate_block
 
 
@@ -82,6 +86,10 @@ MOTOR_SPEED_BLOCK = 24
 MOTOR_SPEED_KEY = "Hka_Mw1.usDrehzahl"
 API_TOKEN_SCOPES = frozenset({"read", "history", "write"})
 API_DEFAULT_AUTH_LEVEL = 4
+BACKUP_RESTORE_CONFIRMATION = "SICHERUNG WIEDERHERSTELLEN"
+# The browser accepts a 1 MiB image. Leave bounded room for the surrounding
+# JSON request object and restore selection without rejecting that image.
+MAX_JSON_BODY_BYTES = (1024 + 64) * 1024
 POWER_TARGET_BLOCK = 50
 POWER_TARGET_KEY = "Hka_Ew.usSollGenerator"
 POWER_TARGET_FUEL_BLOCK = 24
@@ -2218,7 +2226,7 @@ class DachsWebApp:
                 "details_available": bool(service_catalog["details_available"]),
             },
             "blocks": blocks,
-            "network_protection": [network_protection_schema(cpu) for cpu in NETWORK_PROTECTION_CPUS],
+            "network_protection": network_protection_schemas(),
             "series": series,
             "roles": {"guest": "lesen", "admin": "lesen und schreiben"},
         }
@@ -2277,8 +2285,8 @@ class DachsWebApp:
     ) -> None:
         """Reject malformed values before reserving an idempotency key."""
         if cpu:
-            probe = bytearray(70)
-            encode_network_protection_value(probe, cpu, key, value)
+            probe = bytearray(network_protection_payload_length(block))
+            encode_network_protection_value(probe, cpu, key, value, block=block)
             return
         fields = self.pack.field_map(block)
         payload_size = max(
@@ -2348,16 +2356,24 @@ class DachsWebApp:
             raise PermissionError("API-Schreibaktionen sind in den Systemeinstellungen deaktiviert")
         if "value" not in payload:
             raise ValueError("value ist erforderlich")
-        try:
-            cpu = int(payload.get("cpu", 0) or 0)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("cpu muss 0, 1 oder 2 sein") from exc
+        cpu = payload.get("cpu", 0)
+        if type(cpu) is not int or cpu not in (0, *NETWORK_PROTECTION_CPUS):
+            raise ValueError("cpu muss die ganze Zahl 0, 1 oder 2 sein")
         key = str(payload.get("key", "")).strip()
         if cpu:
             cpu = validate_network_cpu(cpu)
-            block = NETWORK_PROTECTION_BLOCK
-            if key not in {item["key"] for item in network_protection_schema(cpu)["fields"]}:
-                raise KeyError(f"Netzschutzfeld {key!r} ist für CPU {cpu} nicht vorhanden")
+            block = validate_network_block(
+                payload.get("block", NETWORK_PROTECTION_BLOCK)
+            )
+            target_schema = network_protection_schema(cpu, block)
+            if not target_schema["writable"]:
+                raise PermissionError(
+                    f"Netzschutz CPU {cpu}, Block {block} ist nur lesbar"
+                )
+            if key not in {item["key"] for item in target_schema["fields"]}:
+                raise KeyError(
+                    f"Netzschutzfeld {key!r} ist für CPU {cpu}, Block {block} nicht vorhanden"
+                )
         else:
             block, key = self._resolve_api_field(payload.get("block"), key)
         self._validate_api_value_offline(block, cpu, key, payload.get("value"))
@@ -2381,6 +2397,7 @@ class DachsWebApp:
                     int(settings.get("auth_level", API_DEFAULT_AUTH_LEVEL)),
                     "",
                     True,
+                    block=block,
                 )
             else:
                 audit = self.write_block(
@@ -2391,11 +2408,19 @@ class DachsWebApp:
                     "",
                     True,
                 )
-        except PowerTargetRangeError:
+        except Exception:
             self.store.cancel_api_request(token_id, request_id, request_hash)
             raise
         response = {
-            "ok": bool(audit.get("written") and audit.get("readback_ok")),
+            # A byte-identical live request is a successful no-op: the write
+            # path deliberately emits neither authentication nor a controller
+            # write, but confirms the already matching full-block state.
+            # Failed ACK/readback verification always carries an error and is
+            # therefore never reported as successful.
+            "ok": bool(
+                audit.get("readback_ok") is True
+                and not audit.get("error")
+            ),
             "action": "set-value",
             "request_id": request_id,
             "replayed": False,
@@ -2407,6 +2432,530 @@ class DachsWebApp:
         }
         self.store.complete_api_request(token_id, request_id, request_hash, response)
         return response
+
+    def _normalize_backup_blocks(
+        self,
+        value: object,
+        *,
+        available: set[tuple[int, int]] | None = None,
+    ) -> list[tuple[int, int]]:
+        """Validate an ordered target selection without silent truncation.
+
+        Plain integers retain the original API meaning of regulator CPU 0.
+        Target objects may additionally select block 16 on network-monitor
+        CPU 1 or 2.
+        """
+        if not isinstance(value, list):
+            raise ValueError("Blöcke müssen als Liste übergeben werden")
+        if not value:
+            raise ValueError("Mindestens ein Block muss ausgewählt werden")
+        mapped = {
+            int(block)
+            for block in self.pack.addressable_blocks()
+            if 0 <= int(block) < 255
+        }
+        selectable = {(0, block) for block in mapped}
+        selectable.update(
+            (cpu, NETWORK_PROTECTION_BLOCK) for cpu in NETWORK_PROTECTION_CPUS
+        )
+        allowed = selectable if available is None else selectable & set(available)
+        selected: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for item in value:
+            if isinstance(item, bool):
+                raise ValueError("CPU und Blocknummern müssen ganze Zahlen sein")
+            if isinstance(item, int):
+                cpu = 0
+                raw_block = item
+            elif isinstance(item, dict):
+                raw_cpu = item.get("cpu")
+                raw_block = item.get("block")
+                if isinstance(raw_cpu, bool) or not isinstance(raw_cpu, int):
+                    raise ValueError("CPU und Blocknummern müssen ganze Zahlen sein")
+                if isinstance(raw_block, bool) or not isinstance(raw_block, int):
+                    raise ValueError("CPU und Blocknummern müssen ganze Zahlen sein")
+                cpu = raw_cpu
+            else:
+                raise ValueError("Blocknummern müssen ganze Zahlen oder Zielobjekte sein")
+            try:
+                block = validate_block(raw_block, writable=True)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Ungültige Blocknummer: {raw_block!r}") from exc
+            target = (cpu, block)
+            if target not in selectable:
+                if cpu == 0:
+                    raise ValueError(
+                        f"Block {block} ist im aktuellen Pack nicht wiederherstellbar"
+                    )
+                if cpu not in NETWORK_PROTECTION_CPUS:
+                    raise ValueError("CPU muss 0, 1 oder 2 sein")
+                raise ValueError(
+                    f"Netzschutz CPU {cpu} unterstützt nur Block {NETWORK_PROTECTION_BLOCK}"
+                )
+            if target not in allowed:
+                raise ValueError(
+                    f"CPU {cpu}, Block {block} ist im Sicherungsabbild nicht wiederherstellbar"
+                )
+            if target in seen:
+                raise ValueError(f"CPU {cpu}, Block {block} wurde mehrfach ausgewählt")
+            selected.append(target)
+            seen.add(target)
+        return selected
+
+    def _backup_target_name(self, cpu: int, block: int) -> str:
+        if cpu:
+            return f"Netzschutz · Überwachungs-CPU {cpu}"
+        return self.pack.block_name(block)
+
+    @staticmethod
+    def _backup_target_object(target: tuple[int, int]) -> dict:
+        cpu, block = target
+        return {"cpu": cpu, "block": block}
+
+    def _public_backup_inspection(self, inspection: dict) -> dict:
+        records = list(inspection.get("records") or inspection.get("blocks") or [])
+        blocks = []
+        for record in records:
+            cpu = int(record.get("cpu", 0))
+            block = int(record["block"])
+            blocks.append({
+                "cpu": cpu,
+                "block": block,
+                "target_key": f"{cpu}:{block}",
+                "name": str(
+                    record.get("block_name")
+                    or record.get("name")
+                    or self._backup_target_name(cpu, block)
+                ),
+                "ok": bool(record.get("ok")),
+                "restorable": bool(record.get("restorable")),
+                "payload_len": int(record.get("payload_len") or 0),
+                "payload_sha256": record.get("payload_sha256"),
+                "error": record.get("error"),
+                "critical": bool(record.get("critical") or cpu),
+            })
+        pack = dict(inspection.get("pack") or {})
+        controller = dict(inspection.get("controller") or {})
+        digest_present = bool(inspection.get("digest_present"))
+        digest_verified = bool(inspection.get("digest_verified"))
+        pack_revision = str(pack.get("revision") or inspection.get("pack_rev") or "")
+        inspected_pack_compatible = inspection.get("pack_compatible")
+        # Live restore is fail-closed: missing pack metadata is not evidence
+        # of compatibility, even when an older image has no revision string.
+        same_pack = inspected_pack_compatible is True
+        controller_identified = bool(
+            controller.get("available") is True and controller.get("serial_number")
+        )
+        return {
+            "schema": "open-dachs-manager-backup-inspection/v1",
+            "backup_schema": inspection.get("schema"),
+            "schema_version": inspection.get("schema_version"),
+            "image_sha256": inspection.get("image_sha256"),
+            "created_utc": inspection.get("created_utc"),
+            "pack_rev": pack_revision or None,
+            "controller": {
+                "available": controller_identified,
+                "serial_number": controller.get("serial_number") if controller_identified else None,
+                "operating_hours": controller.get("operating_hours") if controller_identified else None,
+                "error": controller.get("error") if not controller_identified else None,
+            },
+            "requested_blocks": int(inspection.get("requested_blocks") or len(records)),
+            "requested_targets": [
+                {"cpu": item["cpu"], "block": item["block"]} for item in blocks
+            ],
+            "successful_blocks": int(
+                inspection.get("successful_blocks")
+                if inspection.get("successful_blocks") is not None
+                else sum(bool(record.get("ok")) for record in records)
+            ),
+            "failed_blocks": int(
+                inspection.get("failed_blocks")
+                if inspection.get("failed_blocks") is not None
+                else sum(not bool(record.get("ok")) for record in records)
+            ),
+            "integrity": "verified" if digest_present and digest_verified else "legacy-unverified",
+            "digest_present": digest_present,
+            "digest_verified": digest_verified,
+            "pack_compatible": same_pack,
+            "live_restore_compatible": bool(
+                same_pack and digest_present and digest_verified and controller_identified
+            ),
+            "blocks": blocks,
+        }
+
+    def create_backup(self, blocks: object) -> dict:
+        """Read selected regulator and network-protection targets in one lease."""
+        selected = self._normalize_backup_blocks(blocks)
+        with self.state_lock:
+            if not self.serial_enabled:
+                raise TransportError("serielle Verbindung ist getrennt")
+        with self.serial_lock:
+            with self.state_lock:
+                if not self.serial_enabled:
+                    raise TransportError("serielle Verbindung ist getrennt")
+            with self.service.session() as session:
+                image = self.service.backup(
+                    session,
+                    [self._backup_target_object(target) for target in selected],
+                    decode=True,
+                    include_identity=True,
+                )
+        inspection = self._public_backup_inspection(self.service.inspect_backup(image))
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return {
+            "schema": "open-dachs-manager-backup-response/v1",
+            "ok": inspection["failed_blocks"] == 0,
+            "filename": f"open-dachs-backup-{stamp}.json",
+            "image": image,
+            "inspection": inspection,
+            "summary": {
+                "requested_blocks": inspection["requested_blocks"],
+                "successful_blocks": inspection["successful_blocks"],
+                "failed_blocks": inspection["failed_blocks"],
+            },
+        }
+
+    def inspect_backup(self, image: object) -> dict:
+        """Validate a browser-loaded image without touching the controller."""
+        return self._public_backup_inspection(self.service.inspect_backup(image))
+
+    def _persist_restore_preimage(self, image: dict) -> dict:
+        """Store a SHA-256-bound current-state image before the first write."""
+        inspection = self.service.inspect_backup(image)
+        digest = str(inspection.get("image_sha256") or "")
+        if not digest:
+            raise ValueError("Sicherheitsabbild besitzt keine Prüfsumme")
+        directory = self.data_dir / "restore-preimages"
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with suppress(OSError):
+            directory.chmod(0o700)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        filename = f"restore-preimage-{stamp}-{digest[:12]}.json"
+        destination = directory / filename
+        write_json_atomic(destination, image)
+        with suppress(OSError):
+            destination.chmod(0o600)
+        return {
+            "filename": filename,
+            "image_sha256": digest,
+            "blocks": int(inspection.get("successful_blocks") or 0),
+        }
+
+    def restore_backup(
+        self,
+        username: str,
+        image: object,
+        image_sha256: object,
+        blocks: object,
+        auth_level: int,
+        pass4: str,
+        write_enabled: bool,
+        confirmation: str,
+    ) -> dict:
+        """Plan or execute an exact multi-block restore in one worker lease.
+
+        Every selected block is read and length-checked before authentication.
+        Live restore authenticates once, skips identical payloads without a
+        wire write and stops after the first failed write/readback. Successful
+        earlier blocks are deliberately not rolled back.
+        """
+        if not isinstance(write_enabled, bool):
+            raise ValueError("write_enabled muss true oder false sein")
+        if isinstance(auth_level, bool) or not isinstance(auth_level, int):
+            raise ValueError("Auth-Level muss eine ganze Zahl sein")
+        raw_inspection = self.service.inspect_backup(image)
+        inspection = self._public_backup_inspection(raw_inspection)
+        calculated_hash = str(inspection.get("image_sha256") or "")
+        supplied_hash = str(image_sha256 or "")
+        if supplied_hash and calculated_hash and not hmac.compare_digest(
+            supplied_hash, calculated_hash
+        ):
+            raise ValueError("Das Sicherungsabbild wurde nach der Prüfung verändert")
+        record_list = list(raw_inspection.get("records") or raw_inspection.get("blocks") or [])
+        records = {
+            (int(record.get("cpu", 0)), int(record["block"])): record
+            for record in record_list
+            if bool(record.get("restorable"))
+        }
+        selected = self._normalize_backup_blocks(blocks, available=set(records))
+        if write_enabled:
+            if not 0 <= int(auth_level) <= 255:
+                raise ValueError("Hardware-Wiederherstellung benötigt ein Auth-Level von 0 bis 255")
+            if str(confirmation or "").strip() != BACKUP_RESTORE_CONFIRMATION:
+                raise ValueError(
+                    f"Bestätigung muss exakt {BACKUP_RESTORE_CONFIRMATION!r} lauten"
+                )
+        with self.state_lock:
+            if not self.serial_enabled:
+                raise TransportError("serielle Verbindung ist getrennt")
+
+        preflight: dict[tuple[int, int], bytes] = {}
+        targets: dict[tuple[int, int], bytes] = {}
+        auth = None
+        preimage_metadata = None
+        results: list[dict] = []
+        stopped_at: tuple[int, int] | None = None
+        with self.serial_lock:
+            with self.state_lock:
+                if not self.serial_enabled:
+                    raise TransportError("serielle Verbindung ist getrennt")
+            with self.service.session() as session:
+                for target_key in selected:
+                    cpu, block = target_key
+                    record = records[target_key]
+                    target = bytes.fromhex(str(record.get("payload_hex") or ""))
+                    current = self.service.read_block(session, block, cpu=cpu)
+                    if not current.ok:
+                        raise RuntimeError(
+                            f"Restore-Vorprüfung: CPU {cpu}, Block {block} konnte nicht gelesen werden"
+                        )
+                    before = bytes(current.payload)
+                    if len(before) != len(target):
+                        raise ValueError(
+                            f"Restore-Vorprüfung: CPU {cpu}, Block {block} hat am Regler {len(before)} Byte, "
+                            f"im Abbild aber {len(target)} Byte"
+                        )
+                    if cpu:
+                        try:
+                            decode_network_protection(cpu, before)
+                        except ValueError as exc:
+                            raise ValueError(
+                                f"Restore-Vorprüfung: Netzschutz CPU {cpu}, Block {block} ist ungültig: {exc}"
+                            ) from exc
+                    preflight[target_key] = before
+                    targets[target_key] = target
+
+                differing = [
+                    target for target in selected
+                    if preflight[target] != targets[target]
+                ]
+                if write_enabled and differing:
+                    if not re.fullmatch(r"[0-9a-f]{64}", supplied_hash):
+                        raise ValueError(
+                            "Live-Wiederherstellung benötigt den Hash der geprüften Datei"
+                        )
+                    if not calculated_hash or not hmac.compare_digest(
+                        supplied_hash, calculated_hash
+                    ):
+                        raise ValueError("Das Sicherungsabbild wurde nach der Prüfung verändert")
+                    controller = dict(raw_inspection.get("controller") or {})
+                    image_serial = str(controller.get("serial_number") or "").strip()
+                    if controller.get("available") is not True or not image_serial:
+                        raise ValueError(
+                            "Live-Wiederherstellung benötigt ein neues Abbild mit Gerätekennung"
+                        )
+                    if not inspection.get("live_restore_compatible"):
+                        raise ValueError(
+                            "Live-Wiederherstellung ist wegen Packstand oder fehlender Prüfsumme gesperrt"
+                        )
+                    # Create a fresh, SHA-256-bound recovery image inside the same
+                    # exclusive session. Its payloads become the authoritative
+                    # CAS baseline and are persisted before authentication or
+                    # the first wire-write.
+                    preimage = self.service.backup(
+                        session,
+                        [self._backup_target_object(target) for target in selected],
+                        decode=False,
+                        include_identity=True,
+                    )
+                    preimage_inspection = self.service.inspect_backup(preimage)
+                    if int(preimage_inspection.get("successful_blocks") or 0) != len(selected):
+                        raise RuntimeError(
+                            "Restore-Vorprüfung: Sicherheitsabbild konnte nicht vollständig gelesen werden"
+                        )
+                    preimage_records = {
+                        (int(record.get("cpu", 0)), int(record["block"])): record
+                        for record in preimage_inspection.get("records") or []
+                        if bool(record.get("restorable"))
+                    }
+                    for target_key in selected:
+                        cpu, block = target_key
+                        before = bytes.fromhex(
+                            str(preimage_records[target_key]["payload_hex"])
+                        )
+                        if len(before) != len(targets[target_key]):
+                            raise ValueError(
+                                f"Restore-Vorprüfung: CPU {cpu}, Block {block} hat am Regler {len(before)} Byte, "
+                                f"im Abbild aber {len(targets[target_key])} Byte"
+                            )
+                        preflight[target_key] = before
+                    differing = [
+                        target for target in selected
+                        if preflight[target] != targets[target]
+                    ]
+                    if differing:
+                        preimage_metadata = self._persist_restore_preimage(preimage)
+
+                    current_controller = dict(preimage_inspection.get("controller") or {})
+                    current_serial = str(current_controller.get("serial_number") or "").strip()
+                    if current_controller.get("available") is not True or not current_serial:
+                        raise RuntimeError(
+                            "Restore-Vorprüfung: aktuelle Reglerkennung konnte nicht gelesen werden"
+                        )
+                    if not hmac.compare_digest(
+                        image_serial,
+                        current_serial,
+                    ):
+                        raise PermissionError(
+                            "Das Sicherungsabbild gehört zu einer anderen Regler-Seriennummer"
+                        )
+                    if differing:
+                        auth = self.service.authenticate(session, int(auth_level), pass4 or None)
+                        if not auth.ok:
+                            raise PermissionError(f"Auth-Level {auth_level} wurde nicht gewährt")
+                        authenticated_serial = str(
+                            getattr(auth, "serial_number", current_serial) or ""
+                        ).strip()
+                        if not hmac.compare_digest(image_serial, authenticated_serial):
+                            raise PermissionError(
+                                "Die Regler-Seriennummer hat sich während der Wiederherstellung geändert"
+                            )
+
+                # Blocks 20 and 22 provide the current device inputs for PW4.
+                # Keep them until the end so a multi-block restore cannot
+                # invalidate the authentication basis before later writes.
+                auth_targets = {(0, 20), (0, 22)}
+                execution_order = [
+                    target for target in selected if target not in auth_targets
+                ]
+                execution_order.extend(
+                    target for target in selected if target in auth_targets
+                )
+                for target_key in execution_order:
+                    cpu, block = target_key
+                    changed = preflight[target_key] != targets[target_key]
+                    changed_bytes = sum(
+                        left != right
+                        for left, right in zip(
+                            preflight[target_key], targets[target_key]
+                        )
+                    )
+                    if stopped_at is not None:
+                        results.append({
+                            "cpu": cpu,
+                            "block": block,
+                            "target_key": f"{cpu}:{block}",
+                            "name": self._backup_target_name(cpu, block),
+                            "critical": bool(cpu),
+                            "status": "not-attempted",
+                            "changed": changed,
+                            "changed_bytes": changed_bytes,
+                            "dry_run": not write_enabled,
+                            "written": False,
+                            "write_attempted": False,
+                            "ack_positive": None,
+                            "readback_ok": None,
+                            "readback_scope": None,
+                            "error": (
+                                f"Nach Fehler in CPU {stopped_at[0]}, "
+                                f"Block {stopped_at[1]} nicht mehr ausgeführt"
+                            ),
+                        })
+                        continue
+                    restore_arguments = (
+                        session,
+                        block,
+                        preflight[target_key],
+                        targets[target_key],
+                    )
+                    if cpu:
+                        audit = self.service.restore_payload(
+                            *restore_arguments,
+                            dry_run=not write_enabled,
+                            cpu=cpu,
+                        )
+                    else:
+                        # Retain compatibility with services/fakes that
+                        # implement the pre-target optional-CPU signature.
+                        audit = self.service.restore_payload(
+                            *restore_arguments,
+                            dry_run=not write_enabled,
+                        )
+                    audit_payload = audit.as_dict()
+                    audit_payload.update({
+                        "operation": "backup-restore",
+                        "image_sha256": calculated_hash,
+                        "cpu": cpu,
+                        "target_key": f"{cpu}:{block}",
+                        "block_name": self._backup_target_name(cpu, block),
+                        "critical": bool(cpu),
+                        "changed_bytes": changed_bytes,
+                        "auth_level_requested": int(auth_level),
+                        "auth_level_granted": getattr(auth, "granted_level", None),
+                        "preimage": preimage_metadata,
+                    })
+                    self.store.audit(_now(), username, block, audit_payload)
+                    if audit_payload.get("error"):
+                        status = "failed"
+                        if write_enabled:
+                            stopped_at = target_key
+                    elif not changed:
+                        status = "unchanged"
+                    elif not write_enabled:
+                        status = "planned"
+                    else:
+                        status = "restored"
+                    results.append({
+                        "cpu": cpu,
+                        "block": block,
+                        "target_key": f"{cpu}:{block}",
+                        "name": self._backup_target_name(cpu, block),
+                        "critical": bool(cpu),
+                        "status": status,
+                        "changed": changed,
+                        "changed_bytes": changed_bytes,
+                        "dry_run": bool(audit_payload.get("dry_run")),
+                        "written": bool(audit_payload.get("written")),
+                        "write_attempted": bool(audit_payload.get("write_attempted")),
+                        "ack_positive": audit_payload.get("ack_positive"),
+                        "readback_ok": audit_payload.get("readback_ok"),
+                        "readback_scope": audit_payload.get("readback_scope"),
+                        "error": audit_payload.get("error"),
+                    })
+
+        failed = sum(item["status"] == "failed" for item in results)
+        summary = {
+            "requested": len(selected),
+            "planned": sum(item["status"] == "planned" for item in results),
+            "restored": sum(item["status"] == "restored" for item in results),
+            "unchanged": sum(item["status"] == "unchanged" for item in results),
+            "failed": failed,
+            "not_attempted": sum(item["status"] == "not-attempted" for item in results),
+            "write_attempted": sum(bool(item.get("write_attempted")) for item in results),
+            "uncertain": sum(
+                bool(item.get("write_attempted"))
+                and not (bool(item.get("written")) and item.get("readback_ok") is True)
+                for item in results
+            ),
+        }
+        return {
+            "schema": "open-dachs-manager-restore-result/v1",
+            "ok": failed == 0 and stopped_at is None,
+            "mode": "live" if write_enabled else "dry-run",
+            "dry_run": not write_enabled,
+            "image_sha256": calculated_hash,
+            "requested_blocks": len(selected),
+            "requested_targets": [
+                self._backup_target_object(target) for target in selected
+            ],
+            "differing_blocks": sum(
+                preflight[target] != targets[target] for target in selected
+            ),
+            "written_blocks": sum(bool(item.get("written")) for item in results),
+            "write_attempted_blocks": summary["write_attempted"],
+            "uncertain_blocks": summary["uncertain"],
+            "unchanged_blocks": summary["unchanged"],
+            "failed_blocks": failed,
+            "auth_level_requested": int(auth_level),
+            "auth_level_granted": getattr(auth, "granted_level", None),
+            "stopped_at_block": stopped_at[1] if stopped_at is not None else None,
+            "stopped_at_target": (
+                self._backup_target_object(stopped_at) if stopped_at is not None else None
+            ),
+            "preimage": preimage_metadata,
+            "results": results,
+            "summary": summary,
+        }
 
     def read_block(self, block: int) -> dict:
         with self.state_lock:
@@ -2493,29 +3042,39 @@ class DachsWebApp:
             ],
         }
 
-    def read_network_protection(self, cpu: int) -> dict:
-        """Read block 16 from network-monitor CPU 1 or 2."""
+    def read_network_protection(
+        self,
+        cpu: int,
+        block: int = NETWORK_PROTECTION_BLOCK,
+    ) -> dict:
+        """Read one reviewed block from network-monitor CPU 1 or 2."""
         cpu = validate_network_cpu(cpu)
+        block = validate_network_block(block)
+        target_schema = network_protection_schema(cpu, block)
         with self.state_lock:
             if not self.serial_enabled:
                 raise TransportError("serielle Verbindung ist getrennt")
         with self.serial_lock, self.service.session() as session:
-            result = self.service.read_block(session, NETWORK_PROTECTION_BLOCK, cpu=cpu)
+            result = self.service.read_block(session, block, cpu=cpu)
         if not result.ok:
             raise RuntimeError(
-                f"Netzschutz CPU {cpu}, Block {NETWORK_PROTECTION_BLOCK} konnte nicht gelesen werden"
+                f"Netzschutz CPU {cpu}, Block {block} konnte nicht gelesen werden"
             )
-        fields = decode_network_protection(cpu, result.payload)
+        fields = decode_network_protection(cpu, result.payload, block=block)
         return {
             "cpu": cpu,
-            "block": NETWORK_PROTECTION_BLOCK,
-            "name": f"Netzschutz · Überwachungs-CPU {cpu}",
+            "block": block,
+            "target_key": f"{cpu}:{block}",
+            "name": network_protection_name(cpu, block),
             "ok": True,
             "status": result.status,
             "payload_hex": result.payload.hex(" ").upper(),
             "payload_len": len(result.payload),
             "rtt_ms": round(result.response.elapsed_ms, 1),
             "critical": True,
+            "writable": target_schema["writable"],
+            "live_values": target_schema["live_values"],
+            "read_only_reason": target_schema["read_only_reason"],
             "fields": fields,
         }
 
@@ -2836,6 +3395,8 @@ class DachsWebApp:
         }
 
     def write_block(self, username: str, block: int, changes: list[dict], auth_level: int, pass4: str, write_enabled: bool) -> dict:
+        if not isinstance(write_enabled, bool):
+            raise ValueError("write_enabled muss true oder false sein")
         with self.state_lock:
             if not self.serial_enabled:
                 raise TransportError("serielle Verbindung ist getrennt")
@@ -2865,7 +3426,7 @@ class DachsWebApp:
                 self.pack.encode_value(after, key, str(change.get("value", "")), block=block)
                 changed_keys.append(key)
             self._validate_power_target_changes(session, block, changes, bytes(after))
-            if write_enabled and auth_level >= 0:
+            if write_enabled and auth_level >= 0 and bytes(after) != before:
                 auth = self.service.authenticate(session, auth_level, pass4 or None)
                 if not auth.ok:
                     raise PermissionError(f"Auth-Level {auth_level} wurde nicht gewährt")
@@ -2884,9 +3445,18 @@ class DachsWebApp:
         auth_level: int,
         pass4: str,
         write_enabled: bool,
+        *,
+        block: int = NETWORK_PROTECTION_BLOCK,
     ) -> dict:
-        """Apply CPU1/2 block-16 changes through the standard explicit gate."""
+        """Apply CPU1/2 block-16/20 changes through the explicit write gate."""
+        if not isinstance(write_enabled, bool):
+            raise ValueError("write_enabled muss true oder false sein")
         cpu = validate_network_cpu(cpu)
+        block = validate_network_block(block)
+        if not network_protection_schema(cpu, block)["writable"]:
+            raise PermissionError(
+                f"Netzschutz CPU {cpu}, Block {block} ist nur lesbar"
+            )
         with self.state_lock:
             if not self.serial_enabled:
                 raise TransportError("serielle Verbindung ist getrennt")
@@ -2897,26 +3467,43 @@ class DachsWebApp:
         allowlist = WriteAllowlist()
         with self.serial_lock, self.service.session() as session:
             auth = None
-            current = self.service.read_block(session, NETWORK_PROTECTION_BLOCK, cpu=cpu)
+            current = self.service.read_block(session, block, cpu=cpu)
             if not current.ok:
-                raise RuntimeError(f"Netzschutz CPU {cpu}, Block 16 konnte nicht gelesen werden")
+                raise RuntimeError(
+                    f"Netzschutz CPU {cpu}, Block {block} konnte nicht gelesen werden"
+                )
             before = bytes(current.payload)
             # Decode first so unexpected/short controller layouts can never be
             # edited merely because the transport returned a status byte.
-            decode_network_protection(cpu, before)
+            decode_network_protection(cpu, before, block=block)
             after = bytearray(before)
             changed_keys: list[str] = []
-            for change in changes:
+            profile_key = f"NetzKonfig{cpu}.ubSchutzart"
+            ordered_changes = sorted(
+                changes,
+                key=lambda change: 0 if str(change.get("key", "")) == profile_key else 1,
+            )
+            seen_keys: set[str] = set()
+            for change in ordered_changes:
                 key = str(change.get("key", ""))
-                encode_network_protection_value(after, cpu, key, change.get("value", ""))
+                if key in seen_keys:
+                    raise ValueError(f"Netzschutzfeld {key!r} wurde mehrfach übergeben")
+                encode_network_protection_value(
+                    after,
+                    cpu,
+                    key,
+                    change.get("value", ""),
+                    block=block,
+                )
                 changed_keys.append(key)
-            if write_enabled and auth_level >= 0:
+                seen_keys.add(key)
+            if write_enabled and auth_level >= 0 and bytes(after) != before:
                 auth = self.service.authenticate(session, auth_level, pass4 or None)
                 if not auth.ok:
                     raise PermissionError(f"Auth-Level {auth_level} wurde nicht gewährt")
             audit = self.service.write_payload(
                 session,
-                NETWORK_PROTECTION_BLOCK,
+                block,
                 before,
                 bytes(after),
                 changed_keys,
@@ -2928,7 +3515,7 @@ class DachsWebApp:
         payload["critical"] = True
         payload["auth_level_requested"] = auth_level
         payload["auth_level_granted"] = getattr(auth, "granted_level", None)
-        self.store.audit(_now(), username, NETWORK_PROTECTION_BLOCK, payload)
+        self.store.audit(_now(), username, block, payload)
         return payload
 
     def write_power_target(self, username: str, value: object, auth_level: int, pass4: str) -> dict:
@@ -3059,7 +3646,7 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or 0)
-        if length > 1_000_000:
+        if length > MAX_JSON_BODY_BYTES:
             raise ValueError("request too large")
         raw = self.rfile.read(length) if length else b"{}"
         payload = json.loads(raw.decode("utf-8"))
@@ -3113,12 +3700,18 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     if principal is None:
                         return
                     return self._json(self.app.read_block(int(block_match.group(1))))
-                network_match = re.fullmatch(r"/api/v1/network-protection/([12])", path)
+                network_match = re.fullmatch(
+                    r"/api/v1/network-protection/([12])(?:/(16|20|21))?",
+                    path,
+                )
                 if network_match:
                     principal = self._require_api("read")
                     if principal is None:
                         return
-                    return self._json(self.app.read_network_protection(int(network_match.group(1))))
+                    return self._json(self.app.read_network_protection(
+                        int(network_match.group(1)),
+                        int(network_match.group(2) or NETWORK_PROTECTION_BLOCK),
+                    ))
                 if path == "/api/v1/history":
                     principal = self._require_api("history")
                     if principal is None:
@@ -3239,9 +3832,15 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     if user.get("role") != "admin":
                         return self._error(403, "admin role required")
                     return self._json({"items": self.app.store.audits()})
-                network_match = re.fullmatch(r"/api/network-protection/([12])", path)
+                network_match = re.fullmatch(
+                    r"/api/network-protection/([12])(?:/(16|20|21))?",
+                    path,
+                )
                 if network_match:
-                    return self._json(self.app.read_network_protection(int(network_match.group(1))))
+                    return self._json(self.app.read_network_protection(
+                        int(network_match.group(1)),
+                        int(network_match.group(2) or NETWORK_PROTECTION_BLOCK),
+                    ))
                 if path == "/api/history":
                     query = parse_qs(parsed.query)
                     block = validate_block(int(query.get("block", ["24"])[0]))
@@ -3277,7 +3876,30 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                 principal = self._require_api("write")
                 if principal is None:
                     return
-                return self._json(self.app.execute_api_set_value(principal, payload))
+                result = self.app.execute_api_set_value(principal, payload)
+                return self._json(result, status=200 if result.get("ok") else 502)
+            if path == "/api/backup/create":
+                if self._require() is None:
+                    return
+                return self._json(self.app.create_backup(payload.get("blocks")))
+            if path == "/api/backup/inspect":
+                if self._require() is None:
+                    return
+                return self._json(self.app.inspect_backup(payload.get("image")))
+            if path == "/api/backup/restore":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                return self._json(self.app.restore_backup(
+                    user["username"],
+                    payload.get("image"),
+                    payload.get("image_sha256"),
+                    payload.get("blocks"),
+                    payload.get("auth_level", -1),
+                    str(payload.get("pass4", "")),
+                    payload.get("write_enabled", False),
+                    str(payload.get("confirmation", "")),
+                ))
             if path == "/api/login":
                 result = self.app.login(str(payload.get("username", "")), str(payload.get("password", "")))
                 if result is None:
@@ -3402,10 +4024,13 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                 block = int(path.rsplit("/", 1)[1])
                 result = self.app.write_block(
                     user["username"], block, list(payload.get("changes", [])),
-                    int(payload.get("auth_level", -1)), str(payload.get("pass4", "")), bool(payload.get("write_enabled", False)),
+                    int(payload.get("auth_level", -1)), str(payload.get("pass4", "")), payload.get("write_enabled", False),
                 )
-                return self._json(result)
-            network_match = re.fullmatch(r"/api/network-protection/([12])", path)
+                return self._json(result, status=502 if result.get("error") else 200)
+            network_match = re.fullmatch(
+                r"/api/network-protection/([12])(?:/(16|20|21))?",
+                path,
+            )
             if network_match:
                 user = self._require(admin=True)
                 if user is None:
@@ -3414,9 +4039,10 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     user["username"], int(network_match.group(1)),
                     list(payload.get("changes", [])),
                     int(payload.get("auth_level", -1)), str(payload.get("pass4", "")),
-                    bool(payload.get("write_enabled", False)),
+                    payload.get("write_enabled", False),
+                    block=int(network_match.group(2) or NETWORK_PROTECTION_BLOCK),
                 )
-                return self._json(result)
+                return self._json(result, status=502 if result.get("error") else 200)
             return self._error(404, "unknown API path")
         except APIRequestConflictError as exc:
             self._error(409, str(exc))

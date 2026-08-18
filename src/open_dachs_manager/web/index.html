@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="open-dachs-base-path" content="__OPEN_DACHS_BASE_PATH__">
   <title>Open Dachs Manager</title>
-  <link rel="stylesheet" href="static/style.css?v=27">
+  <link rel="stylesheet" href="static/style.css?v=30">
 </head>
 <body>
   <div id="loginView" class="login-shell">
@@ -33,6 +33,7 @@
           <button class="tab-button active" data-view="overviewView">Übersicht</button>
           <button class="tab-button" data-view="monitorView">Überwachung</button>
           <button class="tab-button" data-view="maintenanceView">Wartung</button>
+          <button class="tab-button" data-view="backupView">Backup</button>
           <button class="tab-button" data-view="faultCatalogView">Fehlerkatalog</button>
           <button class="tab-button" data-view="settingsView">Einstellungen</button>
           <button class="tab-button system-admin" data-view="systemView" hidden>System</button>
@@ -640,6 +641,41 @@
         </section>
       </section>
 
+      <section id="backupView" class="app-view" hidden>
+        <header class="page-head">
+          <div><p class="eyebrow">MSR2 SICHERUNGSABBILD</p><h2>Backup &amp; Wiederherstellung</h2><p class="muted">Alle 36 Reglerblöcke auf CPU 0 sowie Netzschutz-Block 16 auf CPU 1 und CPU 2 sichern – vollständig oder als freie Auswahl. Ein Abbild wird vor einer Wiederherstellung vollständig geprüft; erst danach lassen sich enthaltene Ziele auswählen.</p></div>
+          <span class="status-pill neutral">CPU 0 / 1 / 2 · Blockweise</span>
+        </header>
+
+        <section class="panel backup-panel">
+          <div class="section-head backup-section-head">
+            <div><p class="eyebrow">BACKUP · NUR LESEN</p><h3>Regler- und Netzschutzblöcke sichern</h3><p class="muted">Das Backup liest ausschließlich die ausgewählten Blockziele und lädt anschließend ein geprüftes JSON-Abbild herunter. CPU und Blocknummer werden dabei eindeutig gespeichert. Einzelne Lesefehler bleiben im Abbild nachvollziehbar. Vollständige Abbilder können Anlagen-, Adress- und Kontaktdaten enthalten und gehören vertraulich aufbewahrt.</p></div>
+            <div class="backup-selection-actions"><button id="backupSelectAll" type="button">Alle Ziele auswählen</button><button id="backupSelectNone" type="button">Auswahl aufheben</button></div>
+          </div>
+          <div id="backupBlockList" class="backup-block-list" role="group" aria-label="CPU- und Blockziele für das Backup auswählen"></div>
+          <div class="backup-action-row"><span id="backupStatus" class="muted">Blockauswahl wird geladen …</span><button id="backupCreate" class="primary" type="button">Backup erstellen und herunterladen</button></div>
+        </section>
+
+        <section class="panel restore-panel backup-admin" hidden>
+          <div class="section-head backup-section-head">
+            <div><p class="eyebrow">WIEDERHERSTELLUNG · ADMIN</p><h3>Sicherungsabbild einlesen</h3><p class="muted">Zuerst wird die Datei ohne Reglerzugriff validiert. Danach wählst du gezielt die wiederherzustellenden Blöcke. Dry-Run bleibt der Standard.</p></div>
+            <label class="backup-file-picker">JSON-Abbild auswählen<input id="restoreFile" type="file" accept=".json,application/json"></label>
+          </div>
+          <div id="restoreImageStatus" class="restore-image-status muted">Noch kein Sicherungsabbild eingelesen.</div>
+          <div class="restore-warning"><strong>Rohblock-Wiederherstellung</strong><span>Ein ausgewähltes Ziel wird vollständig aus dem Abbild übernommen. Darin enthaltene Laufzustände, Zähler oder Zeitwerte können älter sein. Netzschutz-Ziele auf CPU 1 und CPU 2 sind besonders sicherheitsrelevant und werden eindeutig mit ihrer CPU angezeigt. Vor dem Live-Schreiben erfolgen erneutes Lesen, Authentifizierung, positive Bestätigung und bytegenaue Rückleseprüfung.</span></div>
+          <div class="backup-selection-actions restore-selection-actions"><button id="restoreSelectAll" type="button" disabled>Alle gültigen Ziele auswählen</button><button id="restoreSelectNone" type="button" disabled>Auswahl aufheben</button></div>
+          <div id="restoreBlockList" class="backup-block-list restore-block-list" role="group" aria-label="CPU- und Blockziele für die Wiederherstellung auswählen"><p class="muted">Nach dem Einlesen erscheinen hier die gültigen CPU-/Blockziele.</p></div>
+          <div class="restore-guard">
+            <label>Auth-Level<input id="restoreAuthLevel" type="number" min="0" max="255" value="4"></label>
+            <label>PW4 / Passwort-Override<input id="restorePass4" type="password" autocomplete="off" placeholder="leer = berechnete PW4 verwenden"></label>
+            <label class="check-label"><input id="restoreWriteEnabled" type="checkbox"> Hardware-Wiederherstellung aktivieren</label>
+            <label>Bestätigung<input id="restoreConfirmation" autocomplete="off" placeholder="SICHERUNG WIEDERHERSTELLEN"></label>
+          </div>
+          <div class="backup-action-row"><span id="restoreStatus" class="muted">Dry-Run: Es wird nichts geschrieben.</span><button id="restoreSubmit" class="primary" type="button" disabled>Wiederherstellung prüfen</button></div>
+          <div id="restoreResults" class="restore-results"></div>
+        </section>
+      </section>
+
       <section id="faultCatalogView" class="app-view" hidden>
         <header class="page-head">
           <div><p class="eyebrow">FEHLERKATALOG</p><h2>Servicecodes und Klartexte</h2><p class="muted">Eigener Open-Dachs-Katalog mit deutschen Meldungstiteln. Der lokale Diagnosekatalog auf dem Pi ergänzt bei vorhandenen Daten Ursachen und Maßnahmen.</p></div>
@@ -655,9 +691,9 @@
       </section>
 
       <section id="settingsView" class="app-view" hidden>
-        <header class="page-head"><div><p class="eyebrow">MSR2 REGISTER</p><h2>Einstellungen und Register</h2><p class="muted">Regler-CPU und beide Netzüberwachungs-CPUs besitzen getrennte Blockräume. Änderungen werden erst nach Admin-Login, Auth-Level und explizitem Hardware-Schalter geschrieben.</p></div><span id="settingsRoleHint" class="status-pill neutral"></span></header>
+        <header class="page-head"><div><p class="eyebrow">MSR2 REGISTER</p><h2>Einstellungen und Register</h2><p class="muted">Regler-CPU und beide Netzüberwachungs-CPUs besitzen getrennte Blockräume. Auf CPU 1 und CPU 2 sind Block 16 und der durch Originaldienst 21 belegte Block 20 geschützt schreibbar; Block 21 bleibt strikt nur lesbar. Jede freigegebene Änderung bleibt an Admin-Login, Auth-Level und den expliziten Hardware-Schalter gebunden.</p></div><span id="settingsRoleHint" class="status-pill neutral"></span></header>
         <section id="writeControls" class="panel write-controls" hidden>
-          <div class="write-intro"><p class="eyebrow">SCHREIBSCHUTZ</p><h3>Admin-Schreibfreigabe</h3><p class="muted">Ohne Haken bleibt der Vorgang ein Dry-Run. Beim echten Schreiben erfolgt Read → Validate → Auth → Write → Readback.</p></div>
+          <div class="write-intro"><p class="eyebrow">SCHREIBSCHUTZ</p><h3>Admin-Schreibfreigabe</h3><p class="muted">Ohne Haken bleibt der Vorgang ein Dry-Run. Beim echten Schreiben folgen Lesen, Kodierung, Authentifizierung, bytegenauer Ausgangszustandsvergleich, Schreibdienst, positives ACK und Rückleseprüfung; Block 20 verwendet Dienst 21 und verlangt einen exakten Vollblockvergleich.</p></div>
           <label>Auth-Level<input id="authLevel" type="number" min="0" max="255" value="4"></label>
           <label>PW4 / Passwort-Override<input id="pass4" type="password" autocomplete="off" placeholder="leer = berechnete PW4 verwenden"></label>
           <label class="check-label"><input id="writeEnabled" type="checkbox"> Hardware-Schreiben aktivieren</label>
@@ -731,29 +767,41 @@
   <div id="changelogModal" class="modal-backdrop" hidden>
     <section class="modal-card changelog-modal" role="dialog" aria-modal="true" aria-labelledby="changelogTitle" aria-describedby="changelogIntro">
       <div class="section-head changelog-head">
-        <div><p class="eyebrow">OPEN DACHS MANAGER</p><h3 id="changelogTitle">Änderungsverlauf</h3><p id="changelogIntro" class="muted">Was sich seit der ersten öffentlichen Beta direkt an der Anlage geändert hat.</p></div>
+        <div><p class="eyebrow">OPEN DACHS MANAGER</p><h3 id="changelogTitle">Änderungsverlauf</h3><p id="changelogIntro" class="muted">Was sich seit der ersten öffentlichen Vorabversion am Open Dachs Manager geändert hat.</p></div>
         <button id="changelogClose" class="icon-button" type="button" aria-label="Änderungsverlauf schließen">×</button>
       </div>
       <div class="changelog-list">
         <article class="changelog-entry current">
-          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-08-13">13.08.2026</time><span>Aktuell</span></header>
-          <ul><li>Patch-Release mit einer einzigen zentralen Laufzeitversion für CLI, Healthcheck, Serverkennung, Oberfläche und Wartungsberichte.</li><li>Der bereits geprüfte Funktionsstand von 1.1.0 bleibt unverändert; Protokoll, Mapping, Schreibschutz, API und Historisierung erhalten keine neuen Semantiken.</li><li>Die Aktualisierung selbst öffnet keine serielle Schreibsitzung und ändert keine Reglerwerte.</li></ul>
+          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-08-17">17.08.2026</time><span>Aktuell</span></header>
+          <ul><li>Block 16 mit 18 Feldern und Block 20 mit 39 Feldern sind auf beiden Netzüberwachungs-CPUs schreibbar; das sind insgesamt 114 eindeutig adressierte Feldinstanzen.</li><li>Die originale Layout-4-Datenzuordnung belegt für Block 20 den Vollblock-Schreibdienst 21. Lesen, Kodierung, Authentifizierung, bytegenauer Ausgangszustandsvergleich, positive Bestätigung und exakte Vollblock-Rückleseprüfung bleiben zwingend.</li><li>Mehrdeutige Anzeigen werden nicht geraten und können nur ausdrücklich als <code>raw:&lt;Wert&gt;</code> eingegeben werden. Die Kodierung wurde schreibfrei geprüft; ein physischer Block-20-Schreibvorgang an der Anlage steht noch aus.</li><li>Block 21 bleibt ohne Schreibdienst strikt nur lesbar. Block 20 bleibt bis zur realen Abnahme außerhalb von Sicherung und Wiederherstellung; deren Umfang bleibt bei 38 Zielen.</li><li>Weitere Standardblöcke sind in den geprüften Definitionen nicht enthalten. Die zusätzlich gelesenen Diagnosedienste 17 und 18 bleiben mangels belegter Feldstruktur reine Rohdaten.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.3.0</strong><time datetime="2026-08-17">17.08.2026</time></header>
+          <ul><li>Beide Netzüberwachungs-CPUs zeigen jetzt getrennt Block 16 (Legacy-Schutz), Block 20 (39 Schutzparameter) und Block 21 (28 dreiphasige Live- und Diagnosewerte).</li><li>Die 59- beziehungsweise 56-Byte-Layouts werden einschließlich Little Endian, vorzeichenbehafteter Werte und profilabhängiger Abschaltzeiten quellentreu dekodiert.</li><li>Block 20 und 21 sind bewusst nur lesbar und werden vor serieller Sitzung oder Authentifizierung gegen Änderungen gesperrt; der bestehende Block-16-Schreibablauf bleibt unverändert.</li><li>Backup und Wiederherstellung behalten ihre 38 geprüften Ziele und behandeln die neuen Anzeige- und Liveblöcke nicht als restaurierbare Konfiguration.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.2.1</strong><time datetime="2026-08-16">16.08.2026</time></header>
+          <ul><li>Backup und Wiederherstellung umfassen neben den 36 Reglerblöcken auch Block 16 beider Netzschutz-CPUs als eindeutig adressierte CPU-/Block-Ziele.</li><li>Abbilder binden Ziel, Payload und relevante Metadaten per SHA-256; vorhandene CPU-0-Abbilder aus 1.2.0 bleiben kompatibel.</li><li>Live-Wiederherstellung bleibt an Pack- und Reglerprüfung, Sicherheitsabbild, Authentifizierung, positives ACK und vollständige Rückleseprüfung gebunden.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.1.1</strong><time datetime="2026-08-13">13.08.2026</time></header>
+          <ul><li>Wartungsversion mit zentral verwalteter Versionsnummer für Kommandozeile, HTTP-Zustandsprüfung, Serverkennung, Oberfläche und Wartungsberichte.</li><li>Der technische und der in der Oberfläche angezeigte Änderungsverlauf sind vollständig deutsch formuliert.</li><li>Das Verhalten von Protokoll, Feldzuordnung, Schreibschutz, API und Historisierung bleibt gegenüber 1.1.0 unverändert.</li><li>Die Aktualisierung selbst öffnet keine serielle Schreibsitzung und ändert keine Reglerwerte.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.1.0</strong><time datetime="2026-08-10">10.08.2026</time></header>
-          <ul><li>Eigener Admin-Hauptbereich „System“ für Benutzer, API-Tokens und den Wartungs-Testmodus.</li><li>Token-geschützte EDOMI-API mit Lese-, Historien- und serverseitig kontrollierten Schreibaktionen.</li><li>Alle Livewerte bleiben 24 Stunden roh; Motorlauf sowie je eine Stunde davor und danach bleiben hochauflösend, übriger Stillstand wird verdichtet.</li><li>Block-20-Zeitsync, Kraftstofftexte und Abschaltgründe werden anhand der Originalstrukturen korrekt dekodiert.</li></ul>
+          <ul><li>Eigener, nur für Administratoren sichtbarer Hauptbereich „System“ für Benutzer, API-Zugänge und den Wartungs-Testmodus.</li><li>Durch API-Zugangsschlüssel geschützte EDOMI-API mit Lese-, Historien- und serverseitig kontrollierten Schreibaktionen.</li><li>Alle laufend erfassten Messwerte werden 24 Stunden in voller Auflösung gespeichert; Motorlauf sowie je eine Stunde davor und danach bleiben hochauflösend, übriger Stillstand wird verdichtet.</li><li>Block-20-Zeitsynchronisierung, Kraftstofftexte und Abschaltgründe werden anhand der Originalstrukturen korrekt dekodiert.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.0.1</strong><time datetime="2026-08-09">09.08.2026</time></header>
-          <ul><li>21 ausgewählte Werte aus Block 22/24 werden bei jedem schnellen Livezyklus gemeinsam als ein kompakter Historien-Snapshot gespeichert.</li><li>Der 0,75-s-Takt ist jetzt der Zielabstand vollständiger Zyklen; statische Block-20-Werte laufen langsam.</li><li>Feste Textfelder behalten beim Schreiben ihre vorhandene Space- oder NUL-Paddingart bytegetreu bei.</li></ul>
+          <ul><li>21 ausgewählte Werte aus Block 22/24 werden bei jedem schnellen Messzyklus gemeinsam als ein kompakter Historiendatensatz gespeichert.</li><li>Der 0,75-s-Takt ist jetzt der Zielabstand vollständiger Zyklen; statische Block-20-Werte laufen langsam.</li><li>Feste Textfelder behalten beim Schreiben ihre vorhandene Leerzeichen- oder NUL-Auffüllung bytegetreu bei.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.0</strong><time datetime="2026-08-09">09.08.2026</time></header>
-          <ul><li>Erster stabiler öffentlicher 1.0-Stand mit der vollständig integrierten Bedien-, Überwachungs- und Wartungsoberfläche.</li><li>Serielle Schreibsicherheit bleibt unverändert über Freigabe, Authentifizierung, ACK, Readback und Audit abgesichert.</li></ul>
+          <ul><li>Erster stabiler öffentlicher 1.0-Stand mit der vollständig integrierten Bedien-, Überwachungs- und Wartungsoberfläche.</li><li>Serielle Schreibsicherheit bleibt unverändert über Freigabe, Authentifizierung, positive Bestätigung (ACK), Rückleseprüfung und Prüfprotokoll abgesichert.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 0.9.10</strong><time datetime="2026-08-09">09.08.2026</time></header>
-          <ul><li>Motorbild nach der charakteristischen kompakten Dachs-Bauform neu erstellt.</li><li>Schwarzer Einzylindermotor mit offener Schwungscheibe und silbernen Seitendeckeln in beiden HMI-Ansichten.</li></ul>
+          <ul><li>Motorbild nach der charakteristischen kompakten Dachs-Bauform neu erstellt.</li><li>Schwarzer Einzylindermotor mit offener Schwungscheibe und silbernen Seitendeckeln in beiden Bedienansichten.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 0.9.9</strong><time datetime="2026-08-08">08.08.2026</time></header>
@@ -765,11 +813,11 @@
         </article>
         <article class="changelog-entry">
           <header><strong>V3 0.9.7</strong><time datetime="2026-08-08">08.08.2026</time></header>
-          <ul><li>Technische Ansicht neu ausgerichtet: jede Beschriftung steht jetzt eindeutig in derselben Zeile wie ihr Livewert.</li><li>Kapseltemperatur zum Regler verschoben, Kühlkreis und Netzwerte fachlich eindeutiger beschriftet.</li><li>Versionsnummer öffnet diesen Änderungsverlauf direkt in der Website.</li></ul>
+          <ul><li>Technische Ansicht neu ausgerichtet: jede Beschriftung steht jetzt eindeutig in derselben Zeile wie ihr aktueller Wert.</li><li>Kapseltemperatur zum Regler verschoben, Kühlkreis und Netzwerte fachlich eindeutiger beschriftet.</li><li>Versionsnummer öffnet diesen Änderungsverlauf direkt in der Weboberfläche.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 0.9.6</strong><time datetime="2026-08-08">08.08.2026</time></header>
-          <ul><li>Fehlerkatalog als eigener Haupt-Tab.</li><li>Aktive Anlagenmeldung springt direkt zum passenden Fehlercode.</li></ul>
+          <ul><li>Fehlerkatalog als eigener Hauptbereich.</li><li>Aktive Anlagenmeldung springt direkt zum passenden Fehlercode.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 0.9.5</strong><time datetime="2026-08-08">08.08.2026</time></header>
@@ -777,21 +825,21 @@
         </article>
         <article class="changelog-entry">
           <header><strong>V3 0.9.4</strong><time datetime="2026-08-08">08.08.2026</time></header>
-          <ul><li>Sollwert-Readback prüft gezielt die geschriebenen Bytes und toleriert gleichzeitig laufende Reglerwerte.</li><li>Bis zu vier Readback-Versuche mit vollständigem Audit.</li></ul>
+          <ul><li>Die Rückleseprüfung kontrolliert gezielt die geschriebenen Sollwert-Bytes und wird durch gleichzeitig veränderliche Reglerwerte nicht gestört.</li><li>Bis zu vier Rückleseversuche mit vollständigem Prüfprotokoll.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 0.9.3</strong><time datetime="2026-08-08">08.08.2026</time></header>
-          <ul><li>Wartungsrestzeit im Kopf und Wirkleistung Ist/Soll ganz oben.</li><li>Dashboard-Kacheln frei auswählen, hinzufügen und sortieren.</li></ul>
+          <ul><li>Wartungsrestzeit im Kopf und Wirkleistung Ist/Soll ganz oben.</li><li>Übersichtskacheln frei auswählen, hinzufügen und sortieren.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 0.9.2</strong><time datetime="2026-08-08">08.08.2026</time></header>
           <ul><li>Offene und abgeschlossene Wartungsberichte nach Sicherheitsabfrage löschbar.</li></ul>
         </article>
       </div>
-      <footer class="changelog-footer"><span>Vollständige technische Details stehen weiterhin in <code>CHANGELOG.md</code>.</span><button id="changelogDone" class="primary" type="button">Schließen</button></footer>
+      <footer class="changelog-footer"><span>Der vollständige technische Änderungsverlauf steht in <code>CHANGELOG.md</code>.</span><button id="changelogDone" class="primary" type="button">Schließen</button></footer>
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="static/app.js?v=34"></script>
+  <script src="static/app.js?v=38"></script>
 </body>
 </html>

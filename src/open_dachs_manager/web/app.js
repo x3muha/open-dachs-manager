@@ -23,6 +23,7 @@ const state = {
   maintenance: { reports: [], current: null, autosaveTimer: null },
   dashboard: { settings: null, editCards: [], draggedIndex: null },
   system: { selectedTab: "users", users: [], tokens: [], apiSettings: null },
+  backup: { image: null, inspection: null, busy: false, importGeneration: 0 },
   serviceCatalogTimer: null,
   serviceCatalogLoaded: false,
   changelogTrigger: null,
@@ -34,6 +35,8 @@ const $ = (id) => document.getElementById(id);
 const loginView = $("loginView");
 const appView = $("appView");
 const BASE_PATH = document.querySelector('meta[name="open-dachs-base-path"]')?.content || "";
+const BACKUP_MAX_FILE_BYTES = 1024 * 1024;
+const RESTORE_CONFIRMATION = "SICHERUNG WIEDERHERSTELLEN";
 
 function appUrl(path) {
   const suffix = String(path || "").startsWith("/") ? String(path || "") : `/${path || ""}`;
@@ -64,14 +67,38 @@ async function api(path, options = {}) {
     showLogin();
     throw new Error("Anmeldung erforderlich");
   }
-  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(payload.error || `HTTP ${response.status}`);
+    error.payload = payload;
+    error.status = response.status;
+    throw error;
+  }
   return payload;
 }
 
 function showLogin(message = "") {
   state.user = null;
+  state.authPreview = null;
+  state.backup.image = null;
+  state.backup.inspection = null;
+  state.backup.busy = false;
+  state.backup.importGeneration += 1;
   if (state.refreshTimer) clearInterval(state.refreshTimer);
   if (state.chartTimer) clearInterval(state.chartTimer);
+  if ($("writeEnabled")) $("writeEnabled").checked = false;
+  if ($("pass4")) $("pass4").value = "";
+  if ($("authPreviewSerial")) renderAuthPreview(null);
+  if ($("writeGuardStatus")) updateWriteGuard();
+  if ($("restoreFile")) $("restoreFile").value = "";
+  if ($("restorePass4")) $("restorePass4").value = "";
+  if ($("restoreConfirmation")) $("restoreConfirmation").value = "";
+  if ($("restoreWriteEnabled")) $("restoreWriteEnabled").checked = false;
+  if ($("restoreBlockList")) $("restoreBlockList").innerHTML = `<p class="muted">Noch kein geprüftes Backup-Image geladen.</p>`;
+  if ($("restoreResults")) $("restoreResults").innerHTML = "";
+  if ($("restoreSelectAll")) $("restoreSelectAll").disabled = true;
+  if ($("restoreSelectNone")) $("restoreSelectNone").disabled = true;
+  if ($("restoreSubmit")) $("restoreSubmit").disabled = true;
+  if ($("restoreImageStatus")) setBackupStatus("restoreImageStatus", "Noch kein Backup-Image geprüft.", "neutral");
   loginView.hidden = false;
   appView.hidden = true;
   $("loginError").textContent = message;
@@ -95,6 +122,7 @@ function showApp(user) {
   $("sootFilterFullTemperature").disabled = !isAdmin;
   $("dashboardEdit").hidden = !isAdmin;
   document.querySelectorAll(".maintenance-admin").forEach((element) => { element.hidden = !isAdmin; });
+  document.querySelectorAll(".backup-admin").forEach((element) => { element.hidden = !isAdmin; });
   $("settingsRoleHint").textContent = isAdmin ? "Admin: lesen und schreiben" : "Gast: nur lesen";
   $("settingsRoleHint").className = `status-pill ${isAdmin ? "ok" : "neutral"}`;
   if (!isAdmin && state.selectedView === "systemView") showView("overviewView");
@@ -123,6 +151,8 @@ async function boot() {
     state.sootFilterSettings = await api("/api/settings/soot-filter");
     renderSootFilterSettings();
     renderRegisterTabs();
+    renderBackupBlockList();
+    updateRestoreMode();
     if (session.user.role === "admin") await refreshMaintenanceMode();
     await refreshLive();
     await refreshMaintenance(false);
@@ -712,6 +742,10 @@ function showView(viewId) {
   if (viewId === "maintenanceView") refreshMaintenance(true);
   if (viewId === "faultCatalogView" && !state.serviceCatalogLoaded) refreshServiceCatalog();
   if (viewId === "systemView") refreshSystemView();
+  if (viewId === "backupView") {
+    renderBackupBlockList();
+    updateRestoreMode();
+  }
 }
 
 function maintenanceNumber(value, suffix = "") {
@@ -940,30 +974,44 @@ function renderRegisterTabs() {
       : `${visibleFields} Felder`;
     return `<button role="tab" data-cpu="0" data-block="${block.block}" class="${state.selectedCpu === 0 && block.block === state.selectedBlock ? "active" : ""}">${block.block} · ${escapeHtml(block.name)} <small>(${count})</small></button>`;
   }).join("");
-  const networkTabs = (state.schema?.network_protection || []).map((target) => (
-    `<button role="tab" data-cpu="${target.cpu}" data-block="${target.block}" class="critical-tab ${state.selectedCpu === target.cpu && state.selectedBlock === target.block ? "active" : ""}">CPU ${target.cpu} · Netzschutz <small>(${(target.fields || []).length} Felder)</small></button>`
-  )).join("");
+  const networkTabs = (state.schema?.network_protection || []).map((target) => {
+    const readOnly = target.writable === false ? " · nur lesen" : "";
+    const itemLabel = target.live_values ? "Werte" : "Felder";
+    return `<button role="tab" data-cpu="${target.cpu}" data-block="${target.block}" class="critical-tab ${state.selectedCpu === target.cpu && state.selectedBlock === target.block ? "active" : ""}">CPU ${target.cpu} · B${target.block} · ${escapeHtml(target.tab_label || "Netzschutz")} <small>(${(target.fields || []).length} ${itemLabel}${readOnly})</small></button>`;
+  }).join("");
   $("settingsTabs").innerHTML = regulatorTabs + networkTabs;
 }
 
 async function loadBlock(block, cpu = 0) {
-  state.selectedBlock = block;
-  state.selectedCpu = Number(cpu);
-  const targetText = state.selectedCpu ? `CPU ${state.selectedCpu}, Block ${block}` : `Block ${block}`;
+  const requestedBlock = Number(block);
+  const requestedCpu = Number(cpu);
+  state.selectedBlock = requestedBlock;
+  state.selectedCpu = requestedCpu;
+  const requestedTarget = requestedCpu
+    ? (state.schema?.network_protection || []).find((item) => Number(item.cpu) === requestedCpu && Number(item.block) === requestedBlock)
+    : null;
+  $("saveBlockButton").hidden = state.user?.role !== "admin" || requestedTarget?.writable === false;
+  const targetText = requestedCpu ? `CPU ${requestedCpu}, Block ${requestedBlock}` : `Block ${requestedBlock}`;
   $("blockReadStatus").textContent = `Lese ${targetText} …`;
   $("settingsTabs").querySelectorAll("button").forEach((button) => button.classList.toggle(
     "active",
-    Number(button.dataset.cpu || 0) === state.selectedCpu && Number(button.dataset.block) === block,
+    Number(button.dataset.cpu || 0) === requestedCpu && Number(button.dataset.block) === requestedBlock,
   ));
   try {
-    state.block = await api(state.selectedCpu ? `/api/network-protection/${state.selectedCpu}` : `/api/block/${block}`);
-    $("selectedBlockEyebrow").textContent = state.selectedCpu ? `CPU ${state.selectedCpu} · BLOCK ${block} · NETZSCHUTZ` : `BLOCK ${block}`;
+    const loaded = await api(requestedCpu ? `/api/network-protection/${requestedCpu}/${requestedBlock}` : `/api/block/${requestedBlock}`);
+    if (state.selectedCpu !== requestedCpu || state.selectedBlock !== requestedBlock) return;
+    state.block = loaded;
+    $("selectedBlockEyebrow").textContent = requestedCpu ? `CPU ${requestedCpu} · BLOCK ${requestedBlock} · NETZSCHUTZ` : `BLOCK ${requestedBlock}`;
     $("selectedBlockTitle").textContent = state.block.name;
     $("blockReadStatus").textContent = state.block.ok ? `OK · ${state.block.rtt_ms} ms` : `Fehler: ${state.block.status}`;
-    $("saveBlockButton").hidden = state.user?.role !== "admin";
+    $("saveBlockButton").hidden = state.user?.role !== "admin" || state.block.writable === false;
     document.querySelector(".settings-panel")?.classList.toggle("critical-settings", Boolean(state.block.critical));
     renderFields();
-  } catch (error) { $("blockReadStatus").textContent = error.message; }
+  } catch (error) {
+    if (state.selectedCpu === requestedCpu && state.selectedBlock === requestedBlock) {
+      $("blockReadStatus").textContent = error.message;
+    }
+  }
 }
 
 function renderMessageHistory() {
@@ -1118,10 +1166,17 @@ function renderRunHistory() {
 
 function renderFieldEditor(field, admin) {
   const value = String(field.edit_value ?? field.value ?? "");
+  const rawValue = String(field.raw ?? "");
   const choices = Array.isArray(field.choices) ? field.choices : [];
   const editorId = `field-${encodeURIComponent(field.key)}`;
   if (!choices.length) {
-    return `<input id="${editorId}" data-key="${escapeHtml(field.key)}" data-baseline="${escapeHtml(value)}" value="${escapeHtml(value)}" inputmode="decimal" ${admin ? "" : "disabled"}>`;
+    const rawModeAvailable = state.selectedCpu > 0 && state.selectedBlock === 20 && rawValue !== "";
+    const editor = `<input id="${editorId}" data-key="${escapeHtml(field.key)}" data-baseline="${escapeHtml(value)}" data-raw-baseline="${escapeHtml(rawValue)}" data-raw-mode="false" value="${escapeHtml(value)}" inputmode="decimal" ${admin ? "" : "disabled"}>`;
+    if (!rawModeAvailable) return editor;
+    return `<div class="field-number-editor">
+      ${editor}
+      <label class="raw-mode-toggle"><input type="checkbox" data-raw-mode-toggle ${admin ? "" : "disabled"}> Rohwert bearbeiten (${escapeHtml(rawValue)})</label>
+    </div>`;
   }
   const knownValue = choices.some((choice) => String(choice.value) === value);
   const options = choices.map((choice) => {
@@ -1141,7 +1196,7 @@ function renderFieldEditor(field, admin) {
 function renderFieldHelp(field) {
   const notes = [];
   if (field.help) notes.push(field.help);
-  if (Array.isArray(field.choices) && field.choices.length) notes.push("Bekannte Auswahlwerte; die manuelle Rohwert-Eingabe bleibt verfügbar.");
+  if (field.write !== false && Array.isArray(field.choices) && field.choices.length) notes.push("Bekannte Auswahlwerte; die manuelle Rohwert-Eingabe bleibt verfügbar.");
   if (!field.help && (field.min !== null && field.min !== undefined || field.max !== null && field.max !== undefined)) {
     const lower = field.min !== null && field.min !== undefined ? field.min : "offen";
     const upper = field.max !== null && field.max !== undefined ? field.max : "offen";
@@ -1159,6 +1214,34 @@ function bindChoiceEditors(container) {
       if (!rawInput.hidden && !rawInput.disabled) rawInput.focus();
     });
   });
+}
+
+function bindRawEditors(container) {
+  container.querySelectorAll("[data-raw-mode-toggle]").forEach((toggle) => {
+    const wrapper = toggle.closest(".field-number-editor");
+    const editor = wrapper?.querySelector("[data-key]");
+    if (!editor) return;
+    toggle.addEventListener("change", () => {
+      if (toggle.checked) {
+        editor.dataset.displayDraft = editor.value;
+        editor.value = editor.dataset.rawDraft ?? editor.dataset.rawBaseline ?? "";
+        editor.dataset.rawMode = "true";
+        editor.inputMode = "text";
+        if (!editor.disabled) editor.focus();
+      } else {
+        editor.dataset.rawDraft = editor.value;
+        editor.value = editor.dataset.displayDraft ?? editor.dataset.baseline ?? "";
+        editor.dataset.rawMode = "false";
+        editor.inputMode = "decimal";
+      }
+    });
+  });
+}
+
+function renderReadOnlyFieldValue(field) {
+  const value = field.value === null || field.value === undefined ? "—" : field.value;
+  const raw = field.raw === null || field.raw === undefined ? "—" : field.raw;
+  return `<div class="network-readonly-value"><strong>${escapeHtml(value)}${field.unit ? ` ${escapeHtml(field.unit)}` : ""}</strong><span>Rohwert ${escapeHtml(raw)}</span></div>`;
 }
 
 function renderFields() {
@@ -1189,29 +1272,47 @@ function renderFields() {
   }
   const fields = (state.block?.fields || []).filter((field) => state.showReserved || !field.reserved);
   const critical = Boolean(state.block?.critical);
-  const warning = critical ? `<div class="network-protection-warning"><strong>NETZSCHUTZ · CPU ${state.selectedCpu} · BLOCK 16</strong><span>Besonders sicherheitsrelevante Einstellungen. Die rote Markierung schützt vor Verwechslung mit normalen Reglerfeldern; Schreiben erfolgt wie bei allen Registern nur mit Admin-Haken, Auth, ACK und Readback.</span></div>` : "";
-  $("settingsFields").innerHTML = warning + fields.map((field) => `<div class="register-field ${admin ? "" : "readonly"} ${critical || field.critical ? "critical-field" : ""}">
+  const readOnlyTarget = state.block?.writable === false;
+  const warningText = readOnlyTarget
+    ? `${state.block.read_only_reason || "Dieser Block ist nur lesbar."} Die Anzeige löst weder Authentifizierung noch ein Schreibtelegramm aus.`
+    : state.selectedBlock === 20
+      ? "Besonders sicherheitsrelevante Schutzkonfiguration. Der originale Vollblock-Schreibdienst ist belegt, am aktuellen Gerät aber noch nicht durch einen Live-Write erprobt. Schreiben erfolgt nur mit Admin-Haken, Auth, bytegenauem CAS, ACK und vollständigem Readback; für exakte Expertenwerte gibt es je Feld den Rohwert-Schalter."
+      : "Besonders sicherheitsrelevante Einstellungen. Die rote Markierung schützt vor Verwechslung mit normalen Reglerfeldern; Schreiben erfolgt wie bei allen Registern nur mit Admin-Haken, Auth, ACK und Readback.";
+  const warning = critical ? `<div class="network-protection-warning"><strong>NETZSCHUTZ · CPU ${state.selectedCpu} · BLOCK ${state.selectedBlock}${readOnlyTarget ? " · NUR LESEN" : ""}</strong><span>${escapeHtml(warningText)}</span></div>` : "";
+  $("settingsFields").innerHTML = warning + fields.map((field) => `<div class="register-field ${admin && field.write !== false ? "" : "readonly"} ${critical || field.critical ? "critical-field" : ""}">
     <div class="register-field-head"><label for="field-${encodeURIComponent(field.key)}">${escapeHtml(field.label || field.key)}</label><small>${escapeHtml(field.type || "")} · ${field.size} B</small></div>
-    ${renderFieldEditor(field, admin)}
+    ${field.write === false ? renderReadOnlyFieldValue(field) : renderFieldEditor(field, admin)}
     ${renderFieldHelp(field)}
-    <div class="field-meta">${escapeHtml(field.key)} · Offset ${field.offset ?? "?"} · ${escapeHtml(field.unit || "")}</div>
+    <div class="field-meta">${escapeHtml(field.key)} · Offset ${field.offset ?? "?"} · ${escapeHtml(field.unit || "")}${state.selectedCpu > 0 && field.raw !== null && field.raw !== undefined ? ` · Rohwert ${escapeHtml(field.raw)}` : ""}</div>
   </div>`).join("") || `<p class="muted">Keine dekodierten Felder für diesen Block.</p>`;
   bindChoiceEditors($("settingsFields"));
+  bindRawEditors($("settingsFields"));
 }
 
 async function saveBlock() {
   if (state.user?.role !== "admin" || !state.block) return;
+  if (state.block.writable === false) {
+    return toast(`CPU ${state.selectedCpu}, Block ${state.selectedBlock} ist nur lesbar.`);
+  }
   const changes = [];
   $("settingsFields").querySelectorAll("[data-key]").forEach((editor) => {
     let value = editor.value;
-    if (editor.dataset.editor === "choice" && value === "__raw__") {
-      value = editor.closest(".field-choice-editor")?.querySelector("[data-choice-raw]")?.value ?? "";
+    let compareValue = value;
+    if (editor.dataset.rawMode === "true") {
+      compareValue = value;
+      value = `raw:${compareValue}`;
+      if (String(compareValue) !== String(editor.dataset.rawBaseline)) changes.push({ key: editor.dataset.key, value });
+      return;
     }
-    if (String(value) !== String(editor.dataset.baseline)) changes.push({ key: editor.dataset.key, value });
+    if (editor.dataset.editor === "choice" && value === "__raw__") {
+      compareValue = editor.closest(".field-choice-editor")?.querySelector("[data-choice-raw]")?.value ?? "";
+      value = `raw:${compareValue}`;
+    }
+    if (String(compareValue) !== String(editor.dataset.baseline)) changes.push({ key: editor.dataset.key, value });
   });
   if (!changes.length) return toast("Keine Änderungen vorbereitet.");
   try {
-    const endpoint = state.selectedCpu ? `/api/network-protection/${state.selectedCpu}` : `/api/block/${state.selectedBlock}`;
+    const endpoint = state.selectedCpu ? `/api/network-protection/${state.selectedCpu}/${state.selectedBlock}` : `/api/block/${state.selectedBlock}`;
     const result = await api(endpoint, { method:"POST", body:JSON.stringify({
       changes,
       auth_level: Number($("authLevel").value || -1),
@@ -1219,10 +1320,27 @@ async function saveBlock() {
       write_enabled: $("writeEnabled").checked,
     }) });
     const target = state.selectedCpu ? `Netzschutz CPU ${state.selectedCpu}` : `Block ${state.selectedBlock}`;
-    toast(result.written ? `${target} geschrieben und Readback bestätigt.` : `Dry-Run für ${target} gespeichert – Hardware wurde nicht geändert.`);
+    if (result.written && result.readback_ok) {
+      toast(`${target} geschrieben und Readback bestätigt.`);
+    } else if (result.dry_run) {
+      toast(`Dry-Run für ${target} gespeichert – Hardware wurde nicht geändert.`);
+    } else if (result.readback_ok && result.write_attempted === false) {
+      toast(`${target} war bereits unverändert; kein Auth- oder Schreibtelegramm gesendet.`);
+    } else if (result.write_attempted) {
+      toast(`ACHTUNG: Schreibtelegramm für ${target} wurde gesendet, aber nicht sicher bestätigt. Zielzustand prüfen!`, "error");
+    } else {
+      toast(`Schreiben von ${target} fehlgeschlagen; es wurde kein bestätigter Zielzustand erreicht.`, "error");
+    }
     await loadBlock(state.selectedBlock, state.selectedCpu);
     await refreshAudit();
-  } catch (error) { toast(error.message); }
+  } catch (error) {
+    const audit = error.payload?.audit || error.payload;
+    if (audit?.write_attempted && !audit?.readback_ok) {
+      toast(`ACHTUNG: Schreibtelegramm wurde gesendet, aber nicht sicher bestätigt. Zielzustand prüfen! ${error.message}`, "error");
+    } else {
+      toast(error.message, "error");
+    }
+  }
 }
 
 function updateWriteGuard() {
@@ -1786,21 +1904,498 @@ function historySelection() {
   return { query, window: { start, end }, label: `${new Date(start).toLocaleString("de-DE")} bis ${new Date(end).toLocaleString("de-DE")}` };
 }
 
+function setBackupStatus(id, message, tone = "neutral") {
+  const element = $(id);
+  if (!element) return;
+  element.textContent = message;
+  element.classList.remove("backup-status-ok", "backup-status-warn", "backup-status-error", "backup-status-neutral");
+  element.classList.add("backup-status", `backup-status-${tone}`);
+}
+
+function backupSchemaBlocks() {
+  const seen = new Set();
+  const regulator = (state.schema?.blocks || []).map((item) => ({ ...item, cpu: 0 }));
+  const networkProtection = (state.schema?.network_protection || [])
+    .filter((item) => item.backup_eligible !== false);
+  return [...regulator, ...networkProtection].map((item) => {
+    const cpu = Number(item.cpu ?? 0);
+    const block = Number(item.block);
+    return {
+      ...item,
+      cpu,
+      block,
+      target_key: item.target_key || `${cpu}:${block}`,
+      name: item.name || (cpu ? `Netzschutz · Überwachungs-CPU ${cpu}` : `Block ${block}`),
+    };
+  }).filter((item) => {
+    if (!Number.isInteger(item.cpu) || item.cpu < 0 || item.cpu > 2) return false;
+    if (!Number.isInteger(item.block) || item.block < 0 || item.block > 255 || seen.has(item.target_key)) return false;
+    seen.add(item.target_key);
+    return true;
+  }).sort((left, right) => left.cpu - right.cpu || left.block - right.block);
+}
+
+function blockChoiceMarkup(item, kind, checked = false, disabled = false) {
+  const cpu = Number(item.cpu ?? 0);
+  const targetKey = item.target_key || `${cpu}:${item.block}`;
+  const label = item.name || item.block_name || `Block ${item.block}`;
+  const problem = item.error ? `<small class="backup-block-error">${escapeHtml(item.error)}</small>` : "";
+  return `<label class="backup-block-choice ${cpu ? "backup-network-choice" : ""} ${disabled ? "disabled" : ""}">
+    <input type="checkbox" data-${kind}-block data-cpu="${cpu}" data-block="${item.block}" data-target-key="${escapeHtml(targetKey)}" value="${escapeHtml(targetKey)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}>
+    <span><strong>CPU ${cpu} · Block ${item.block}</strong><small>${escapeHtml(label)}</small>${problem}</span>
+  </label>`;
+}
+
+function selectedBlocks(kind) {
+  const seen = new Set();
+  return Array.from(document.querySelectorAll(`[data-${kind}-block]:checked:not(:disabled)`))
+    .map((input) => ({ cpu: Number(input.dataset.cpu ?? 0), block: Number(input.dataset.block ?? input.value) }))
+    .filter((target) => {
+      const key = `${target.cpu}:${target.block}`;
+      if (!Number.isInteger(target.cpu) || !Number.isInteger(target.block) || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) => left.cpu - right.cpu || left.block - right.block);
+}
+
+function setBlockSelection(kind, checked) {
+  document.querySelectorAll(`[data-${kind}-block]:not(:disabled)`).forEach((input) => { input.checked = checked; });
+  if (kind === "backup") updateBackupSelectionStatus();
+  else updateRestoreSelectionStatus();
+}
+
+function renderBackupBlockList() {
+  const container = $("backupBlockList");
+  if (!container || !state.schema) return;
+  const blocks = backupSchemaBlocks();
+  const signature = blocks.map((item) => `${item.target_key}:${item.name}`).join("|");
+  if (container.dataset.signature === signature) return;
+  container.dataset.signature = signature;
+  container.innerHTML = blocks.map((item) => blockChoiceMarkup(item, "backup", true)).join("")
+    || `<p class="muted">Keine sicherbaren Blöcke im Mapping gefunden.</p>`;
+  updateBackupSelectionStatus();
+}
+
+function updateBackupSelectionStatus() {
+  const selected = selectedBlocks("backup").length;
+  const available = document.querySelectorAll("[data-backup-block]:not(:disabled)").length;
+  setBackupStatus("backupStatus", `${selected} von ${available} Blockzielen für die Sicherung ausgewählt.`, selected ? "neutral" : "warn");
+  if ($("backupCreate")) $("backupCreate").disabled = selected === 0;
+}
+
+function countItems(value) {
+  if (Array.isArray(value)) return value.length;
+  const count = Number(value);
+  return Number.isFinite(count) ? count : 0;
+}
+
+function backupImageText(image) {
+  return typeof image === "string" ? image : `${JSON.stringify(image, null, 2)}\n`;
+}
+
+function downloadBackupImage(image, filename) {
+  const safeName = String(filename || `open-dachs-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.json`)
+    .split(/[\\/]/).pop() || "open-dachs-backup.json";
+  const blob = new Blob([backupImageText(image)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = safeName;
+  link.hidden = true;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function createBackupImage(event) {
+  event?.preventDefault();
+  const blocks = selectedBlocks("backup");
+  if (!blocks.length) return setBackupStatus("backupStatus", "Bitte mindestens ein Blockziel auswählen.", "warn");
+  const button = $("backupCreate");
+  button.disabled = true;
+  setBackupStatus("backupStatus", `Lese ${blocks.length} Blockziele seriell und erstelle das Image …`, "neutral");
+  try {
+    const response = await api("/api/backup/create", {
+      method: "POST",
+      body: JSON.stringify({ blocks }),
+    });
+    if (!response.image) throw new Error("Der Server hat kein Backup-Image geliefert");
+    downloadBackupImage(response.image, response.filename);
+    const inspection = response.inspection || {};
+    const summary = response.summary || {};
+    const successful = countItems(inspection.successful_blocks ?? inspection.successful_count ?? summary.successful);
+    const failed = countItems(inspection.failed_blocks ?? inspection.failed_count ?? summary.failed);
+    setBackupStatus(
+      "backupStatus",
+      `Sicherung heruntergeladen: ${successful || blocks.length - failed} von ${blocks.length} Blockzielen erfolgreich${failed ? `, ${failed} fehlgeschlagen` : ""}.`,
+      failed ? "warn" : "ok",
+    );
+  } catch (error) {
+    setBackupStatus("backupStatus", `Sicherung fehlgeschlagen: ${error.message}`, "error");
+  } finally {
+    button.disabled = selectedBlocks("backup").length === 0;
+  }
+}
+
+function restoreInspectionBlocks(inspection) {
+  const items = inspection?.blocks || inspection?.records || [];
+  const seen = new Set();
+  return items.map((item) => {
+    const cpu = Number(item.cpu ?? 0);
+    const block = Number(item.block);
+    return {
+      ...item,
+      cpu,
+      block,
+      target_key: item.target_key || `${cpu}:${block}`,
+      name: item.name || item.block_name || (cpu ? `Netzschutz · Überwachungs-CPU ${cpu}` : `Block ${block}`),
+    };
+  }).filter((item) => {
+    if (!Number.isInteger(item.cpu) || !Number.isInteger(item.block) || seen.has(item.target_key)) return false;
+    seen.add(item.target_key);
+    return true;
+  }).sort((left, right) => left.cpu - right.cpu || left.block - right.block);
+}
+
+function renderRestoreBlockList() {
+  const container = $("restoreBlockList");
+  if (!container) return;
+  const blocks = restoreInspectionBlocks(state.backup.inspection);
+  const available = blocks.some((item) => item.restorable);
+  container.innerHTML = blocks.map((item) => blockChoiceMarkup(item, "restore", false, !item.restorable)).join("")
+    || `<p class="muted">Noch kein geprüftes Backup-Image geladen.</p>`;
+  $("restoreSelectAll").disabled = !available;
+  $("restoreSelectNone").disabled = !available;
+  updateRestoreSelectionStatus();
+}
+
+function restoreIntegrityOk(inspection) {
+  const integrity = inspection?.integrity;
+  if (typeof integrity === "boolean") return integrity;
+  if (typeof integrity === "string") return !["failed", "invalid", "mismatch"].includes(integrity.toLowerCase());
+  if (integrity && typeof integrity === "object") {
+    if (typeof integrity.ok === "boolean") return integrity.ok;
+    if (typeof integrity.verified === "boolean") return integrity.verified;
+  }
+  if (inspection?.digest_present === true && inspection?.digest_verified === false) return false;
+  return true;
+}
+
+function inspectionImageMetadata(inspection) {
+  return inspection?.image && typeof inspection.image === "object" ? inspection.image : (inspection || {});
+}
+
+function inspectionSummary(inspection, filename) {
+  const blocks = restoreInspectionBlocks(inspection);
+  const restorable = blocks.filter((item) => item.restorable).length;
+  const metadata = inspectionImageMetadata(inspection);
+  const created = metadata.created_utc ? new Date(metadata.created_utc) : null;
+  const createdText = created && Number.isFinite(created.getTime()) ? created.toLocaleString("de-DE") : "Zeitpunkt unbekannt";
+  const digest = String(metadata.image_sha256 || "");
+  const digestText = digest ? ` · SHA-256 ${digest.slice(0, 12)}…` : "";
+  return `${filename || "Backup-Image"} · ${createdText} · ${restorable} von ${blocks.length} Blockzielen wiederherstellbar${digestText}`;
+}
+
+function clearRestoreImage(message = "Noch kein Backup-Image geprüft.") {
+  state.backup.importGeneration += 1;
+  state.backup.image = null;
+  state.backup.inspection = null;
+  if ($("restoreWriteEnabled")) $("restoreWriteEnabled").checked = false;
+  if ($("restoreConfirmation")) $("restoreConfirmation").value = "";
+  if ($("restorePass4")) $("restorePass4").value = "";
+  if ($("restoreBlockList")) $("restoreBlockList").innerHTML = `<p class="muted">Noch kein geprüftes Backup-Image geladen.</p>`;
+  if ($("restoreResults")) $("restoreResults").innerHTML = "";
+  if ($("restoreSelectAll")) $("restoreSelectAll").disabled = true;
+  if ($("restoreSelectNone")) $("restoreSelectNone").disabled = true;
+  setBackupStatus("restoreImageStatus", message, "neutral");
+  updateRestoreMode();
+}
+
+async function inspectRestoreFile(event) {
+  const file = event.target.files?.[0];
+  clearRestoreImage(file ? "Lese Backup-Image …" : "Noch kein Backup-Image geprüft.");
+  const importGeneration = state.backup.importGeneration;
+  if (!file) return;
+  if (file.size > BACKUP_MAX_FILE_BYTES) {
+    event.target.value = "";
+    return setBackupStatus("restoreImageStatus", "Datei zu groß. Backup-Images dürfen höchstens 1 MB groß sein.", "error");
+  }
+  try {
+    const text = await file.text();
+    if (importGeneration !== state.backup.importGeneration) return;
+    let image;
+    try { image = JSON.parse(text); } catch (_) { throw new Error("Die Datei enthält kein gültiges JSON-Backup-Image"); }
+    if (!image || typeof image !== "object" || Array.isArray(image)) throw new Error("Das Backup-Image muss ein JSON-Objekt sein");
+    setBackupStatus("restoreImageStatus", "Prüfe Schema, Prüfsummen und enthaltene Blöcke …", "neutral");
+    const response = await api("/api/backup/inspect", {
+      method: "POST",
+      body: JSON.stringify({ image }),
+    });
+    if (importGeneration !== state.backup.importGeneration) return;
+    const inspection = response.inspection || response;
+    const integrityOk = restoreIntegrityOk(inspection);
+    if (!integrityOk) throw new Error("Die Integritäts- oder Prüfsummenprüfung ist fehlgeschlagen");
+    state.backup.image = image;
+    state.backup.inspection = inspection;
+    renderRestoreBlockList();
+    setBackupStatus("restoreImageStatus", inspectionSummary(inspection, file.name), "ok");
+    setBackupStatus(
+      "restoreStatus",
+      "Image geprüft. Aus Sicherheitsgründen ist noch kein Blockziel ausgewählt; wähle die gewünschten CPU-/Blockziele für den Dry-Run.",
+      "neutral",
+    );
+    updateRestoreMode();
+  } catch (error) {
+    if (importGeneration !== state.backup.importGeneration) return;
+    state.backup.image = null;
+    state.backup.inspection = null;
+    renderRestoreBlockList();
+    event.target.value = "";
+    setBackupStatus("restoreImageStatus", `Image abgelehnt: ${error.message}`, "error");
+    updateRestoreMode();
+  }
+}
+
+function updateRestoreSelectionStatus() {
+  const selected = selectedBlocks("restore").length;
+  const available = document.querySelectorAll("[data-restore-block]:not(:disabled)").length;
+  if (state.backup.image) {
+    const live = Boolean($("restoreWriteEnabled")?.checked);
+    const mode = live ? " LIVE-Modus ist aktiviert." : " Dry-Run: Es wird nichts geschrieben.";
+    setBackupStatus("restoreStatus", `${selected} von ${available} wiederherstellbaren Blockzielen ausgewählt.${mode}`, live ? "error" : (selected ? "neutral" : "warn"));
+  }
+  updateRestoreActionAvailability();
+}
+
+function updateRestoreActionAvailability() {
+  const button = $("restoreSubmit");
+  if (!button) return;
+  button.disabled = state.backup.busy || state.user?.role !== "admin" || !state.backup.image || selectedBlocks("restore").length === 0;
+}
+
+function setRestoreBusy(busy) {
+  state.backup.busy = busy;
+  ["restoreFile", "restoreAuthLevel", "restorePass4", "restoreConfirmation"].forEach((id) => {
+    if ($(id)) $(id).disabled = busy;
+  });
+  $("restoreWriteEnabled").disabled = busy || (Boolean(state.backup.image) && state.backup.inspection?.live_restore_compatible === false);
+  document.querySelectorAll("[data-restore-block]").forEach((input) => {
+    input.disabled = busy || input.closest(".backup-block-choice")?.classList.contains("disabled");
+  });
+  const available = document.querySelectorAll("[data-restore-block]:not(:disabled)").length > 0;
+  $("restoreSelectAll").disabled = busy || !available;
+  $("restoreSelectNone").disabled = busy || !available;
+  updateRestoreActionAvailability();
+}
+
+function updateRestoreMode() {
+  const toggle = $("restoreWriteEnabled");
+  const button = $("restoreSubmit");
+  if (!toggle || !button) return;
+  const liveCompatible = !state.backup.image || state.backup.inspection?.live_restore_compatible !== false;
+  if (!liveCompatible) toggle.checked = false;
+  toggle.disabled = state.backup.busy || !liveCompatible;
+  const live = Boolean(toggle.checked);
+  button.textContent = live ? "Auswahl jetzt wiederherstellen" : "Auswahl als Dry-Run prüfen";
+  button.classList.toggle("danger", live);
+  button.classList.toggle("primary", !live);
+  if ($("restorePass4")) $("restorePass4").required = false;
+  if ($("restoreConfirmation")) {
+    $("restoreConfirmation").required = live;
+    $("restoreConfirmation").placeholder = live ? RESTORE_CONFIRMATION : "im Dry-Run nicht erforderlich";
+  }
+  const panel = toggle.closest(".backup-restore-panel") || toggle.closest(".panel");
+  panel?.classList.toggle("backup-live", live);
+  if (state.backup.image && !state.backup.busy) {
+    setBackupStatus(
+      "restoreStatus",
+      !liveCompatible
+        ? "Nur Dry-Run möglich: Für eine Live-Wiederherstellung müssen Prüfsumme, Packstand und Reglerkennung zum aktuellen Gerät passen."
+        : live
+        ? `LIVE-Modus vorbereitet. Vor dem Schreiben ist die Bestätigung ${RESTORE_CONFIRMATION} und ein zusätzlicher Browser-Dialog erforderlich.`
+        : "Dry-Run aktiv: Der Regler wird gelesen und verglichen, aber nicht verändert.",
+      live ? "error" : (liveCompatible ? "ok" : "warn"),
+    );
+  }
+  updateRestoreActionAvailability();
+}
+
+function normalizedRestoreResult(item, response) {
+  const audit = item.audit || {};
+  return {
+    ...item,
+    error: item.error || audit.error || "",
+    changed: item.changed ?? ["planned", "written"].includes(item.action),
+    dry_run: item.dry_run ?? audit.dry_run ?? response.dry_run ?? (response.mode === "dry-run"),
+    written: item.written ?? audit.written ?? item.action === "written",
+    write_attempted: item.write_attempted ?? audit.write_attempted ?? false,
+    ack_positive: item.ack_positive ?? audit.ack_positive,
+    readback_ok: item.readback_ok ?? audit.readback_ok,
+    changed_bytes: item.changed_bytes ?? audit.changed_bytes,
+  };
+}
+
+function restoreResultLabel(item) {
+  if (item.status === "not-attempted") return { label: "Nicht ausgeführt", tone: "warn" };
+  if (item.write_attempted && !(item.written && item.readback_ok)) return { label: "Zustand unklar", tone: "error" };
+  if (item.status === "failed") return { label: "Fehler", tone: "error" };
+  if (item.error) return { label: "Fehler", tone: "error" };
+  if (item.action === "failed") return { label: "Fehler", tone: "error" };
+  if (!item.changed) return { label: "Unverändert", tone: "ok" };
+  if (item.dry_run) return { label: "Würde geschrieben", tone: "warn" };
+  if (item.written && item.ack_positive && item.readback_ok) return { label: "Wiederhergestellt", tone: "ok" };
+  if (item.written) return { label: "Prüfung fehlgeschlagen", tone: "error" };
+  return { label: item.status || "Nicht geschrieben", tone: "error" };
+}
+
+function renderRestoreResults(response) {
+  const container = $("restoreResults");
+  if (!container) return;
+  const results = response.results || [];
+  if (!results.length) {
+    container.innerHTML = `<p class="muted">Der Server hat keine Blockergebnisse geliefert.</p>`;
+    return;
+  }
+  const rows = results.map((rawItem) => {
+    const item = normalizedRestoreResult(rawItem, response);
+    const outcome = restoreResultLabel(item);
+    const bytes = Array.isArray(item.changed_bytes) ? item.changed_bytes.length : (item.changed_bytes ?? "—");
+    const ack = item.ack_positive === true ? "positiv" : (item.ack_positive === false ? "negativ" : "—");
+    const readback = item.readback_ok === true ? "OK" : (item.readback_ok === false ? "Fehler" : "—");
+    const cpu = Number(item.cpu ?? 0);
+    const target = Number.isInteger(cpu) ? `CPU ${cpu} · Block ${item.block}` : `Block ${item.block}`;
+    return `<tr>
+      <td><strong>${escapeHtml(target)}</strong></td>
+      <td>${escapeHtml(item.name || item.block_name || `Block ${item.block}`)}</td>
+      <td><span class="restore-result restore-result-${outcome.tone}">${escapeHtml(outcome.label)}</span></td>
+      <td>${escapeHtml(bytes)}</td><td>${escapeHtml(ack)}</td><td>${escapeHtml(readback)}</td>
+      <td>${escapeHtml(item.error || "—")}</td>
+    </tr>`;
+  }).join("");
+  container.innerHTML = `<div class="table-wrap"><table class="data-table restore-result-table">
+    <thead><tr><th>Ziel</th><th>Name</th><th>Ergebnis</th><th>Geänderte Bytes</th><th>ACK</th><th>Readback</th><th>Hinweis</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+}
+
+async function restoreBackupImage(event) {
+  event?.preventDefault();
+  if (state.user?.role !== "admin") return;
+  const blocks = selectedBlocks("restore");
+  const writeEnabled = Boolean($("restoreWriteEnabled").checked);
+  const confirmation = $("restoreConfirmation").value;
+  if (!state.backup.image) return setBackupStatus("restoreStatus", "Bitte zuerst ein Backup-Image einlesen und prüfen.", "warn");
+  if (!blocks.length) return setBackupStatus("restoreStatus", "Bitte mindestens ein wiederherstellbares Blockziel auswählen.", "warn");
+  if (writeEnabled && confirmation.trim() !== RESTORE_CONFIRMATION) {
+    return setBackupStatus("restoreStatus", `Für den LIVE-Modus exakt ${RESTORE_CONFIRMATION} eingeben.`, "error");
+  }
+  if (writeEnabled && !window.confirm(`LIVE-Wiederherstellung starten? ${blocks.length} ausgewählte Blockziele können am MSR2 verändert werden. Jedes Ziel wird anschließend zurückgelesen und geprüft.`)) return;
+  const restoreGeneration = state.backup.importGeneration;
+  const restoreImage = state.backup.image;
+  const restoreInspection = state.backup.inspection;
+  const restoreRequestIsStale = () => (
+    restoreGeneration !== state.backup.importGeneration
+    || restoreImage !== state.backup.image
+  );
+  setRestoreBusy(true);
+  setBackupStatus(
+    "restoreStatus",
+    writeEnabled ? `LIVE-Wiederherstellung für ${blocks.length} Blockziele läuft …` : `Dry-Run für ${blocks.length} Blockziele läuft; es wird nichts geschrieben …`,
+    writeEnabled ? "error" : "neutral",
+  );
+  try {
+    const response = await api("/api/backup/restore", {
+      method: "POST",
+      body: JSON.stringify({
+        image: restoreImage,
+        image_sha256: inspectionImageMetadata(restoreInspection).image_sha256 || null,
+        blocks,
+        auth_level: Number($("restoreAuthLevel").value),
+        pass4: $("restorePass4").value,
+        write_enabled: writeEnabled,
+        confirmation,
+      }),
+    });
+    if (restoreRequestIsStale()) return;
+    renderRestoreResults(response);
+    const summary = response.summary || {};
+    const failed = countItems(response.failed_blocks ?? summary.failed);
+    const changed = countItems(response.differing_blocks ?? summary.planned);
+    const written = countItems(response.written_blocks ?? summary.written ?? summary.restored);
+    const uncertain = countItems(response.uncertain_blocks ?? summary.uncertain);
+    const unchanged = countItems(response.unchanged_blocks ?? summary.unchanged);
+    const dryRun = response.dry_run ?? (response.mode === "dry-run");
+    if (dryRun) {
+      setBackupStatus("restoreStatus", `Dry-Run beendet: ${changed} abweichend, ${unchanged} unverändert${failed ? `, ${failed} fehlgeschlagen` : ""}. Der Regler wurde nicht verändert.`, failed ? "warn" : "ok");
+    } else {
+      setBackupStatus(
+        "restoreStatus",
+        `Wiederherstellung beendet: ${written} geschrieben und per Rückleseprüfung bestätigt, ${unchanged} unverändert${uncertain ? `, ${uncertain} mit unklarem Zielzustand` : ""}${failed ? `, ${failed} fehlgeschlagen` : ""}.`,
+        failed || uncertain || response.ok === false ? "error" : "ok",
+      );
+      await refreshAudit();
+    }
+  } catch (error) {
+    if (restoreRequestIsStale()) return;
+    if (Array.isArray(error.payload?.results)) {
+      renderRestoreResults(error.payload);
+      if (writeEnabled) await refreshAudit();
+    }
+    setBackupStatus("restoreStatus", `${writeEnabled ? "Wiederherstellung" : "Dry-Run"} fehlgeschlagen: ${error.message}`, "error");
+  } finally {
+    if (!restoreRequestIsStale()) setRestoreBusy(false);
+  }
+}
+
 async function refreshAudit() {
   if (state.user?.role !== "admin") { $("auditRows").innerHTML = `<tr><td colspan="5">Nur für Admin sichtbar.</td></tr>`; return; }
   try {
     const data = await api("/api/audit");
-    $("auditRows").innerHTML = (data.items || []).map((item) => { const audit=item.audit||{}; const scope=audit.readback_scope === "changed-fields" ? "FELD" : "BLOCK"; const attempts=Number(audit.readback_attempts||0); const result=audit.written ? `GESCHRIEBEN · READBACK ${scope}${attempts ? ` · ${attempts}×` : ""}` : (audit.dry_run ? "DRY-RUN" : (audit.error || "Fehler")); const target=Number(audit.cpu||0) ? `CPU ${audit.cpu} · ${item.block}` : item.block; return `<tr class="${audit.critical ? "critical-audit" : ""}"><td>${escapeHtml(new Date(item.recorded_at).toLocaleString("de-DE"))}</td><td>${escapeHtml(item.username)}</td><td>${escapeHtml(target)}</td><td>${escapeHtml(result)}</td><td>${escapeHtml((audit.changed_keys || []).join(", "))}</td></tr>`; }).join("") || `<tr><td colspan="5">Noch keine Schreibversuche.</td></tr>`;
+    $("auditRows").innerHTML = (data.items || []).map((item) => {
+      const audit = item.audit || {};
+      const scope = audit.readback_scope === "changed-fields" ? "FELD" : "BLOCK";
+      const attempts = Number(audit.readback_attempts || 0);
+      let result;
+      if (audit.operation === "backup-restore" && !audit.changed && !audit.error) {
+        result = "WIEDERHERSTELLUNG · UNVERÄNDERT";
+      } else if (audit.operation === "backup-restore" && audit.write_attempted && !audit.written) {
+        result = `WIEDERHERSTELLUNG · ZUSTAND UNKLAR${audit.error ? ` · ${audit.error}` : ""}`;
+      } else if (audit.written) {
+        result = `${audit.operation === "backup-restore" ? "WIEDERHERGESTELLT" : "GESCHRIEBEN"} · RÜCKLESEPRÜFUNG ${scope}${attempts ? ` · ${attempts}×` : ""}`;
+      } else if (audit.dry_run) {
+        result = audit.operation === "backup-restore" ? "WIEDERHERSTELLUNG · DRY-RUN" : "DRY-RUN";
+      } else {
+        result = audit.error || "Fehler";
+      }
+      const target = Number(audit.cpu || 0) ? `CPU ${audit.cpu} · ${item.block}` : item.block;
+      return `<tr class="${audit.critical ? "critical-audit" : ""}"><td>${escapeHtml(new Date(item.recorded_at).toLocaleString("de-DE"))}</td><td>${escapeHtml(item.username)}</td><td>${escapeHtml(target)}</td><td>${escapeHtml(result)}</td><td>${escapeHtml((audit.changed_keys || []).join(", "))}</td></tr>`;
+    }).join("") || `<tr><td colspan="5">Noch keine Schreibversuche.</td></tr>`;
   } catch (error) { toast(error.message); }
 }
 
-function toast(message) { const element=$("toast"); element.textContent=message; element.classList.add("visible"); clearTimeout(toast.timer); toast.timer=setTimeout(()=>element.classList.remove("visible"),4200); }
+function toast(message, tone = "neutral") { const element=$("toast"); element.textContent=message; element.classList.toggle("error", tone === "error"); element.classList.add("visible"); clearTimeout(toast.timer); toast.timer=setTimeout(()=>element.classList.remove("visible"),4200); }
 
 document.addEventListener("DOMContentLoaded", () => {
   $("loginForm").addEventListener("submit", login);
   $("logoutButton").addEventListener("click", async () => { await api("/api/logout", { method:"POST", body:"{}" }); showLogin(); });
   document.querySelectorAll(".tab-button").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
   document.querySelectorAll("[data-view-target]").forEach((button) => button.addEventListener("click", () => showView(button.dataset.viewTarget)));
+  $("backupSelectAll").addEventListener("click", () => setBlockSelection("backup", true));
+  $("backupSelectNone").addEventListener("click", () => setBlockSelection("backup", false));
+  $("backupBlockList").addEventListener("change", updateBackupSelectionStatus);
+  $("backupCreate").addEventListener("click", createBackupImage);
+  $("restoreFile").addEventListener("change", inspectRestoreFile);
+  $("restoreSelectAll").addEventListener("click", () => setBlockSelection("restore", true));
+  $("restoreSelectNone").addEventListener("click", () => setBlockSelection("restore", false));
+  $("restoreBlockList").addEventListener("change", updateRestoreSelectionStatus);
+  $("restoreWriteEnabled").checked = false;
+  $("restoreWriteEnabled").addEventListener("change", updateRestoreMode);
+  const restoreForm = $("restoreSubmit").closest("form");
+  if (restoreForm) restoreForm.addEventListener("submit", restoreBackupImage);
+  else $("restoreSubmit").addEventListener("click", restoreBackupImage);
+  updateRestoreMode();
   $("dashboardEdit").addEventListener("click", openDashboardEditor);
   $("dashboardClose").addEventListener("click", closeDashboardEditor);
   $("dashboardCancel").addEventListener("click", closeDashboardEditor);

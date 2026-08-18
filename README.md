@@ -1,12 +1,12 @@
-# Open Dachs Manager · V3 1.1.1
+# Open Dachs Manager · V3 1.4.0
 
 Lokale Bedienung, Überwachung und Wartungsdokumentation für Dachs-Anlagen mit
 MSR2-Regler – über die optische serielle Schnittstelle und ohne Cloud-Zwang.
 
-> **Projektstatus: Version 1.1.1.** Lesen, Dekodieren, Wartungs-Testmodus und der
+> **Projektstatus: Version 1.4.0.** Lesen, Dekodieren, Wartungs-Testmodus und der
 > zentrale Serialworker sind an einer Anlage praktisch erprobt. Ein echter
 > Schreibvorgang erfordert immer die ausdrückliche Schreibfreigabe,
-> Authentifizierung, eine positive Antwort und den anschließenden Readback.
+> Authentifizierung, eine positive Antwort und die anschließende Rückleseprüfung.
 
 Open Dachs Manager ist ein unabhängiges Open-Source-Community-Projekt.
 
@@ -19,7 +19,8 @@ Open Dachs Manager ist ein unabhängiges Open-Source-Community-Projekt.
 | **Übersicht** | Wirkleistung Ist/Soll, Wartungsrestzeit, frei auswählbare Live-Kacheln und technisches Anlagenbild mit Rußfilterschätzung |
 | **Überwachung** | Live-Werte, Anlagenbild, Historien, Service- und Warnmeldungen |
 | **Wartung** | Schreibfreier Gesamtsnapshot, digitale Checkliste, Vorher-/Nachher-Werte, löschbares lokales Archiv und PDF/HTML/JSON |
-| **Einstellungen** | Vollständig dekodierte Register, Dry-Run, kontrollierte Schreibvorgänge und getrennte Netzschutz-CPUs |
+| **Backup** | Alle 36 Reglerblöcke und Block 16 beider Netzschutz-CPUs oder eine freie Auswahl sichern, Abbilder prüfen und ausgewählte Ziele im Dry-Run oder kontrolliert wiederherstellen |
+| **Einstellungen** | Vollständig dekodierte Register, kontrollierte Schreibvorgänge sowie je Netzschutz-CPU Legacy-Schutz, zusätzliche Schutzparameter und Live-Netzwerte |
 | **System** | Mehrere Benutzer, Rollen, Passwortverwaltung, API-Freigabe und Token-Manager |
 | **Werkzeuge** | Weboberfläche, CLI, TUI, JSON-Backups, Audit-Protokoll und systemd-Dienste |
 
@@ -78,9 +79,27 @@ ausgegeben werden.
 ### Einstellungen und Netzschutz
 
 Die beiden Überwachungs-CPUs besitzen eigene Blockräume. Netzschutzwerte sind
-deshalb klar rot gekennzeichnet. Das Öffnen und Aktualisieren der Seite ist
-rein lesend. Schreibvorgänge verwenden den normalen Admin-Haken, Auth, ACK,
-bytegenauen Readback und Audit.
+deshalb klar rot gekennzeichnet. Je CPU sind drei live bestätigte Blöcke
+getrennt sichtbar: Block 16 mit dem 18-Byte-Legacy-Schutzlayout, Block 20 mit
+39 Schutzparametern aus 59 Byte und Block 21 mit 28 dreiphasigen Live- und
+Diagnosewerten aus 56 Byte.
+
+Block 16 mit 18 Feldern und Block 20 mit 39 Feldern sind auf beiden CPUs über
+den geschützten Editor schreibbar. Das sind insgesamt 114 eindeutig einer CPU
+und einem Block zugeordnete Feldinstanzen. Für Block 20 belegt die originale
+Layout-4-Datenzuordnung den Vollblock-Schreibdienst 21. Der Ablauf lautet
+`Read → encode → Auth → CAS → Service 21 → ACK → exakter
+Vollblock-Readback`; mehrdeutige Profilwerte können nur ausdrücklich als
+`raw:<Wert>` eingegeben werden. Kodierung und Dry-Run sind geprüft, ein
+physischer Block-20-Schreibvorgang am Gerät wurde noch nicht ausgeführt.
+
+Block 21 besitzt keinen Schreibdienst und bleibt als laufender Messwertblock
+strikt nur lesbar. Block 20 ist bis zur realen Abnahme weiterhin nicht für
+Backup oder Wiederherstellung freigegeben; die Auswahl bleibt bei den 36
+Reglerblöcken plus Block 16 beider Netzschutz-CPUs, also 38 Zielen. Die
+geprüften Standarddefinitionen enthalten keine weiteren Netz-CPU-Datenblöcke.
+Die zusätzlich live gelesenen Diagnosedienste 17 und 18 werden mangels belegter
+Feldstruktur nur als Rohbefund geführt, nicht als dekodierte Felder angeboten.
 
 ![Rot gekennzeichnete Netzschutzfelder](docs/assets/screenshots/netzschutz.png)
 

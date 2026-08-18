@@ -1,6 +1,6 @@
 # Open Dachs Manager – Bedienungsanleitung
 
-Stand: 13.08.2026 · Version V3 1.1.1
+Stand: 17.08.2026 · Version V3 1.4.0
 
 Diese Anleitung beschreibt den täglichen Betrieb der Weboberfläche, CLI und
 TUI. Installation und Migration stehen ausführlich in
@@ -100,7 +100,7 @@ Der daraus erzeugte Entwurf wird lokal gespeichert. Checkliste, zusätzliche
 lokale Arbeitsliste, Monteur, Messwerte und Bemerkungen lassen sich fortlaufend
 ergänzen. HTML-, dreiseitiger PDF-Bericht und JSON-Export stehen zur Verfügung.
 
-V3 1.1.1 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
+V3 1.4.0 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
 die Oberfläche die exakte Eingabe `DEMO ABSCHLIESSEN`. Danach wird der Bericht
 lokal validiert, unveränderlich archiviert und deutlich als Demo gekennzeichnet.
 Der Abschluss öffnet keine Serialworker-Sitzung, schreibt weder Block 100 noch
@@ -129,6 +129,55 @@ Wartungen über `Löschen` entfernen. Vorher erscheint eine Sicherheitsabfrage.
 Gelöscht werden der lokale Snapshot, das Protokoll und seine Exporte. Ein
 bereits ausgeführter MSR2-Abschluss wird dadurch nicht rückgängig gemacht;
 vorhandene Schreib-Audits bleiben erhalten.
+
+### Backup und Wiederherstellung
+
+Der Hauptbereich `Backup` ist für angemeldete Benutzer sichtbar. Beim Öffnen
+sind alle 38 Sicherungsziele ausgewählt: 36 adressierbare Blöcke der
+Regler-CPU 0 sowie Block 16 der Netzschutz-CPU 1 und der Netzschutz-CPU 2. Über
+`Alle auswählen`, `Auswahl aufheben` und die einzelnen Blockkarten kann eine
+beliebige Teilmenge zusammengestellt werden. `Backup erstellen und
+herunterladen` liest nur diese Ziele in einer gemeinsamen Serialworker-Sitzung
+und speichert ein JSON-Abbild. Einzelne Lesefehler bleiben darin sichtbar.
+
+Im Abbild wird jedes Ziel als eindeutiges Paar aus CPU und Blocknummer geführt.
+Dadurch bleiben `CPU 1 · Block 16` und `CPU 2 · Block 16` trotz gleicher
+Blocknummer getrennt. Vollständige Abbilder können Anlagenkennung, Adresse,
+Kontaktdaten und sicherheitsrelevante Netzschutzparameter enthalten und müssen
+entsprechend vertraulich aufbewahrt werden. PW4 oder andere Passwörter werden
+nicht gespeichert.
+
+Die Wiederherstellung ist nur für Administratoren sichtbar. Zuerst wird das
+JSON-Abbild eingelesen und serverseitig auf Schema, Prüfsummen, Packstand,
+Reglerkennung, Blocknummern und Payloadlängen geprüft. Erst danach erscheinen
+die gültigen Blöcke; aus Sicherheitsgründen ist zunächst keiner ausgewählt.
+
+`Auswahl als Dry-Run prüfen` liest die aktuellen Zielblöcke und zeigt
+`unverändert` oder `würde geschrieben`, sendet aber weder Authentifizierung noch
+Schreibtelegramme. Für eine echte Wiederherstellung müssen zusätzlich
+Hardwarefreigabe, Auth-Level beziehungsweise PW4 und exakt
+`SICHERUNG WIEDERHERSTELLEN` bestätigt werden. Bytegleiche Blöcke werden auch
+dann ohne Schreibtelegramm übersprungen. Abweichende Blöcke werden vollständig
+geschrieben und nur nach positiver Bestätigung sowie bytegenauer vollständiger
+Rückleseprüfung als wiederhergestellt gemeldet.
+
+Vor der Authentifizierung eines tatsächlich abweichenden Live-Ablaufs liest der
+Dienst die Auswahl nochmals und speichert diesen unmittelbaren Ausgangszustand
+atomar als SHA-256-gebundenes JSON-Abbild unter
+`/var/lib/open-dachs-manager/restore-preimages/`. Verzeichnis und Dateien sind
+lokal mit `0700` beziehungsweise `0600` geschützt. Ein Dry-Run oder ein
+bytegleicher Live-Vergleich legt kein solches Abbild an, weil dabei kein
+Schreibtelegramm folgen kann. Die Prüfsumme bindet den Inhalt, stellt aber keine
+kryptografische Signatur oder Herkunftsbestätigung dar.
+
+Eine Mehrblock-Wiederherstellung ist nicht transaktional. Bei einem Fehler
+stoppt der Ablauf; zuvor erfolgreich zurückgelesene Blöcke bleiben
+wiederhergestellt. Laufzustände, Zähler oder Zeitwerte im Abbild können älter
+sein und werden bei Auswahl des jeweiligen Rohblocks ebenfalls übernommen. Hat
+der Dienst bereits ein Schreibtelegramm gesendet, aber keine eindeutige
+Bestätigung oder Rückleseprüfung erhalten, wird der Block ausdrücklich als
+`Zustand unklar` gekennzeichnet und muss vor jedem weiteren Versuch neu gelesen
+und geprüft werden.
 
 ### Einstellungen und Register
 
@@ -163,20 +212,50 @@ Ohne aktivierte Hardwarefreigabe erzeugt Speichern lediglich einen Dry-Run.
 Vor jedem echten Write werden Block, Feld, Datentyp, Authentifizierung und der
 aktuelle Payload geprüft.
 
-Zusätzlich erscheinen zwei rote Registerkarten `CPU 1 · Netzschutz` und
-`CPU 2 · Netzschutz`. Die Blocknummern der drei CPUs sind voneinander
-unabhängig; Block 16 der beiden Überwachungs-CPUs ist daher nicht Block 16 der
-Regler-CPU. Die Karten zeigen das zum alten Überwachungscontroller gehörende
-18-Byte-Layout mit Ländercode, Schutzart, festen und variablen Spannungs- und
-Frequenzgrenzen, Abschaltzeiten und Impedanzschutz.
+Zusätzlich erscheinen je Überwachungs-CPU drei rote Registerkarten. Die
+Blocknummern der drei CPUs sind voneinander unabhängig; Block 20 der
+Netzschutz-CPU ist also nicht Block 20 der Regler-CPU.
 
-Die Felder sind wie alle gemappten Register schreibbar. Wegen ihrer besonderen
-Bedeutung für den Netzschutz werden sie dauerhaft rot dargestellt, damit sie
-nicht mit normalen Reglerwerten verwechselt oder versehentlich geändert
-werden. Ohne den Haken `Hardware-Schreiben aktivieren` entsteht nur ein
-Dry-Run; mit Haken gelten PW4/Auth, vollständiger Block-Write, positives ACK,
-bytegenauer Readback und Audit. Das angezeigte Legacy-Profil `VDE 4105` ist
-kein Nachweis der Konformität mit einer heutigen Normausgabe.
+- `B16 · Netzschutz (Legacy)` zeigt das bekannte 18-Byte-Layout mit
+  Ländercode, Schutzart, festen und variablen Spannungs-/Frequenzgrenzen,
+  Abschaltzeiten und Impedanzschutz. Dieser bereits ausdrücklich freigegebene
+  Block bleibt über den normalen Admin-/Auth-/ACK-/Readback-Ablauf schreibbar.
+- `B20 · Schutzparameter` zeigt 39 Werte aus 59 Byte: Schutzprofil,
+  zweistufige Grenzen und profilabhängige Abschaltzeiten, 10-Minuten-Spannung,
+  Frequenzreduktion sowie Impedanz-/LOM-Status. Die originale
+  Layout-4-Datenzuordnung belegt dafür den Vollblock-Schreibdienst 21; alle
+  39 Felder sind über denselben geschützten Ablauf wie Block 16 editierbar.
+- `B21 · Live-Netzwerte` zeigt 28 Werte aus 56 Byte: Spannung, Strom und
+  Frequenz je Phase, Impedanzen, Wirkleistung, Phasenlage, Cosinus Phi und
+  Kalibrierfaktoren. Dieser laufende Messwertblock besitzt keinen Schreibdienst
+  und bleibt strikt nur lesbar.
+
+Block 16 und Block 20 ergeben auf CPU 1 und CPU 2 zusammen 114 schreibbare
+Feldinstanzen: je CPU 18 Legacy- und 39 Layout-4-Felder. Bei Block 20 lautet
+der Ablauf `Lesen → kodieren → Authentifizierung → CAS-Prüfung → Dienst 21
+→ positives ACK → exakte Vollblock-Rückleseprüfung`. Nicht eindeutig
+umkehrbare Anzeigen werden nicht geraten. Eine bewusste Experteneingabe ist
+als `raw:<Rohwert>` möglich; dadurch werden Skalierung und Auswahlprüfung
+absichtlich umgangen, nicht aber Datentyp, Feldbreite, Authentifizierung,
+Ausgangszustandsvergleich oder Rückleseprüfung.
+
+Die Kodierung und der schreibfreie Dry-Run für Block 20 sind geprüft. Ein
+physischer Schreibvorgang auf Block 20 wurde am Gerät noch nicht ausgeführt.
+Deshalb bleibt Block 20 vorerst außerhalb von Backup und Wiederherstellung;
+die Auswahl umfasst unverändert 38 geprüfte Ziele: 36 Reglerblöcke plus
+Block 16 beider Netzschutz-CPUs. Block 21 darf als flüchtiger Messwertblock
+niemals als Konfiguration zurückgeschrieben werden. Das reine Öffnen oder
+Neuladen einer Netzschutzkarte sendet weiterhin nur ein Lesetelegramm.
+
+Die geprüften Standarddefinitionen enthalten für die Netzüberwachungs-CPUs
+keine weiteren Datenblöcke. Die zusätzlich live gelesenen Diagnosedienste 17
+und 18 liegen nur als Rohbefund ohne belegte Feldstruktur vor und erscheinen
+daher nicht als dekodierte Einstellfelder.
+
+Profilbezeichnungen wie `VDE 4105` stammen aus der historischen
+Controllerdefinition und sind kein Nachweis der Konformität mit einer heutigen
+Normausgabe. Cosinus-Phi-Werte können bei stehender Anlage geringfügig über
+1 liegen und sind dann als Diagnosewert zu verstehen.
 
 Der Aufbau von Zieladressen und Block-Lesevorgängen ist in
 [PROTOKOLL.md](PROTOKOLL.md) bytegenau beschrieben.

@@ -100,6 +100,15 @@ eigentlichen Blockdaten. Open Dachs Manager trennt deshalb:
 Antwortnutzdaten = <Statusbyte> + <Blockpayload>
 ```
 
+Der Regler vergibt für seine Antwortdaten eine eigene, von der Anfrage
+unabhängige Paketnummernfolge. Deshalb darf der Manager einen Datenrahmen
+nicht durch Gleichheit mit der Anfrage-Paketnummer zuordnen. Er akzeptiert die
+Antwort stattdessen nur, wenn ihre Quelladresse der angefragten CPU-Adresse
+entspricht und ihre Zieladresse `0x00` (Manager) ist. Jeden strukturell und per
+CRC gültigen Datenrahmen bestätigt er zuvor mit ACK; fremde oder veraltete
+Frames werden anschließend verworfen. Das direkte ACK auf die Anfrage wird
+weiterhin über deren Paketnummer zugeordnet.
+
 Beispiel für Block 16 mit Paketnummern 0 und 1:
 
 ```text
@@ -146,6 +155,62 @@ Lesen → lokal ändern → Auth → vollständigen Block schreiben
 Das bloße Öffnen oder Aktualisieren der Seite führt ausschließlich den oben
 beschriebenen Lesevorgang aus.
 
+## Netzschutzblöcke 20 und 21
+
+Am Testgerät liefern CPU 1 und CPU 2 zusätzlich zwei Layout-4-Blöcke. Block 20
+antwortet mit 59 Byte und enthält `NetzKonfig1` beziehungsweise
+`NetzKonfig2`: Schutzprofil, zweistufige Spannungs- und Frequenzgrenzen,
+profilabhängige Abschaltzeiten, Aktivflags, Impedanz-/LOM-Werte und die
+10-Minuten-Spannungsgrenze. Block 21 antwortet mit 56 Byte und enthält
+`Netzwerte1` beziehungsweise `Netzwerte2`: je Phase Spannung, Strom,
+Frequenz, Impedanz, Wirkleistung, Phasenlage und Diagnosefaktoren.
+
+Alle 16-Bit-Werte liegen Little Endian vor. Block 21 verwendet sowohl
+vorzeichenlose Messwerte als auch signierte Impedanz- und Leistungswerte. Die
+wichtigsten Skalierungen sind:
+
+```text
+Spannung / Strom       raw / 100
+Frequenz               raw / 1000
+Impedanz live          signed raw / 1000
+Phasenwinkel           raw / 10
+```
+
+Die Abschaltzeiten aus Block 20 werden profilabhängig dekodiert und dürfen
+nicht pauschal durch 100 geteilt werden. Die historische Oberfläche markiert
+die Felder zwar als nicht editierbar, die darunterliegende originale
+Layout-4-Datenzuordnung leitet für den geraden Block 20 jedoch ausdrücklich den
+Vollblock-Schreibdienst `21` (`block + 1`) ab. Open Dachs Manager gibt deshalb
+alle 39 Felder von Block 20 auf CPU 1 und CPU 2 frei. Zusammen mit jeweils 18
+Feldern aus Block 16 sind das 114 eindeutig adressierte schreibbare
+Feldinstanzen.
+
+Der Netzschutz-Schreibpfad für Block 20 ist:
+
+```text
+Block 20 lesen → Feldwerte kodieren → authentifizieren
+→ Ausgangspayload erneut lesen und bytegenau vergleichen (CAS)
+→ vollständige 59 Byte über Dienst 21 schreiben
+→ positives ACK → vollständige 59 Byte exakt zurücklesen → Audit
+```
+
+Bei profilabhängigen Anzeigen ohne eindeutige Umkehrung verweigert die normale
+Werteingabe eine geratene Kodierung. `raw:<Rohwert>` erlaubt die ausdrückliche
+Expertenvorgabe; Vorzeichen, Feldbreite, CAS, Authentifizierung, ACK und
+Rückleseprüfung bleiben dabei aktiv. Kodierung und schreibfreie Probeläufe sind
+geprüft, ein physischer Block-20-Schreibvorgang am Testgerät wurde noch nicht
+ausgeführt.
+
+Block 21 ist der ungerade laufende Messwertblock und besitzt keinen abgeleiteten
+Schreibdienst. Er bleibt strikt nur lesbar. Block 20 bleibt bis zur realen
+Abnahme ebenfalls außerhalb von Backup und Wiederherstellung; deren Umfang
+bleibt bei 38 Zielen.
+
+Die geprüften Standarddefinitionen der bekannten Revisionen enthalten neben
+Block 16, 20 und 21 keine weiteren Datenblöcke der Netzüberwachungs-CPUs. Die
+Diagnosedienste 17 und 18 antworteten am Testgerät lesend mit Rohdaten. Mangels
+belegter Feldstruktur werden daraus keine dekodierten Felder abgeleitet.
+
 ## Serialworker und Warteschlange
 
 Nur der Serialworker öffnet das Linux-Gerät. Weboberfläche, CLI und TUI senden
@@ -157,7 +222,10 @@ werden mehrstufige Abläufe nicht von einem zweiten Client unterbrochen.
 
 - Die Adressierung und die hier genannten Rahmenformate sind praktisch
   getestet.
-- CPU 1 und CPU 2, Block 16, sind am Testgerät lesend bestätigt.
+- CPU 1 und CPU 2, Block 16, 20 und 21, sind am Testgerät lesend bestätigt.
+- Der Block-20-Schreibdienst ist durch die Originaldatenzuordnung und
+  schreibfreie Prüfungen belegt, aber noch nicht durch einen physischen
+  Schreibvorgang am Testgerät abgenommen.
 - Die Bedeutung nicht dokumentierter Reservebytes wird nicht geraten.
 - Gerätevarianten können andere Blocklängen oder Feldbelegungen verwenden.
 - Vor Live-Schreibtests sind Backup, exakter Gerätevergleich und Readback

@@ -41,6 +41,14 @@ class Frame:
     def status(self) -> int | None:
         return self.payload[0] if self.payload else None
 
+    @property
+    def source_address(self) -> int | None:
+        return self.raw[1] if self.kind == "data" else None
+
+    @property
+    def destination_address(self) -> int | None:
+        return self.raw[2] if self.kind == "data" else None
+
 
 @dataclass(frozen=True)
 class Response:
@@ -214,7 +222,8 @@ class SerialSession:
         if timeout <= 0:
             raise ValueError("request timeout must be greater than zero")
         cpu = validate_cpu(cpu)
-        tx = encode_data(payload, packet, dst=destination_for_cpu(cpu))
+        expected_source = destination_for_cpu(cpu)
+        tx = encode_data(payload, packet, dst=expected_source)
         started = time.monotonic()
         try:
             self._serial.write(tx)
@@ -248,11 +257,18 @@ class SerialSession:
                 if frame.kind == "ack" and frame.packet == packet:
                     ack = frame
                 elif frame.kind == "data":
-                    data = frame
+                    # ACK every structurally valid data frame so that a stale
+                    # or foreign response does not leave its sender waiting.
                     try:
                         self._serial.write(encode_ack(frame))
                     except Exception:
                         pass
+                    if frame.source_address != expected_source or frame.destination_address != 0x00:
+                        protocol_errors += 1
+                        continue
+                    # The controller uses its own transmit packet sequence for
+                    # response data.  Bind by CPU addresses, not request packet.
+                    data = frame
             # A sync service has no response data; do not burn the complete
             # timeout after its positive ACK already arrived.
             if data is not None or (ack is not None and not payload):

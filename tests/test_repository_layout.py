@@ -23,7 +23,7 @@ class RepositoryLayoutTests(unittest.TestCase):
             project["tool"]["setuptools"]["dynamic"]["version"],
             {"attr": "open_dachs_manager.__version__"},
         )
-        self.assertEqual(__version__, "1.1.1")
+        self.assertEqual(__version__, "1.4.0")
         self.assertEqual(DachsRequestHandler.server_version, f"OpenDachsManager/{__version__}")
         scripts = project["project"]["scripts"]
         self.assertEqual(scripts["open-dachs"], "open_dachs_manager.cli:main")
@@ -145,6 +145,19 @@ class RepositoryLayoutTests(unittest.TestCase):
         self.assertIn('showView("faultCatalogView")', app)
         self.assertIn('viewId === "faultCatalogView"', app)
 
+    def test_restore_response_cannot_repopulate_state_after_logout_or_file_change(self):
+        app = (ROOT / "src/open_dachs_manager/web/app.js").read_text(encoding="utf-8")
+        restore_start = app.index("async function restoreBackupImage(event)")
+        restore_end = app.index("\nasync function refreshAudit()", restore_start)
+        restore = app[restore_start:restore_end]
+        self.assertIn("const restoreGeneration = state.backup.importGeneration;", restore)
+        self.assertIn("const restoreImage = state.backup.image;", restore)
+        self.assertIn("const restoreRequestIsStale = () =>", restore)
+        self.assertIn("if (restoreRequestIsStale()) return;", restore)
+        self.assertIn("if (!restoreRequestIsStale()) setRestoreBusy(false);", restore)
+        self.assertIn("image: restoreImage", restore)
+        self.assertNotIn("image: state.backup.image", restore)
+
     def test_system_management_is_separate_from_dachs_settings(self):
         index = (ROOT / "src/open_dachs_manager/web/index.html").read_text(encoding="utf-8")
         app = (ROOT / "src/open_dachs_manager/web/app.js").read_text(encoding="utf-8")
@@ -169,6 +182,15 @@ class RepositoryLayoutTests(unittest.TestCase):
     def test_technical_hmi_rows_and_changelog_popup_are_wired(self):
         index = (ROOT / "src/open_dachs_manager/web/index.html").read_text(encoding="utf-8")
         app = (ROOT / "src/open_dachs_manager/web/app.js").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertTrue(changelog.startswith("# Änderungsverlauf\n"))
+        for english_term in (
+            "Patch-Release", "Healthcheck", "Readback", "No-op", "Livewert",
+            "Snapshot", "Dashboard", "Popup", "Audit", "Write", "Mapping",
+            "Space-Padding", "Update", "Beta",
+        ):
+            self.assertNotIn(english_term, changelog)
+            self.assertNotIn(english_term, index[index.index('id="changelogModal"'):])
         self.assertEqual(index.count("V3 __OPEN_DACHS_VERSION__"), 3)
         self.assertIn('id="changelogModal" class="modal-backdrop" hidden', index)
         self.assertIn('aria-labelledby="changelogTitle"', index)

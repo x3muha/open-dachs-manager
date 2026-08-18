@@ -70,7 +70,12 @@ class FakeSerial:
         self.read_queue.append(encode_ack(request))
         if request.payload:
             # Status 0 followed by a small deterministic block payload.
-            self.read_queue.append(encode_data(b"\x00\xAA", request.packet))
+            self.read_queue.append(encode_data(
+                b"\x00\xAA",
+                request.packet,
+                src=request.raw[2],
+                dst=request.raw[1],
+            ))
         return len(data)
 
     def read(self, _size):
@@ -88,10 +93,20 @@ class NoisySerial(FakeSerial):
         request = parse_frame(bytes(data))
         self.read_queue.append(encode_ack(request))
         if request.payload:
-            invalid = bytearray(encode_data(b"\x00\xAA", request.packet))
+            invalid = bytearray(encode_data(
+                b"\x00\xAA",
+                request.packet,
+                src=request.raw[2],
+                dst=request.raw[1],
+            ))
             invalid[-1] ^= 1
             self.read_queue.append(bytes(invalid))
-            self.read_queue.append(encode_data(b"\x00\xAA", request.packet))
+            self.read_queue.append(encode_data(
+                b"\x00\xAA",
+                request.packet,
+                src=request.raw[2],
+                dst=request.raw[1],
+            ))
         return len(data)
 
 
