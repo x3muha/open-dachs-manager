@@ -1,5 +1,30 @@
 # Änderungsverlauf
 
+## V3 1.5.2 - 2026-08-18
+
+- die Stabilitätsprüfung vor dem Schreiben von Block 50 behandelt ausschließlich
+  die belegte Systemzeit an Byte 36 bis 39 als laufenden Wert; Lage, Breite,
+  Blocknummer, CPU und Nutzdatenlänge müssen dafür exakt zur Felddefinition passen
+- der gewünschte Leistungswert wird auf den unmittelbar zuvor frisch gelesenen
+  Block gesetzt, sodass niemals eine veraltete Systemzeit zurückgeschrieben wird;
+  jede gleichzeitige Änderung an einem anderen Bit bricht den Vorgang weiterhin ab
+- Zielwert, positive Reglerbestätigung und Rückleseprüfung bleiben zwingend;
+  falsche Bestätigungen, abweichende Zielwerte und veränderte Nachbarfelder werden
+  weiterhin ohne stillschweigende Übernahme als Fehler protokolliert
+
+## V3 1.5.1 - 2026-08-18
+
+- der Leistungs-Sollwert im Hauptmenü verwendet fest Auth-Level 4 und lässt
+  PW4 beim Schreiben serverseitig aus frisch gelesener Seriennummer und
+  Betriebsstundenzahl berechnen; ein vorheriger Wechsel in die Einstellungen
+  ist nicht mehr nötig
+- die neue feste Übersichtskachel „Betriebsstunden je Start“ berechnet sich
+  quellentreu aus den rohen Betriebssekunden und Starts desselben
+  Block-22-Telegramms und zeigt das Ergebnis als `Bh/Start`
+- bei null Starts, ungültigen Zählern oder zeitlich nicht zusammengehörigen
+  Quelldaten zeigt die Kennzahl bewusst keinen Wert; zusätzliche serielle
+  Lesezugriffe entstehen für die Berechnung nicht
+
 ## V3 1.5.0 - 2026-08-18
 
 - jeder Wartungsstart erzeugt automatisch ein vollständiges Sicherungsabbild

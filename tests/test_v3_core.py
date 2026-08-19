@@ -48,6 +48,7 @@ from open_dachs_manager.web import (
     PowerTargetRangeError,
     init_users,
     normalize_base_path,
+    operating_hours_per_start,
     soot_filter_estimate,
     web_monitor_field_visible,
 )
@@ -222,7 +223,7 @@ class CoreTests(unittest.TestCase):
                 return {"written": True}
 
         app = RecordingApp()
-        result = DachsWebApp.write_power_target(app, "admin", "5.2", 4, "1234")
+        result = DachsWebApp.write_power_target(app, "admin", "5.2")
 
         self.assertTrue(result["written"])
         self.assertEqual(app.args, (
@@ -230,9 +231,43 @@ class CoreTests(unittest.TestCase):
             50,
             [{"key": "Hka_Ew.usSollGenerator", "value": "5.2"}],
             4,
-            "1234",
+            "",
             True,
         ))
+
+    def test_operating_hours_per_start_uses_coherent_raw_block_22_counters(self):
+        recorded_at = "2026-08-18T12:00:00+00:00"
+
+        def metric(seconds=25_200, starts=1, *, second_time=recorded_at):
+            return operating_hours_per_start([
+                {
+                    "block": 22,
+                    "key": "Hka_Bd.ulBetriebssekunden",
+                    "raw": seconds,
+                    "recorded_at": recorded_at,
+                },
+                {
+                    "block": 22,
+                    "key": "Hka_Bd.ulAnzahlStarts",
+                    "raw": starts,
+                    "recorded_at": second_time,
+                },
+            ])
+
+        self.assertEqual(metric()["value"], 7.0)
+        self.assertAlmostEqual(metric(90_000, 3)["value"], 8.3333333333)
+        self.assertEqual(metric(0, 3)["value"], 0.0)
+        for seconds, starts in (
+            (25_200, 0),
+            (-1, 1),
+            (0x1_0000_0000, 1),
+            (1.5, 1),
+            (25_200, True),
+        ):
+            with self.subTest(seconds=seconds, starts=starts):
+                self.assertFalse(metric(seconds, starts)["available"])
+        self.assertFalse(metric(second_time="2026-08-18T12:00:01+00:00")["available"])
+        self.assertFalse(operating_hours_per_start([])["available"])
 
     def test_generator_target_uses_source_ranges_for_known_fuel_types(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1257,7 +1292,7 @@ class CoreTests(unittest.TestCase):
         after = bytearray(before)
         pack.encode_value(after, "Hka_Ew.usSollGenerator", "4.7", block=50)
         readback = bytearray(after)
-        readback[36:38] = (1234).to_bytes(2, "little")
+        readback[36:40] = bytes.fromhex("12 34 56 78")
         ack = Frame("ack", 2, b"", positive=True)
         reads = deque([bytes(before), bytes(readback)])
 
@@ -1280,6 +1315,382 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(audit.ack_positive)
         self.assertEqual(audit.readback_scope, "changed-fields")
         self.assertEqual(audit.readback_attempts, 1)
+
+    def test_live_write_rebases_block50_only_across_fresh_system_time(self):
+        pack = PackRepository()
+        service = DachsService(
+            "/dev/null", 19200, 0.1, pack, readback_attempts=2, readback_delay=0
+        )
+        before = bytearray(70)
+        pack.encode_value(before, "Hka_Ew.usSollGenerator", "5.3", block=50)
+        before[36:40] = bytes.fromhex("01 02 03 04")
+        requested = bytearray(before)
+        pack.encode_value(requested, "Hka_Ew.usSollGenerator", "4.7", block=50)
+        fresh = bytearray(before)
+        fresh[36:40] = bytes.fromhex("11 22 33 44")
+        expected_wire = bytearray(fresh)
+        pack.encode_value(expected_wire, "Hka_Ew.usSollGenerator", "4.7", block=50)
+        readback = bytearray(expected_wire)
+        readback[36:40] = bytes.fromhex("55 66 77 88")
+        reads = deque([bytes(fresh), bytes(readback)])
+        ack = Frame("ack", 2, b"", positive=True)
+
+        class WriteSession:
+            written = None
+
+            def read_block(self, block, packet=None, timeout=0.9):
+                payload = reads.popleft()
+                frame = Frame("data", 1, b"", payload=b"\x00" + payload)
+                return BlockResult(block, 1, Response(b"", None, frame, 1.0), 0, payload)
+
+            def write_block(self, block, payload, packet=None, timeout=0.9):
+                self.written = bytes(payload)
+                return Response(b"", ack, None, 1.0)
+
+        session = WriteSession()
+        audit = service.write_payload(
+            session,
+            50,
+            bytes(before),
+            bytes(requested),
+            ["Hka_Ew.usSollGenerator"],
+            WriteAllowlist(),
+            False,
+        )
+
+        self.assertTrue(audit.written)
+        self.assertEqual(session.written, bytes(expected_wire))
+        self.assertEqual(bytes.fromhex(audit.before_hex), bytes(fresh))
+        self.assertEqual(bytes.fromhex(audit.after_hex), bytes(expected_wire))
+        self.assertEqual(
+            [index for index, (left, right) in enumerate(zip(bytes.fromhex(audit.before_hex), bytes.fromhex(audit.after_hex))) if left != right],
+            [8, 9],
+        )
+        self.assertEqual(audit.prewrite_scope, "stable-fields")
+        self.assertEqual(audit.rebased_volatile_keys, ("Hka_Ew.ulSystemTime",))
+        self.assertEqual(audit.readback_scope, "changed-fields")
+        self.assertEqual(audit.readback_attempts, 1)
+
+    def test_live_write_rebase_rejects_nonvolatile_and_target_races(self):
+        pack = PackRepository()
+        service = DachsService("/dev/null", 19200, 0.1, pack)
+        before = bytearray(70)
+        pack.encode_value(before, "Hka_Ew.usSollGenerator", "5.3", block=50)
+        requested = bytearray(before)
+        pack.encode_value(requested, "Hka_Ew.usSollGenerator", "4.7", block=50)
+        cases = {}
+        for name, offset in (("day-byte", 35), ("neighbor-byte", 40), ("other-setting", 10)):
+            current = bytearray(before)
+            current[36:40] = bytes.fromhex("11 22 33 44")
+            current[offset] ^= 0x01
+            cases[name] = (current, bytes(requested), ["Hka_Ew.usSollGenerator"])
+        target_race = bytearray(before)
+        target_race[36:40] = bytes.fromhex("11 22 33 44")
+        target_race[8:10] = requested[8:10]
+        cases["target-race"] = (
+            target_race,
+            bytes(requested),
+            ["Hka_Ew.usSollGenerator"],
+        )
+        time_requested = bytearray(before)
+        time_requested[36:40] = bytes.fromhex("AA BB CC DD")
+        time_race = bytearray(before)
+        time_race[36:40] = bytes.fromhex("11 22 33 44")
+        cases["time-is-target"] = (
+            time_race,
+            bytes(time_requested),
+            ["Hka_Ew.ulSystemTime"],
+        )
+        undeclared_encoder_change = bytearray(requested)
+        undeclared_encoder_change[10] ^= 0x01
+        time_only_current = bytearray(before)
+        time_only_current[36:40] = bytes.fromhex("11 22 33 44")
+        cases["undeclared-encoder-change"] = (
+            time_only_current,
+            bytes(undeclared_encoder_change),
+            ["Hka_Ew.usSollGenerator"],
+        )
+
+        for name, (current, after, keys) in cases.items():
+            with self.subTest(name=name):
+                frame = Frame("data", 1, b"", payload=b"\x00" + bytes(current))
+
+                class ChangedSession:
+                    def read_block(
+                        self,
+                        block,
+                        packet=None,
+                        timeout=0.9,
+                        response_frame=frame,
+                        current_payload=bytes(current),
+                    ):
+                        return BlockResult(
+                            block,
+                            1,
+                            Response(b"", None, response_frame, 1.0),
+                            0,
+                            current_payload,
+                        )
+
+                    def write_block(self, *args, **kwargs):
+                        raise AssertionError("unsafe rebased write must not happen")
+
+                audit = service.write_payload(
+                    ChangedSession(),
+                    50,
+                    bytes(before),
+                    after,
+                    keys,
+                    WriteAllowlist(),
+                    False,
+                )
+                self.assertFalse(audit.written)
+                self.assertFalse(audit.write_attempted)
+                self.assertIsNone(audit.ack_positive)
+                self.assertEqual(audit.readback_attempts, 0)
+                self.assertIn("changed since", audit.error)
+
+    def test_live_write_rebase_requires_exact_block50_contract(self):
+        pack = PackRepository()
+        service = DachsService("/dev/null", 19200, 0.1, pack)
+        for length in (40, 69, 71):
+            with self.subTest(length=length):
+                before = bytearray(length)
+                after = bytearray(before)
+                after[8:10] = (4700).to_bytes(2, "little")
+                current = bytearray(before)
+                current[36:40] = bytes.fromhex("11 22 33 44")
+                frame = Frame("data", 1, b"", payload=b"\x00" + bytes(current))
+
+                class WrongLengthSession:
+                    def read_block(
+                        self,
+                        block,
+                        packet=None,
+                        timeout=0.9,
+                        response_frame=frame,
+                        current_payload=bytes(current),
+                    ):
+                        return BlockResult(
+                            block,
+                            1,
+                            Response(b"", None, response_frame, 1.0),
+                            0,
+                            current_payload,
+                        )
+
+                    def write_block(self, *args, **kwargs):
+                        raise AssertionError("wrong-length block must not be written")
+
+                audit = service.write_payload(
+                    WrongLengthSession(),
+                    50,
+                    bytes(before),
+                    bytes(after),
+                    ["Hka_Ew.usSollGenerator"],
+                    WriteAllowlist(),
+                    False,
+                )
+                self.assertFalse(audit.written)
+                self.assertFalse(audit.write_attempted)
+                self.assertIn("changed since", audit.error)
+
+    def test_live_write_rebase_requires_canonical_system_time_mapping(self):
+        for name, metadata_override in (
+            ("wrong-offset", {"offset": 35}),
+            ("wrong-size", {"size": 2}),
+            ("packed", {"packed": True, "bit_offset": 0, "bit_length": 1}),
+        ):
+            with self.subTest(name=name):
+                pack = PackRepository()
+                before = bytearray(70)
+                pack.encode_value(
+                    before, "Hka_Ew.usSollGenerator", "5.3", block=50
+                )
+                after = bytearray(before)
+                pack.encode_value(
+                    after, "Hka_Ew.usSollGenerator", "4.7", block=50
+                )
+                current = bytearray(before)
+                current[36:40] = bytes.fromhex("11 22 33 44")
+                original_field_map = pack.field_map
+
+                def wrong_field_map(
+                    block,
+                    override=metadata_override,
+                    original=original_field_map,
+                ):
+                    fields = {
+                        key: dict(metadata)
+                        for key, metadata in original(block).items()
+                    }
+                    if int(block) == 50:
+                        fields["Hka_Ew.ulSystemTime"].update(override)
+                    return fields
+
+                pack.field_map = wrong_field_map
+                service = DachsService("/dev/null", 19200, 0.1, pack)
+                frame = Frame(
+                    "data", 1, b"", payload=b"\x00" + bytes(current)
+                )
+
+                class ChangedSession:
+                    def read_block(
+                        self,
+                        block,
+                        packet=None,
+                        timeout=0.9,
+                        response_frame=frame,
+                        current_payload=bytes(current),
+                    ):
+                        return BlockResult(
+                            block,
+                            1,
+                            Response(b"", None, response_frame, 1.0),
+                            0,
+                            current_payload,
+                        )
+
+                    def write_block(self, *args, **kwargs):
+                        raise AssertionError(
+                            "non-canonical system-time mapping must not be written"
+                        )
+
+                audit = service.write_payload(
+                    ChangedSession(),
+                    50,
+                    bytes(before),
+                    bytes(after),
+                    ["Hka_Ew.usSollGenerator"],
+                    WriteAllowlist(),
+                    False,
+                )
+
+                self.assertFalse(audit.written)
+                self.assertFalse(audit.write_attempted)
+                self.assertIsNone(audit.prewrite_scope)
+                self.assertIn("changed since", audit.error)
+
+    def test_field_masks_cover_only_the_real_packed_field_bits(self):
+        pack = PackRepository()
+        service = DachsService("/dev/null", 19200, 0.1, pack)
+        key = "Wartung_Ew1.Dicht_Wart.bGeraeusch"
+
+        masks = service._field_masks(100, [key], 70)
+
+        self.assertIsNotNone(masks)
+        self.assertEqual(masks[32], 0b00000011)
+        self.assertEqual(
+            [index for index, mask in enumerate(masks) if mask],
+            [32],
+        )
+        expected = bytearray(70)
+        expected[32] = 0b01010101
+        neighbor_bits_changed = bytearray(expected)
+        neighbor_bits_changed[32] ^= 0b11111100
+        target_bit_changed = bytearray(expected)
+        target_bit_changed[32] ^= 0b00000001
+        self.assertTrue(
+            service._changed_fields_match(
+                100, bytes(expected), bytes(neighbor_bits_changed), [key]
+            )
+        )
+        self.assertFalse(
+            service._changed_fields_match(
+                100, bytes(expected), bytes(target_bit_changed), [key]
+            )
+        )
+
+    def test_system_time_like_drift_is_strict_on_other_cpu_or_block(self):
+        pack = PackRepository()
+        cpu_one_before = bytearray(70)
+        pack.encode_value(
+            cpu_one_before, "Hka_Ew.usSollGenerator", "5.3", block=50
+        )
+        cpu_one_after = bytearray(cpu_one_before)
+        pack.encode_value(
+            cpu_one_after, "Hka_Ew.usSollGenerator", "4.7", block=50
+        )
+        cpu_one_current = bytearray(cpu_one_before)
+        cpu_one_current[36:40] = bytes.fromhex("11 22 33 44")
+
+        other_block_before = bytearray(70)
+        other_block_after = bytearray(other_block_before)
+        pack.encode_value(
+            other_block_after,
+            "Wartung_Ew1.Dicht_Wart.bGeraeusch",
+            "2",
+            raw_mode=True,
+            block=100,
+        )
+        other_block_current = bytearray(other_block_before)
+        other_block_current[36:40] = bytes.fromhex("11 22 33 44")
+
+        for name, cpu, block, before, after, current, key in (
+            (
+                "other-cpu",
+                1,
+                50,
+                cpu_one_before,
+                cpu_one_after,
+                cpu_one_current,
+                "Hka_Ew.usSollGenerator",
+            ),
+            (
+                "other-block",
+                0,
+                100,
+                other_block_before,
+                other_block_after,
+                other_block_current,
+                "Wartung_Ew1.Dicht_Wart.bGeraeusch",
+            ),
+        ):
+            with self.subTest(name=name):
+                frame = Frame(
+                    "data", 1, b"", payload=b"\x00" + bytes(current)
+                )
+
+                class ChangedSession:
+                    def read_block(
+                        self,
+                        requested_block,
+                        packet=None,
+                        timeout=0.9,
+                        cpu=0,
+                        response_frame=frame,
+                        current_payload=bytes(current),
+                    ):
+                        return BlockResult(
+                            requested_block,
+                            1,
+                            Response(b"", None, response_frame, 1.0),
+                            0,
+                            current_payload,
+                        )
+
+                    def write_block(self, *args, **kwargs):
+                        raise AssertionError(
+                            "system-time drift outside CPU 0/block 50 must not be written"
+                        )
+
+                audit = DachsService(
+                    "/dev/null", 19200, 0.1, pack
+                ).write_payload(
+                    ChangedSession(),
+                    block,
+                    bytes(before),
+                    bytes(after),
+                    [key],
+                    WriteAllowlist(),
+                    False,
+                    cpu=cpu,
+                )
+
+                self.assertFalse(audit.written)
+                self.assertFalse(audit.write_attempted)
+                self.assertIsNone(audit.prewrite_scope)
+                self.assertIn("changed since", audit.error)
 
     def test_live_write_retries_a_stale_changed_field_readback(self):
         pack = PackRepository()

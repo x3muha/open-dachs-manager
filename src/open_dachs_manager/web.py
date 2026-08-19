@@ -103,6 +103,7 @@ BACKUP_ARCHIVE_FILENAME = re.compile(
 MAX_JSON_BODY_BYTES = (1024 + 64) * 1024
 POWER_TARGET_BLOCK = 50
 POWER_TARGET_KEY = "Hka_Ew.usSollGenerator"
+POWER_TARGET_AUTH_LEVEL = 4
 POWER_TARGET_FUEL_BLOCK = 24
 POWER_TARGET_FUEL_KEY = "Hka_Mw1.bKraftstofftyp"
 POWER_TARGET_LIMITS_KW = {
@@ -270,6 +271,64 @@ def _json_value(value):
     if isinstance(value, dict):
         return {str(key): _json_value(item) for key, item in value.items()}
     return str(value)
+
+
+def operating_hours_per_start(values: list[dict]) -> dict:
+    """Derive coherent Bh/Start from the two raw Block-22 counters."""
+    source: dict[tuple[int, str], dict] = {}
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        try:
+            identity = (int(item.get("block", -1)), str(item.get("key", "")))
+        except (TypeError, ValueError):
+            continue
+        source[identity] = item
+    seconds_row = source.get((22, "Hka_Bd.ulBetriebssekunden"))
+    starts_row = source.get((22, "Hka_Bd.ulAnzahlStarts"))
+    result = {
+        "available": False,
+        "value": None,
+        "unit": "Bh/Start",
+        "source_block": 22,
+        "operating_seconds": None,
+        "starts": None,
+        "recorded_at": None,
+    }
+    if seconds_row is None or starts_row is None:
+        return result
+
+    def raw_u32(value: object) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            number = value
+        elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+            number = int(value.strip())
+        else:
+            return None
+        return number if 0 <= number <= 0xFFFFFFFF else None
+
+    seconds = raw_u32(seconds_row.get("raw"))
+    starts = raw_u32(starts_row.get("raw"))
+    seconds_recorded = str(seconds_row.get("recorded_at") or "")
+    starts_recorded = str(starts_row.get("recorded_at") or "")
+    if (
+        seconds is None
+        or starts is None
+        or starts == 0
+        or not seconds_recorded
+        or seconds_recorded != starts_recorded
+    ):
+        return result
+    return {
+        **result,
+        "available": True,
+        "value": seconds / 3600.0 / starts,
+        "operating_seconds": seconds,
+        "starts": starts,
+        "recorded_at": seconds_recorded,
+    }
 
 
 def _field_edit_value(field) -> object:
@@ -2856,6 +2915,7 @@ class DachsWebApp:
             "values": values,
             "maintenance": maintenance_status(cache_values),
             "soot_filter": soot_filter,
+            "operating_hours_per_start": operating_hours_per_start(values),
         }
 
     def schema(self) -> dict:
@@ -4380,14 +4440,14 @@ class DachsWebApp:
         self.store.audit(_now(), username, block, payload)
         return payload
 
-    def write_power_target(self, username: str, value: object, auth_level: int, pass4: str) -> dict:
-        """Always execute the dashboard generator target as a checked live write."""
+    def write_power_target(self, username: str, value: object) -> dict:
+        """Write the dashboard target with a fresh server-calculated PW4."""
         return self.write_block(
             username,
             POWER_TARGET_BLOCK,
             [{"key": POWER_TARGET_KEY, "value": value}],
-            auth_level,
-            pass4,
+            POWER_TARGET_AUTH_LEVEL,
+            "",
             True,
         )
 
@@ -4873,9 +4933,8 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     return
                 result = self.app.write_power_target(
                     user["username"], payload.get("value", ""),
-                    int(payload.get("auth_level", -1)), str(payload.get("pass4", "")),
                 )
-                return self._json(result)
+                return self._json(result, status=502 if result.get("error") else 200)
             if path == "/api/maintenance/reports":
                 user = self._require(admin=True)
                 if user is None:

@@ -46,10 +46,12 @@ class HardeningService(DachsService):
             readback_delay=0,
         )
         self.device_payloads = {
+            24: bytes(70),
             50: bytes(70),
             (1, 20): SYNTHETIC_NETWORK_CONFIG_PAYLOAD,
         }
         self.failure_modes = {}
+        self.volatile_time_targets = set()
         self.reset_telemetry()
 
     @staticmethod
@@ -61,6 +63,7 @@ class HardeningService(DachsService):
         self.auth_calls = []
         self.wire_targets = []
         self.read_targets = []
+        self.read_counts = {}
 
     @contextmanager
     def session(self):
@@ -76,10 +79,16 @@ class HardeningService(DachsService):
             raise AssertionError("read outside the fake service session")
         target_key = self.target_key(cpu, block)
         self.read_targets.append((cpu, block))
+        self.read_counts[target_key] = self.read_counts.get(target_key, 0) + 1
+        payload = self.device_payloads[target_key]
+        if target_key in self.volatile_time_targets:
+            payload = bytearray(payload)
+            payload[36:40] = self.read_counts[target_key].to_bytes(4, "little")
+            payload = bytes(payload)
         return SimpleNamespace(
             ok=True,
             status=0x90 | int(block),
-            payload=self.device_payloads[target_key],
+            payload=payload,
             response=SimpleNamespace(
                 elapsed_ms=0.1,
                 crc_errors=0,
@@ -218,6 +227,91 @@ class WriteHardeningHTTPTests(unittest.TestCase):
         self.assertEqual(self.service.auth_calls, [])
         self.assertEqual(self.service.wire_targets, [])
         self.assertEqual(len(self.app.store.audits()), 3)
+
+    def test_overview_power_ignores_browser_auth_fields_and_uses_fresh_pw4(self):
+        status, result = self.request(
+            "/api/overview/power-target",
+            {
+                "value": "5.2",
+                "auth_level": 0,
+                "pass4": "9999",
+                "write_enabled": False,
+                "block": 20,
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(result["written"])
+        self.assertEqual(self.service.auth_calls, [(4, None)])
+        self.assertEqual([item[:2] for item in self.service.wire_targets], [(0, 50)])
+        self.assertIn((0, 24), self.service.read_targets)
+        self.assertEqual(result["auth_level_requested"], 4)
+        self.assertEqual(result["auth_level_granted"], 4)
+
+        self.service.failure_modes[50] = "negative-ack"
+        status, failed = self.request(
+            "/api/overview/power-target",
+            {"value": "5.1", "pass4": "1111", "auth_level": 1},
+        )
+        self.assertEqual(status, 502)
+        self.assertFalse(failed["written"])
+        self.assertFalse(failed["ack_positive"])
+        self.assertIn("positive ACK", failed["error"])
+
+    def test_overview_power_rebases_only_system_time_and_keeps_ack_readback_guards(self):
+        self.service.volatile_time_targets.add(50)
+        status, result = self.request(
+            "/api/overview/power-target",
+            {"value": "5.2"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(result["written"])
+        self.assertEqual(result["prewrite_scope"], "stable-fields")
+        self.assertEqual(
+            result["rebased_volatile_keys"],
+            ["Hka_Ew.ulSystemTime"],
+        )
+        self.assertEqual(result["readback_scope"], "changed-fields")
+        self.assertEqual(len(self.service.wire_targets), 1)
+        wire = self.service.wire_targets[0][2]
+        self.assertEqual(wire[8:10], (5200).to_bytes(2, "little"))
+        self.assertEqual(wire[36:40], (2).to_bytes(4, "little"))
+        self.assertEqual(bytes.fromhex(result["before_hex"])[36:40], wire[36:40])
+        self.assertEqual(bytes.fromhex(result["after_hex"]), wire)
+        stored = self.app.store.audits(limit=1)[0]["audit"]
+        self.assertEqual(stored["prewrite_scope"], "stable-fields")
+        self.assertEqual(
+            stored["rebased_volatile_keys"],
+            ["Hka_Ew.ulSystemTime"],
+        )
+        self.assertEqual(stored["before_hex"], result["before_hex"])
+        self.assertEqual(stored["after_hex"], result["after_hex"])
+
+        self.service.reset_telemetry()
+        self.service.failure_modes[50] = "negative-ack"
+        status, negative = self.request(
+            "/api/overview/power-target",
+            {"value": "5.1"},
+        )
+        self.assertEqual(status, 502)
+        self.assertTrue(negative["write_attempted"])
+        self.assertFalse(negative["ack_positive"])
+        self.assertEqual(negative["prewrite_scope"], "stable-fields")
+        self.assertEqual(self.service.read_counts[50], 2)
+
+        self.service.reset_telemetry()
+        self.service.failure_modes[50] = "readback-mismatch"
+        status, mismatch = self.request(
+            "/api/overview/power-target",
+            {"value": "5.0"},
+        )
+        self.assertEqual(status, 502)
+        self.assertTrue(mismatch["write_attempted"])
+        self.assertTrue(mismatch["ack_positive"])
+        self.assertFalse(mismatch["readback_ok"])
+        self.assertEqual(mismatch["prewrite_scope"], "stable-fields")
+        self.assertIn("readback mismatch", mismatch["error"])
 
     def test_negative_ack_and_readback_mismatch_are_audited_http_failures(self):
         self.service.failure_modes[(1, 20)] = "negative-ack"

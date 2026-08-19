@@ -158,7 +158,7 @@ URLs, Browser-Lesezeichen oder öffentliche Fehlerberichte gelangen.
 
 ## Reifegrad
 
-Version 1.5.0 basiert auf dem ersten stabilen öffentlichen Stand und wird ohne
+Version 1.5.2 basiert auf dem ersten stabilen öffentlichen Stand und wird ohne
 Garantie bereitgestellt. Gerätevarianten und Packstände können abweichen.
 Leseergebnisse und Feldlagen am tatsächlichen Zielgerät verifizieren, bevor
 Schreibvorgänge freigegeben werden.

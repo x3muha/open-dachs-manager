@@ -1,9 +1,9 @@
-# Open Dachs Manager · V3 1.5.0
+# Open Dachs Manager · V3 1.5.2
 
 Lokale Bedienung, Überwachung und Wartungsdokumentation für Dachs-Anlagen mit
 MSR2-Regler – über die optische serielle Schnittstelle und ohne Cloud-Zwang.
 
-> **Projektstatus: Version 1.5.0.** Lesen, Dekodieren, Wartungs-Testmodus und der
+> **Projektstatus: Version 1.5.2.** Lesen, Dekodieren, Wartungs-Testmodus und der
 > zentrale Serialworker sind an einer Anlage praktisch erprobt. Ein echter
 > Schreibvorgang erfordert immer die ausdrückliche Schreibfreigabe,
 > Authentifizierung, eine positive Antwort und die anschließende Rückleseprüfung.
@@ -16,7 +16,7 @@ Open Dachs Manager ist ein unabhängiges Open-Source-Community-Projekt.
 
 | Bereich | Funktionen |
 |---|---|
-| **Übersicht** | Wirkleistung Ist/Soll, Wartungsrestzeit, frei auswählbare Live-Kacheln und technisches Anlagenbild mit Rußfilterschätzung |
+| **Übersicht** | Wirkleistung Ist/Soll mit automatisch berechnetem PW4, Betriebsstunden je Start, Wartungsrestzeit, frei auswählbare Live-Kacheln und technisches Anlagenbild mit Rußfilterschätzung |
 | **Überwachung** | Live-Werte, Anlagenbild, Historien, Service- und Warnmeldungen |
 | **Wartung** | Vollständiges 38-Ziele-Pflichtbackup, schreibfreier Gesamtsnapshot, digitale Checkliste, Vorher-/Nachher-Werte und PDF/HTML/JSON |
 | **Backup** | Geschütztes Wartungsarchiv, alle 36 Reglerblöcke und Block 16 beider Netzschutz-CPUs sichern, Abbilder prüfen und ausgewählte Ziele im Dry-Run oder kontrolliert wiederherstellen |

@@ -783,6 +783,14 @@
       <div class="changelog-list">
         <article class="changelog-entry current">
           <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-08-18">18.08.2026</time><span>Aktuell</span></header>
+          <ul><li>Die Stabilitätsprüfung von Block 50 erkennt ausschließlich die laufende Systemzeit an Byte 36 bis 39 als zulässige Zwischenänderung.</li><li>Der neue Leistungswert wird auf den frisch gelesenen Block gesetzt; jede Änderung an Zielwert, Nachbarfeldern, Blocklänge oder Felddefinition bricht den Vorgang weiterhin sicher ab.</li><li>Positive Reglerbestätigung und Rückleseprüfung bleiben zwingend, sodass keine veralteten Blockdaten zurückgeschrieben werden.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.5.1</strong><time datetime="2026-08-18">18.08.2026</time></header>
+          <ul><li>Der Leistungs-Sollwert im Hauptmenü berechnet PW4 beim Schreiben automatisch aus frisch gelesenen Anlagendaten; der Umweg über die Einstellungen entfällt.</li><li>Eine feste Übersichtskachel zeigt Betriebsstunden je Start als <code>Bh/Start</code>, berechnet aus den rohen Zählern desselben Block-22-Telegramms.</li><li>Null Starts, ungültige Zähler oder zeitlich nicht zusammengehörige Werte führen sicher zu einer leeren Anzeige und lösen keinen zusätzlichen seriellen Zugriff aus.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.5.0</strong><time datetime="2026-08-18">18.08.2026</time></header>
           <ul><li>Jeder Wartungsstart erzeugt vor dem Bericht automatisch ein vollständiges und geprüftes Backup aller 38 freigegebenen CPU-/Blockziele.</li><li>Das geschützte Archiv zeigt Integrität, Zielergebnis, Packrevision und SHA-256-Bindungen und verknüpft jedes Abbild mit seinem Wartungsbericht.</li><li>Archivierte Abbilder lassen sich unverändert herunterladen oder nach erneuter serverseitiger Prüfung mit leerer Auswahl in den sicheren Wiederherstellungs-Dry-Run laden.</li><li>Das Löschen eines Wartungsberichts entfernt das zugehörige Backup ausdrücklich nicht.</li></ul>
         </article>
         <article class="changelog-entry">
@@ -854,6 +862,6 @@
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="static/app.js?v=38"></script>
+  <script src="static/app.js?v=39"></script>
 </body>
 </html>

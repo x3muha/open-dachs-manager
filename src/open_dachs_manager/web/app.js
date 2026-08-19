@@ -412,9 +412,22 @@ function dashboardCards() {
   return state.dashboard.settings?.cards || state.dashboard.settings?.default_cards || [];
 }
 
+function operatingHoursPerStartCard() {
+  const metric = state.live?.operating_hours_per_start;
+  const ratio = Number(metric?.value);
+  const available = metric?.available === true && Number.isFinite(ratio);
+  const value = available
+    ? `${ratio.toLocaleString("de-DE", { maximumFractionDigits: 1 })} Bh/Start`
+    : "—";
+  const extra = available
+    ? `Block 22 · ${Number(metric.starts).toLocaleString("de-DE")} Starts`
+    : "Block 22 · wartet auf gültige Betriebssekunden und Starts";
+  return `<article class="metric-card metric-card-derived"><div class="metric-label">Betriebsstunden je Start</div><div class="metric-value">${escapeHtml(value)}</div><div class="metric-extra">${escapeHtml(extra)}</div></article>`;
+}
+
 function renderOverview() {
   const cards = dashboardCards();
-  $("overviewCards").innerHTML = cards.map((card) => {
+  const configuredCards = cards.map((card) => {
     const field = dashboardField(card.block, card.key);
     const row = dashboardRow(card.block, card.key);
     const knownSeries = (state.schema?.series || []).find((item) => Number(item.block) === Number(card.block) && item.key === card.key);
@@ -422,7 +435,8 @@ function renderOverview() {
     const label = field?.label || card.key;
     const value = row && !invalid ? formatValue(row.value, row.unit || field?.unit || "") : "—";
     return `<article class="metric-card"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${value}</div><div class="metric-extra">Block ${escapeHtml(card.block)} · ${row && !invalid ? escapeHtml(row.recorded_at) : "wartet auf Messung"}</div></article>`;
-  }).join("") || `<article class="metric-card metric-card-empty"><div class="metric-label">Keine Kacheln gewählt</div><div class="metric-extra">Als Admin über „Bearbeiten“ Werte hinzufügen.</div></article>`;
+  }).join("");
+  $("overviewCards").innerHTML = operatingHoursPerStartCard() + configuredCards;
   const motor = ["motorstatus", "drehzahl", "wirkleistung", "betriebsstunden", "kuehlwasser", "regler"].map((id) => seriesValue(id)).filter((row, index) => row && !isInvalidSensor(["motorstatus", "drehzahl", "wirkleistung", "betriebsstunden", "kuehlwasser", "regler"][index], row));
   $("motorStateCards").innerHTML = motor.map((row) => `<div class="detail-item"><div class="detail-label">${escapeHtml(row.label)}</div><div class="detail-value">${formatValue(row.value, row.unit)}</div></div>`).join("") || `<p class="muted">Noch keine Motordaten.</p>`;
   const system = ["servicecode", "warncode", "anzahl_warnungen", "anzahl_stoerungen"].map((id) => seriesValue(id)).filter(Boolean);
@@ -643,11 +657,10 @@ function renderOverviewPowerWriteMode() {
     note.textContent = "Gastzugang: Sollwert ist nicht editierbar.";
     return;
   }
-  const authLevel = Number($("authLevel")?.value ?? -1);
-  mode.textContent = `Admin · LIVE · Auth ${authLevel}`;
+  mode.textContent = "Admin · LIVE · PW4 automatisch";
   mode.className = "status-pill warn";
   button.textContent = "Sollwert schreiben";
-  note.textContent = "Immer schreibbereit: Read → Validate → Auth/PW4 → Write → Readback.";
+  note.textContent = "PW4 wird beim Schreiben frisch aus der Anlage berechnet; Prüfung und Rücklesekontrolle bleiben aktiv.";
 }
 
 function updateOverviewPowerTarget(field) {
@@ -676,8 +689,6 @@ async function applyOverviewPowerTarget(event) {
   try {
     const result = await api("/api/overview/power-target", { method: "POST", body: JSON.stringify({
       value,
-      auth_level: Number($("authLevel").value || -1),
-      pass4: $("pass4").value,
     }) });
     if (result.written) {
       const block = await api("/api/block/50");
@@ -2804,7 +2815,6 @@ document.addEventListener("DOMContentLoaded", () => {
     updateWriteGuard();
     if ($("writeEnabled").checked && !$("pass4").value) await refreshAuthPreview();
   });
-  $("authLevel").addEventListener("change", renderOverviewPowerWriteMode);
   $("authPreviewButton").addEventListener("click", refreshAuthPreview);
   $("authPreviewApply").addEventListener("click", applyAuthPreview);
   $("passwordForm").addEventListener("submit", changePassword);

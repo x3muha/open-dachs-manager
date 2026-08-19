@@ -1,6 +1,6 @@
 # Open Dachs Manager – Bedienungsanleitung
 
-Stand: 18.08.2026 · Version V3 1.5.0
+Stand: 18.08.2026 · Version V3 1.5.2
 
 Diese Anleitung beschreibt den täglichen Betrieb der Weboberfläche, CLI und
 TUI. Installation und Migration stehen ausführlich in
@@ -61,8 +61,15 @@ gespeichert.
 Die Startseite beginnt mit `Wirkleistung Ist / Soll`. Der Wartungsstatus steht
 oben neben `Seriell OK` als verbleibende Betriebsstunden und Tage; ein Klick
 öffnet direkt die Wartungsansicht. Der Leistungs-Sollwert ist für Gäste nur
-lesbar. Ein Admin-Schreibvorgang benötigt weiterhin Authentifizierung,
-Bestätigung und Readback.
+lesbar. Bei einem Admin-Schreibvorgang liest der Server Seriennummer und
+Betriebsstunden frisch aus der Anlage, berechnet daraus PW4 und fordert fest
+Auth-Level 4 an. Positive Reglerbestätigung und Rückleseprüfung bleiben
+zwingend; der Browser übermittelt weder PW4 noch Auth-Level.
+
+Die feste Kachel `Betriebsstunden je Start` verwendet die rohen
+Betriebssekunden und Starts aus demselben Block-22-Telegramm. Sie löst keinen
+zusätzlichen seriellen Zugriff aus. Bei null Starts, ungültigen Zählern oder
+nicht zusammengehörigen Messzeitpunkten zeigt sie bewusst keinen Wert.
 
 Admins können die Live-Kacheln über `Bearbeiten` frei sortieren, entfernen und
 mit `+` aus allen gemappten Werten ergänzen. Die Pfeile funktionieren auch auf
@@ -104,7 +111,7 @@ Der daraus erzeugte Entwurf wird lokal gespeichert. Checkliste, zusätzliche
 lokale Arbeitsliste, Monteur, Messwerte und Bemerkungen lassen sich fortlaufend
 ergänzen. HTML-, dreiseitiger PDF-Bericht und JSON-Export stehen zur Verfügung.
 
-V3 1.5.0 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
+V3 1.5.2 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
 die Oberfläche die exakte Eingabe `DEMO ABSCHLIESSEN`. Danach wird der Bericht
 lokal validiert, unveränderlich archiviert und deutlich als Demo gekennzeichnet.
 Der Abschluss öffnet keine Serialworker-Sitzung, schreibt weder Block 100 noch

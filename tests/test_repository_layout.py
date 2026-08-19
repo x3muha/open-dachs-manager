@@ -23,7 +23,7 @@ class RepositoryLayoutTests(unittest.TestCase):
             project["tool"]["setuptools"]["dynamic"]["version"],
             {"attr": "open_dachs_manager.__version__"},
         )
-        self.assertEqual(__version__, "1.5.0")
+        self.assertEqual(__version__, "1.5.2")
         self.assertEqual(DachsRequestHandler.server_version, f"OpenDachsManager/{__version__}")
         scripts = project["project"]["scripts"]
         self.assertEqual(scripts["open-dachs"], "open_dachs_manager.cli:main")
@@ -32,6 +32,19 @@ class RepositoryLayoutTests(unittest.TestCase):
             "open_dachs_manager.serial_worker:main",
         )
         self.assertEqual(DEFAULT_SERIAL_WORKER_SOCKET, "/run/open-dachs-manager/serial.sock")
+
+    def test_public_release_documents_match_runtime_version(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        manual = (ROOT / "docs/BEDIENUNGSANLEITUNG.md").read_text(encoding="utf-8")
+        safety = (ROOT / "docs/SAFETY.md").read_text(encoding="utf-8")
+
+        self.assertTrue(
+            readme.startswith(f"# Open Dachs Manager · V3 {__version__}\n")
+        )
+        self.assertIn(f"**Projektstatus: Version {__version__}.**", readme)
+        self.assertIn(f"Version V3 {__version__}", manual)
+        self.assertIn(f"V3 {__version__} wird standardmäßig", manual)
+        self.assertIn(f"Version {__version__} basiert", safety)
 
     def test_installation_assets_are_present_and_executable(self):
         for relative in (
@@ -213,6 +226,24 @@ class RepositoryLayoutTests(unittest.TestCase):
         self.assertLess(index.index('x="469" y="171" text-anchor="middle">GENERATOR'), index.index('x="758" y="171" text-anchor="middle">MOTOR'))
         self.assertNotIn('class="hmi-generator"', index)
         self.assertNotIn('class="tech95-generator-symbol"', index)
+
+    def test_overview_has_derived_hours_per_start_and_automatic_pw4(self):
+        app = (ROOT / "src/open_dachs_manager/web/app.js").read_text(encoding="utf-8")
+        ratio_start = app.index("function operatingHoursPerStartCard()")
+        ratio_end = app.index("\nfunction renderOverview()", ratio_start)
+        ratio = app[ratio_start:ratio_end]
+        self.assertIn("state.live?.operating_hours_per_start", ratio)
+        self.assertIn('maximumFractionDigits: 1', ratio)
+        self.assertIn("Bh/Start", ratio)
+        self.assertIn("Betriebsstunden je Start", ratio)
+
+        write_start = app.index("async function applyOverviewPowerTarget(event)")
+        write_end = app.index("\nfunction updateConnection()", write_start)
+        write = app[write_start:write_end]
+        self.assertIn('/api/overview/power-target', write)
+        self.assertNotIn('authLevel', write)
+        self.assertNotIn('pass4', write)
+        self.assertIn('PW4 automatisch', app)
 
 
 if __name__ == "__main__":

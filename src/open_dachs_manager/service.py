@@ -37,6 +37,9 @@ BACKUP_PRODUCT_NAME = "Open Dachs Manager"
 BACKUP_PACK_NAME = "MSR2 Dachs Runtime Pack"
 MAX_RESTORE_PAYLOAD_LENGTH = 4094
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_PREWRITE_VOLATILE_FIELDS = {
+    (0, 50): (70, (("Hka_Ew.ulSystemTime", 36, 4),)),
+}
 
 # One reviewed recovery scope for browser backups, maintenance captures and
 # archive verification.  Layout-4 network blocks 20/21 deliberately stay out:
@@ -218,6 +221,8 @@ class WriteAudit:
     readback_scope: str | None = None
     readback_attempts: int = 0
     write_attempted: bool = False
+    prewrite_scope: str | None = None
+    rebased_volatile_keys: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -237,6 +242,8 @@ class WriteAudit:
             "readback_scope": self.readback_scope,
             "readback_attempts": self.readback_attempts,
             "write_attempted": self.write_attempted,
+            "prewrite_scope": self.prewrite_scope,
+            "rebased_volatile_keys": list(self.rebased_volatile_keys),
         }
 
 
@@ -314,6 +321,36 @@ class DachsService:
             return f"Netzschutz · Überwachungs-CPU {cpu}"
         return self.pack.block_name(block)
 
+    def _field_masks(
+        self,
+        block: int,
+        keys: list[str] | tuple[str, ...],
+        payload_length: int,
+    ) -> list[int] | None:
+        """Return one bit mask per payload byte for mapped fields."""
+        if payload_length < 0 or not keys:
+            return None
+        fields = self.pack.field_map(block)
+        masks = [0] * payload_length
+        for key in keys:
+            metadata = fields.get(key)
+            if metadata is None:
+                return None
+            offset = int(metadata["offset"])
+            size = int(metadata["size"])
+            if offset < 0 or size < 1 or offset + size > payload_length:
+                return None
+            if metadata.get("packed"):
+                bit_offset = int(metadata["bit_offset"])
+                bit_length = int(metadata["bit_length"])
+                if size != 1 or bit_offset < 0 or bit_length < 1 or bit_offset + bit_length > 8:
+                    return None
+                masks[offset] |= ((1 << bit_length) - 1) << bit_offset
+            else:
+                for index in range(offset, offset + size):
+                    masks[index] = 0xFF
+        return masks
+
     def _changed_fields_match(
         self,
         block: int,
@@ -327,26 +364,76 @@ class DachsService:
         the complete block to remain byte-identical after a write therefore
         creates false failures even when the requested field was persisted.
         """
-        if len(expected) != len(actual) or not changed_keys:
+        if len(expected) != len(actual):
             return False
+        masks = self._field_masks(block, changed_keys, len(expected))
+        if masks is None:
+            return False
+        return all(
+            ((expected[index] ^ actual[index]) & mask) == 0
+            for index, mask in enumerate(masks)
+        )
+
+    def _rebase_known_volatile_fields(
+        self,
+        block: int,
+        cpu: int,
+        before: bytes,
+        after: bytes,
+        current: bytes,
+        changed_keys: list[str],
+    ) -> tuple[bytes, bytes, tuple[str, ...]] | None:
+        """Rebase declared changes only when every concurrent change is known volatile."""
+        if len(before) != len(after) or len(before) != len(current):
+            return None
+        volatile_spec = _PREWRITE_VOLATILE_FIELDS.get((int(cpu), int(block)))
+        if volatile_spec is None:
+            return None
+        expected_length, field_specs = volatile_spec
+        if len(before) != expected_length:
+            return None
         fields = self.pack.field_map(block)
-        for key in changed_keys:
+        for key, expected_offset, expected_size in field_specs:
             metadata = fields.get(key)
-            if metadata is None:
-                return False
-            offset = int(metadata["offset"])
-            size = int(metadata["size"])
-            if offset < 0 or offset + size > len(expected):
-                return False
-            if metadata.get("packed"):
-                bit_offset = int(metadata["bit_offset"])
-                bit_length = int(metadata["bit_length"])
-                mask = ((1 << bit_length) - 1) << bit_offset
-                if (expected[offset] & mask) != (actual[offset] & mask):
-                    return False
-            elif expected[offset:offset + size] != actual[offset:offset + size]:
-                return False
-        return True
+            if (
+                metadata is None
+                or bool(metadata.get("packed"))
+                or int(metadata.get("offset", -1)) != expected_offset
+                or int(metadata.get("size", -1)) != expected_size
+            ):
+                return None
+        changed_key_set = set(changed_keys)
+        volatile_keys = tuple(
+            key for key, _offset, _size in field_specs if key not in changed_key_set
+        )
+        volatile_masks = self._field_masks(block, volatile_keys, len(before))
+        changed_masks = self._field_masks(block, changed_keys, len(before))
+        if volatile_masks is None or changed_masks is None:
+            return None
+
+        # Target bits are never accepted as volatility, even if a future
+        # packed layout happens to share their storage byte.
+        volatile_masks = [
+            volatile_mask & (~changed_mask & 0xFF)
+            for volatile_mask, changed_mask in zip(volatile_masks, changed_masks)
+        ]
+        if any(
+            ((before[index] ^ current[index]) & (~volatile_masks[index] & 0xFF)) != 0
+            for index in range(len(before))
+        ):
+            return None
+        # Never carry an undeclared encoder-side byte change into the wire
+        # payload merely because a volatile controller field also moved.
+        if any(
+            ((before[index] ^ after[index]) & (~changed_masks[index] & 0xFF)) != 0
+            for index in range(len(before))
+        ):
+            return None
+
+        rebased = bytearray(current)
+        for index, mask in enumerate(changed_masks):
+            rebased[index] = (rebased[index] & (~mask & 0xFF)) | (after[index] & mask)
+        return current, bytes(rebased), volatile_keys
 
     def write_payload(
         self,
@@ -424,10 +511,27 @@ class DachsService:
         ack_positive: bool | None = None
         readback_attempts = 0
         write_attempted = False
+        prewrite_scope: str | None = None
+        rebased_volatile_keys: tuple[str, ...] = ()
         try:
             current = self.read_block(session, block, cpu=cpu)
-            if not current.ok or current.payload != before:
+            if not current.ok:
                 raise RuntimeError("block changed since it was loaded; reload before writing")
+            if current.payload == before:
+                prewrite_scope = "block"
+            else:
+                rebased = self._rebase_known_volatile_fields(
+                    block,
+                    cpu,
+                    before,
+                    after,
+                    bytes(current.payload),
+                    changed_keys,
+                )
+                if rebased is None:
+                    raise RuntimeError("block changed since it was loaded; reload before writing")
+                before, after, rebased_volatile_keys = rebased
+                prewrite_scope = "stable-fields"
             write_attempted = True
             if cpu:
                 response = session.write_block(
@@ -472,6 +576,8 @@ class DachsService:
                 readback_scope,
                 readback_attempts,
                 True,
+                prewrite_scope,
+                rebased_volatile_keys,
             )
         except Exception as exc:
             return WriteAudit(
@@ -489,6 +595,8 @@ class DachsService:
                 cpu=cpu,
                 readback_attempts=readback_attempts,
                 write_attempted=write_attempted,
+                prewrite_scope=prewrite_scope,
+                rebased_volatile_keys=rebased_volatile_keys,
             )
 
     def backup(
