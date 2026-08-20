@@ -9,6 +9,28 @@ from .transport import SerialSession
 
 
 AUTH_INPUT_BLOCK_LENGTHS = {20: 70, 22: 70}
+AUTH_LEVEL_MIN = 1
+AUTH_LEVEL_MAX = 5
+
+
+def validate_auth_level(value: object, context: str = "Auth-Level") -> int:
+    """Return one of the five supported MSR2 privilege levels.
+
+    The original Java UI names roles 1 through 4; the legacy V2 writer and
+    backup tools additionally use level 5.  The wire field is one byte wide,
+    but the controller echoes arbitrary higher byte values as if they had
+    been granted.  The explicit 1..5 boundary prevents that transport echo
+    from being mistaken for an unbounded privilege.
+    Validation is deliberately strict: booleans, strings and floats do not
+    become an auth request through implicit integer conversion.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{context} muss eine ganze Zahl sein")
+    if not AUTH_LEVEL_MIN <= value <= AUTH_LEVEL_MAX:
+        raise ValueError(
+            f"{context} muss zwischen {AUTH_LEVEL_MIN} und {AUTH_LEVEL_MAX} liegen"
+        )
+    return value
 
 
 def calculate_pw4(serial_number: str, operating_hours: int) -> str:
@@ -89,7 +111,7 @@ def read_auth_inputs(
         raise RuntimeError("cannot read authentication inputs from blocks 20 and 22")
     # Keep interactive authentication compatible with controllers/tests that
     # expose only the decoded prefix.  The maintenance archive uses the strict
-    # full-payload helper above because it must prove a complete 38-target
+    # full-payload helper above because it must prove a complete 42-target
     # capture before it is allowed to become a recovery image.
     values20 = {item.key: item.raw for item in pack.decode(20, block20.payload)}
     values22 = {item.key: item.raw for item in pack.decode(22, block22.payload)}
@@ -111,7 +133,9 @@ class AuthResult:
 
     @property
     def ok(self) -> bool:
-        return self.granted_level is not None and self.granted_level >= self.requested_level
+        # The tested controller echoes arbitrary byte values.  Only an exact
+        # response can therefore confirm the requested supported level.
+        return self.granted_level == self.requested_level
 
     def as_dict(self, reveal_secret: bool = False) -> dict:
         out = {
@@ -134,18 +158,17 @@ def authenticate(
     pass4_override: str | None = None,
     timeout: float = 0.9,
 ) -> AuthResult:
-    if not 0 <= int(level) <= 255:
-        raise ValueError("auth level must be in range 0..255")
+    level = validate_auth_level(level)
     inputs = read_auth_inputs(session, pack, timeout)
     serial_number = inputs.serial_number
     operating_hours = inputs.operating_hours
     pw4 = str(pass4_override or calculate_pw4(serial_number, operating_hours)).strip()
     if len(pw4) != 4 or not pw4.isdigit():
         raise ValueError("PW4 must contain exactly four digits")
-    auth_payload = bytes([0x7E]) + pw4.encode("ascii") + bytes([int(level)])
+    auth_payload = bytes([0x7E]) + pw4.encode("ascii") + bytes([level])
     packet = session.next_packet() if hasattr(session, "next_packet") else 1
     response = session.request(auth_payload, packet=packet, timeout=timeout)
     granted = None
     if response.data and len(response.data.payload) >= 2 and response.data.payload[0] == 0xFE:
         granted = int(response.data.payload[1])
-    return AuthResult(serial_number, operating_hours, int(level), granted, pw4, response.data.raw.hex(" ").upper() if response.data else None)
+    return AuthResult(serial_number, operating_hours, level, granted, pw4, response.data.raw.hex(" ").upper() if response.data else None)

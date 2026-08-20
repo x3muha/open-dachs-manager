@@ -149,8 +149,10 @@ Wartungsberichte, automatische Reglerabbilder und Audit-Informationen.
 Automatische Wartungsbackups liegen einzeln unter
 `/var/lib/open-dachs-manager/backup-archive/`. Das Verzeichnis gehört
 `open-dachs:open-dachs` und hat Modus `0700`; jede JSON-Datei hat Modus `0600`.
-Jeder Eintrag muss Metadaten, Datei, Abbild-SHA-256 und Datei-SHA-256
-konsistent binden und 38 erfolgreiche von 38 angeforderten Zielen ausweisen.
+Jeder neue Eintrag muss Metadaten, Datei, Abbild-SHA-256 und Datei-SHA-256
+konsistent binden und 42 erfolgreiche von 42 angeforderten Sicherungszielen
+mit exakt 38 Restore-Zielen ausweisen. Geprüfte ältere Archive behalten ihren
+38/38-Altvertrag.
 Das Löschen eines Wartungsberichts löscht dieses Sicherungsabbild nicht.
 Die Dateien werden nicht automatisch ausgedünnt. Das lokale Archiv liegt auf
 demselben Datenträger wie die Anwendung und ersetzt daher keine regelmäßige

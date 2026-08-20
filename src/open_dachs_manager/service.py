@@ -22,10 +22,14 @@ from .auth import (
 )
 from .mapping import PackRepository, WriteAllowlist
 from .network_protection import (
+    NETWORK_PROTECTION_BACKUP_BLOCKS,
     NETWORK_PROTECTION_BLOCK,
     NETWORK_PROTECTION_CPUS,
     NETWORK_PROTECTION_PAYLOAD_LENGTH,
+    NETWORK_PROTECTION_RESTORE_BLOCKS,
     decode_network_protection,
+    network_protection_name,
+    network_protection_payload_length,
 )
 from .serial_worker import SerialWorkerSession
 from .transport import BlockResult, SerialSession, validate_block
@@ -41,29 +45,43 @@ _PREWRITE_VOLATILE_FIELDS = {
     (0, 50): (70, (("Hka_Ew.ulSystemTime", 36, 4),)),
 }
 
-# One reviewed recovery scope for browser backups, maintenance captures and
-# archive verification.  Layout-4 network blocks 20/21 deliberately stay out:
-# B20 has not completed a physical restore acceptance test and B21 is live
-# telemetry without a write service.
+# One reviewed capture scope for browser backups and maintenance archives.
+# Network blocks 20/21 are preserved and verified, but remain outside the
+# narrower restore scope: B20 has no physical restore acceptance test and B21
+# is live telemetry without a write service.
 BACKUP_CPU0_BLOCKS = (
     18, 20, 22, 24, 26, 28, 30, 31, 32, 34, 36, 38, 46, 50, 52, 54, 56,
     60, 62, 66, 70, 76, 80, 82, 84, 86, 88, 90, 92, 94, 100, 102, 104,
     110, 112, 114,
 )
-BACKUP_TARGETS = tuple((0, block) for block in BACKUP_CPU0_BLOCKS) + (
+BACKUP_LEGACY_TARGETS = tuple((0, block) for block in BACKUP_CPU0_BLOCKS) + (
     (1, NETWORK_PROTECTION_BLOCK),
     (2, NETWORK_PROTECTION_BLOCK),
 )
+BACKUP_RESTORE_TARGETS = tuple((0, block) for block in BACKUP_CPU0_BLOCKS) + tuple(
+    (cpu, block)
+    for cpu in NETWORK_PROTECTION_CPUS
+    for block in NETWORK_PROTECTION_RESTORE_BLOCKS
+)
+BACKUP_TARGETS = tuple((0, block) for block in BACKUP_CPU0_BLOCKS) + tuple(
+    (cpu, block)
+    for cpu in NETWORK_PROTECTION_CPUS
+    for block in NETWORK_PROTECTION_BACKUP_BLOCKS
+)
 BACKUP_PAYLOAD_LENGTHS = {
     target: (
-        NETWORK_PROTECTION_PAYLOAD_LENGTH
+        network_protection_payload_length(target[1])
         if target[0]
         else {31: 14, 36: 30, 38: 2, 46: 10}.get(target[1], 70)
     )
     for target in BACKUP_TARGETS
 }
-if len(BACKUP_TARGETS) != 38 or len(set(BACKUP_TARGETS)) != 38:  # pragma: no cover
-    raise RuntimeError("the reviewed backup target set must contain exactly 38 targets")
+if len(BACKUP_TARGETS) != 42 or len(set(BACKUP_TARGETS)) != 42:  # pragma: no cover
+    raise RuntimeError("the reviewed backup capture set must contain exactly 42 targets")
+if len(BACKUP_RESTORE_TARGETS) != 38:  # pragma: no cover
+    raise RuntimeError("the reviewed backup restore set must contain exactly 38 targets")
+if BACKUP_RESTORE_TARGETS != BACKUP_LEGACY_TARGETS:  # pragma: no cover
+    raise RuntimeError("network restore eligibility drifted from the legacy 38-target contract")
 
 
 def _canonical_json(data: dict) -> bytes:
@@ -284,8 +302,8 @@ class DachsService:
         """Return a strictly validated ``(cpu, block)`` backup target.
 
         Integer values retain the original v3 meaning (regulator CPU 0).
-        Target objects additionally expose the two network-monitor CPUs; those
-        CPUs deliberately have only their known block 16 address in scope.
+        Target objects additionally expose the reviewed block 16, 20 and 21
+        capture addresses on the two network-monitor CPUs.
         """
         if isinstance(value, bool):
             raise ValueError("backup target must be an integer or an object")
@@ -310,15 +328,16 @@ class DachsService:
             return cpu, block
         if cpu not in NETWORK_PROTECTION_CPUS:
             raise ValueError(f"backup target CPU must be 0, 1 or 2, got {cpu}")
-        if block != NETWORK_PROTECTION_BLOCK:
+        if block not in NETWORK_PROTECTION_BACKUP_BLOCKS:
             raise ValueError(
-                f"CPU {cpu} exposes only network-protection block {NETWORK_PROTECTION_BLOCK}"
+                f"CPU {cpu} exposes only reviewed network blocks "
+                f"{', '.join(str(item) for item in NETWORK_PROTECTION_BACKUP_BLOCKS)}"
             )
         return cpu, block
 
     def _backup_target_name(self, cpu: int, block: int) -> str:
         if cpu:
-            return f"Netzschutz · Überwachungs-CPU {cpu}"
+            return network_protection_name(cpu, block)
         return self.pack.block_name(block)
 
     def _field_masks(
@@ -656,12 +675,13 @@ class DachsService:
             network_values = None
             if record["ok"] and cpu:
                 try:
-                    if len(payload) != NETWORK_PROTECTION_PAYLOAD_LENGTH:
+                    expected_length = network_protection_payload_length(block)
+                    if len(payload) != expected_length:
                         raise ValueError(
-                            f"erwartet {NETWORK_PROTECTION_PAYLOAD_LENGTH} Byte, "
+                            f"erwartet {expected_length} Byte, "
                             f"empfangen {len(payload)} Byte"
                         )
-                    network_values = decode_network_protection(cpu, payload)
+                    network_values = decode_network_protection(cpu, payload, block)
                 except ValueError as exc:
                     # Keep the raw capture visible in a partial image, but do
                     # not label an invalid safety-controller payload as
@@ -730,7 +750,7 @@ class DachsService:
         decode: bool = True,
         created_by: str = "system",
     ) -> tuple[dict, dict[tuple[int, int], dict]]:
-        """Capture the reviewed 38-target image exactly once in one session.
+        """Capture the reviewed 42-target image exactly once in one session.
 
         The returned capture is the sole source for the maintenance report.
         Controller identity is decoded from the already captured CPU-0 blocks
@@ -784,7 +804,7 @@ class DachsService:
                             f"erwartet {expected_length} Byte, empfangen {len(payload)} Byte"
                         )
                     if cpu:
-                        decoded_values = decode_network_protection(cpu, payload)
+                        decoded_values = decode_network_protection(cpu, payload, block)
                     elif decode:
                         decoded_values = self.pack.display_fields(block, payload)
                 except Exception as exc:
@@ -868,7 +888,7 @@ class DachsService:
             },
             "controller": controller,
             "maintenance_archive": {
-                "version": 1,
+                "version": 2,
                 "source": "maintenance",
                 "created_by": _short_text(created_by, "maintenance_archive.created_by", 128),
             },
@@ -950,12 +970,23 @@ class DachsService:
                 writable_blocks.add(validate_block(candidate, writable=True))
             except ValueError:
                 continue
-        writable_targets = {(0, block) for block in writable_blocks}
-        writable_targets.update(
-            (cpu, NETWORK_PROTECTION_BLOCK) for cpu in NETWORK_PROTECTION_CPUS
+        capture_targets = {(0, block) for block in writable_blocks}
+        capture_targets.update(
+            (cpu, block)
+            for cpu in NETWORK_PROTECTION_CPUS
+            for block in NETWORK_PROTECTION_BACKUP_BLOCKS
         )
-        if len(raw_records) > len(writable_targets):
-            raise ValueError("backup contains more records than writable targets")
+        # Every mapped CPU-0 block keeps the generic raw-backup/restore
+        # contract.  The fixed 38-target maintenance contract is narrower,
+        # but must not silently make other addressable pack blocks
+        # non-restorable.  On the two network CPUs only the physically
+        # accepted block 16 remains eligible for restore.
+        restore_targets = {(0, block) for block in writable_blocks}
+        restore_targets.update(
+            target for target in BACKUP_RESTORE_TARGETS if target[0] != 0
+        )
+        if len(raw_records) > len(capture_targets):
+            raise ValueError("backup contains more records than reviewed capture targets")
 
         target_format = bool(
             "requested_targets" in image
@@ -984,7 +1015,7 @@ class DachsService:
             except ValueError as exc:
                 raise ValueError(f"{prefix}.block is not writable: {exc}") from exc
             target = (cpu, block)
-            if target not in writable_targets:
+            if target not in capture_targets:
                 if cpu == 0:
                     raise ValueError(
                         f"{prefix}.block {block} is not mapped and writable on CPU 0"
@@ -992,8 +1023,8 @@ class DachsService:
                 if cpu not in NETWORK_PROTECTION_CPUS:
                     raise ValueError(f"{prefix}.cpu must be 0, 1 or 2")
                 raise ValueError(
-                    f"{prefix}: CPU {cpu} exposes only network-protection block "
-                    f"{NETWORK_PROTECTION_BLOCK}"
+                    f"{prefix}: CPU {cpu} exposes only reviewed network blocks "
+                    f"{', '.join(str(item) for item in NETWORK_PROTECTION_BACKUP_BLOCKS)}"
                 )
             if target in seen_targets:
                 raise ValueError(f"duplicate backup target: CPU {cpu}, block {block}")
@@ -1082,13 +1113,14 @@ class DachsService:
                     computed_payload_digest = _payload_sha256(payload)
 
                 if ok and cpu:
-                    if len(payload) != NETWORK_PROTECTION_PAYLOAD_LENGTH:
+                    expected_length = network_protection_payload_length(block)
+                    if len(payload) != expected_length:
                         raise ValueError(
                             f"{prefix}.payload must contain exactly "
-                            f"{NETWORK_PROTECTION_PAYLOAD_LENGTH} bytes for network protection"
+                            f"{expected_length} bytes for network block {block}"
                         )
                     try:
-                        decode_network_protection(cpu, payload)
+                        decode_network_protection(cpu, payload, block)
                     except ValueError as exc:
                         raise ValueError(
                             f"{prefix}.payload is not a valid network-protection block: {exc}"
@@ -1103,7 +1135,7 @@ class DachsService:
 
             if ok:
                 successful_blocks += 1
-                sanitized["restorable"] = True
+                sanitized["restorable"] = target in restore_targets
             else:
                 error = raw_record.get("error")
                 if error is not None:
@@ -1226,7 +1258,7 @@ class DachsService:
             "requested_targets": requested_targets,
             "successful_blocks": successful_blocks,
             "failed_blocks": failed_blocks,
-            "restorable_blocks": successful_blocks,
+            "restorable_blocks": sum(bool(record["restorable"]) for record in records),
             "restorable_targets": [
                 {"cpu": record["cpu"], "block": record["block"]}
                 for record in records if record["restorable"]

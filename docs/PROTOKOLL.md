@@ -202,9 +202,10 @@ geprüft, ein physischer Block-20-Schreibvorgang am Testgerät wurde noch nicht
 ausgeführt.
 
 Block 21 ist der ungerade laufende Messwertblock und besitzt keinen abgeleiteten
-Schreibdienst. Er bleibt strikt nur lesbar. Block 20 bleibt bis zur realen
-Abnahme ebenfalls außerhalb von Backup und Wiederherstellung; deren Umfang
-bleibt bei 38 Zielen.
+Schreibdienst. Er bleibt strikt nur lesbar. Block 20 und 21 werden auf beiden
+Netzschutz-CPUs im aktuellen 42-Ziele-Backup gelesen und vollständig geprüft,
+bleiben aber außerhalb der Wiederherstellung. Deren Umfang bleibt bei den
+38 geprüften Konfigurationszielen.
 
 Die geprüften Standarddefinitionen der bekannten Revisionen enthalten neben
 Block 16, 20 und 21 keine weiteren Datenblöcke der Netzüberwachungs-CPUs. Die
@@ -221,10 +222,11 @@ werden mehrstufige Abläufe nicht von einem zweiten Client unterbrochen.
 ## Wartungsbackup und Anlagenstand
 
 Ein Wartungsstart liest die 36 freigegebenen Blöcke der Regler-CPU 0 sowie
-Block 16 der Netzüberwachungs-CPU 1 und 2 in genau einer exklusiven Sitzung.
-Diese 38 Antworten bilden gleichzeitig das vollständige Sicherungsabbild und
-den CPU-0-Anlagenstand des Wartungsberichts. Für den Bericht wird keine zweite
-serielle Blockrunde gestartet.
+Block 16, 20 und 21 der Netzüberwachungs-CPU 1 und 2 in genau einer exklusiven
+Sitzung. Diese 42 Antworten bilden gleichzeitig das vollständige
+Sicherungsabbild und den CPU-0-Anlagenstand des Wartungsberichts. Nur die
+bisherigen 38 Konfigurationsziele sind restaurierbar. Für den Bericht wird
+keine zweite serielle Blockrunde gestartet.
 
 Archiv-ID, Wartungsbericht-ID, Dateiname, Ersteller, Packrevision und
 SHA-256-Werte sind lokale Speichermetadaten. Sie verändern weder Telegramme

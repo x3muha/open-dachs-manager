@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="open-dachs-base-path" content="__OPEN_DACHS_BASE_PATH__">
   <title>Open Dachs Manager</title>
-  <link rel="stylesheet" href="static/style.css?v=30">
+  <link rel="stylesheet" href="static/style.css?v=33">
 </head>
 <body>
   <div id="loginView" class="login-shell">
@@ -32,12 +32,12 @@
         <nav class="main-tabs" aria-label="Bereiche">
           <button class="tab-button active" data-view="overviewView">Übersicht</button>
           <button class="tab-button" data-view="monitorView">Überwachung</button>
-          <button class="tab-button" data-view="maintenanceView">Wartung</button>
+          <button class="tab-button" data-view="settingsView">Einstellung</button>
           <button class="tab-button" data-view="backupView">Backup</button>
-          <button class="tab-button" data-view="faultCatalogView">Fehlerkatalog</button>
-          <button class="tab-button" data-view="settingsView">Einstellungen</button>
-          <button class="tab-button system-admin" data-view="systemView" hidden>System</button>
           <button class="tab-button" data-view="auditView">Audit</button>
+          <button class="tab-button system-admin" data-view="systemView" hidden>System</button>
+          <button class="tab-button" data-view="maintenanceView">Wartung</button>
+          <button class="tab-button" data-view="faultCatalogView">Fehlerkatalog</button>
         </nav>
         <div class="topbar-status">
           <span id="connectionSummary" class="status-pill neutral">Initialisiere …</span>
@@ -604,15 +604,26 @@
       <section id="monitorView" class="app-view" hidden>
         <header class="page-head"><div><p class="eyebrow">ZEITREIHEN</p><h2>Schnellüberwachung</h2><p class="muted">Lesender Poller über den gemeinsamen Serialworker, Speicherung in SQLite.</p></div><div class="page-head-actions"><span id="monitorStatus" class="status-pill neutral">—</span><button id="monitorToggle" data-action="toggle-monitor">Überwachung stoppen</button><button id="serialToggle" class="danger" data-action="toggle-serial">Web-Serialzugriff pausieren</button></div></header>
         <div id="monitorStats" class="metric-grid compact"></div>
-        <section class="panel history-controls"><div><p class="eyebrow">ZEITRAUM</p><h3>Historischen Zeitraum anzeigen</h3><p class="muted">Ohne Datumsauswahl werden die letzten 24 Stunden geladen. Nur Start gesetzt = 24 Stunden ab Start.</p></div><div class="history-control-grid"><label>Schnellbereich<select id="temperatureRange"><option value="1">1 Stunde</option><option value="6">6 Stunden</option><option value="24" selected>24 Stunden</option><option value="168">7 Tage</option><option value="720">30 Tage</option></select></label><label>Startdatum/-zeit<input id="historyStart" type="datetime-local"></label><label>Enddatum/-zeit<input id="historyEnd" type="datetime-local"></label><div class="history-actions"><button id="applyHistoryRange" class="primary" type="button">Zeitraum laden</button><button id="resetHistoryRange" type="button">Letzte 24 Stunden</button></div></div><div id="historyRangeStatus" class="history-range-status muted">Aktiv: letzte 24 Stunden</div></section>
+        <section class="panel history-controls">
+          <div><p class="eyebrow">ZEITRAUM</p><h3>Historischen Zeitraum anzeigen</h3><p class="muted">Schnellbereich direkt wählen, freie Stunden mit Button oder Enter bestätigen oder Start und Ende als Datum mit Uhrzeit festlegen.</p></div>
+          <div class="history-control-grid">
+            <label>Schnellbereich<select id="temperatureRange"><option value="1">1 Stunde</option><option value="2">2 Stunden</option><option value="3">3 Stunden</option><option value="4">4 Stunden</option><option value="5">5 Stunden</option><option value="6">6 Stunden</option><option value="8">8 Stunden</option><option value="10">10 Stunden</option><option value="12">12 Stunden</option><option value="16">16 Stunden</option><option value="24" selected>24 Stunden</option><option value="48">48 Stunden</option></select></label>
+            <form id="historyHoursForm" class="history-hours-form"><label>Freie Stunden<input id="historyHours" type="number" min="1" max="720" step="1" inputmode="numeric" placeholder="1–720"></label><button type="submit">Stunden übernehmen</button></form>
+            <form id="historyDateForm" class="history-date-form"><label>Startdatum/-zeit<input id="historyStart" type="datetime-local"></label><label>Enddatum/-zeit<input id="historyEnd" type="datetime-local"></label><button id="applyHistoryRange" class="primary" type="submit">Zeitraum laden</button></form>
+            <button id="resetHistoryRange" type="button">Letzte 24 Stunden</button>
+          </div>
+          <div class="history-state-key" aria-label="Laufzustand in den Diagrammen"><span class="running">Dachs läuft</span><span class="stopped">Dachs steht</span><span class="unknown">Keine Messdaten</span></div>
+          <div id="historyRangeStatus" class="history-range-status muted">Aktiv: letzte 24 Stunden</div>
+        </section>
         <section class="panel"><div class="section-head"><div><p class="eyebrow">TEMPERATUREN</p><h3>Dachs-Vorlauf, Dachs-Rücklauf, Kapsel und Regler</h3><p class="chart-help muted">Vorlauf = Kühlwasser Motor · Rücklauf = Dachs-Eintritt · Maus zeigt Werte und Messpunkte · Bereich ziehen · Doppelklick setzt Zoom zurück · Farbe anklicken blendet Kurve aus</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="temperature" hidden>Zoom zurücksetzen</button></div></div><canvas id="temperatureChart" class="chart" height="320"></canvas><div id="temperatureLegend" class="chart-legend"></div></section>
         <section class="panel"><div class="section-head"><div><p class="eyebrow">MOTOR / GENERATOR</p><h3>Wirkleistung und Umdrehungen</h3><p class="chart-help muted">Drehzahl links bis 3000 1/min · Leistung rechts bis 6 kW · Farbe anklicken blendet Kurve aus</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="motor" hidden>Zoom zurücksetzen</button></div></div><canvas id="motorChart" class="chart" height="280"></canvas><div id="motorLegend" class="chart-legend"></div></section>
+        <section class="panel motor-status-history"><div class="section-head"><div><p class="eyebrow">MOTORSTATUS · BLOCK 24</p><h3>Start-, Lauf- und Abschaltphasen</h3><p class="chart-help muted">Jeder Statuswechsel bleibt erhalten · Maus zeigt Nummer und Bedeutung · Bereich ziehen zoomt alle vier Diagramme gemeinsam · Datenlücken sind schraffiert</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="motorStatus" hidden>Zoom zurücksetzen</button></div></div><canvas id="motorStatusChart" class="chart motor-status-chart" height="112" tabindex="0" aria-label="Motorstatus aus Block 24 als Zeitband; Pfeiltasten wechseln zwischen Statusereignissen" aria-describedby="motorStatusHoverText"></canvas><div id="motorStatusLegend" class="motor-status-legend" aria-label="Farben der Motorzustände"><span class="off">Aus · 15/16</span><span class="preparation">Startvorbereitung · 20</span><span class="start">Start/Anlasser · 21–24</span><span class="running">Läuft/Regelung · 30–35</span><span class="shutdown">Abschaltroutine · 11–13</span><span class="fault">Störabschaltung · 10/14</span><span class="ok">OK · 0</span><span class="unknown">Unbekannt</span><span class="gap">Keine Messdaten</span></div><output id="motorStatusHoverText" class="sr-only" aria-live="polite"></output></section>
         <section class="panel"><div class="section-head"><div><p class="eyebrow">ABGAS</p><h3>Motorabgas und Dachsabgas</h3><p class="chart-help muted">Motorabgas links bis 600 °C · Dachsabgas rechts bis 200 °C · Farbe anklicken blendet Kurve aus</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="exhaust" hidden>Zoom zurücksetzen</button></div></div><canvas id="exhaustChart" class="chart" height="280"></canvas><div id="exhaustLegend" class="chart-legend"></div></section>
       </section>
 
       <section id="maintenanceView" class="app-view" hidden>
         <header class="page-head">
-          <div><p class="eyebrow">WARTUNG &amp; ANLAGENBERICHT</p><h2>Geführte Dachs-Wartung</h2><p class="muted">Beim Wartungsstart speist ein einziger gemeinsamer 38-Ziele-Lesevorgang zugleich das vollständige, geprüfte Backup und den Anlagenstand. Backup und Online-Protokoll bleiben lokal verknüpft archiviert.</p></div>
+          <div><p class="eyebrow">WARTUNG &amp; ANLAGENBERICHT</p><h2>Geführte Dachs-Wartung</h2><p class="muted">Beim Wartungsstart speist ein einziger gemeinsamer 42-Ziele-Lesevorgang zugleich das vollständige, geprüfte Backup und den Anlagenstand. 38 Konfigurationsziele bleiben wiederherstellbar; die neuen Netzblöcke 20/21 werden zusätzlich schreibfrei gesichert.</p></div>
           <div class="page-head-actions"><button id="maintenanceRefresh" type="button">Aktualisieren</button><button id="maintenanceCreate" class="primary maintenance-admin" type="button">Wartung starten &amp; Pflichtbackup erstellen</button></div>
         </header>
         <section id="maintenanceStatusPanel" class="panel maintenance-status-panel maintenance-unknown">
@@ -620,7 +631,7 @@
           <div><p class="eyebrow">LIVE · BLOCK 104</p><h3 id="maintenanceStatusTitle">Wartungsstatus noch nicht gelesen</h3><div id="maintenanceStatusMetrics" class="maintenance-status-metrics"></div></div>
         </section>
         <section class="panel">
-          <div class="section-head"><div><p class="eyebrow">LOKALES ARCHIV AUF DEM PI</p><h3>Anlagen-Snapshots und Online-Wartungsprotokolle</h3><p class="muted">Jeder Wartungsstart erzeugt einen schreibfreien Gesamtzustand und ein unveränderliches 38-Ziele-Sicherungsabbild. Snapshot, Checkliste, Messwerte und Bemerkungen bleiben lokal in SQLite gespeichert; das Backup bleibt auch nach dem Löschen eines Berichts erhalten.</p></div></div>
+          <div class="section-head"><div><p class="eyebrow">LOKALES ARCHIV AUF DEM PI</p><h3>Anlagen-Snapshots und Online-Wartungsprotokolle</h3><p class="muted">Jeder Wartungsstart erzeugt einen schreibfreien Gesamtzustand und ein unveränderliches 42-Ziele-Sicherungsabbild. Snapshot, Checkliste, Messwerte und Bemerkungen bleiben lokal in SQLite gespeichert; das Backup bleibt auch nach dem Löschen eines Berichts erhalten.</p></div></div>
           <div class="table-wrap"><table class="data-table"><thead><tr><th>Nr.</th><th>Erstellt</th><th>Status</th><th>Monteur</th><th>Betriebsstunden</th><th>Pflichtbackup</th><th>Exporte</th><th>Aktionen</th></tr></thead><tbody id="maintenanceReportRows"><tr><td colspan="8" class="muted">Noch keine Berichte.</td></tr></tbody></table></div>
         </section>
         <section id="maintenanceEditor" class="panel maintenance-editor" hidden>
@@ -637,20 +648,20 @@
           </form>
           <section id="maintenanceCompletion" class="maintenance-completion maintenance-admin">
             <div><p id="maintenanceCompletionEyebrow" class="eyebrow">DEMOMODUS</p><h4 id="maintenanceCompletionTitle">Testlauf lokal abschließen</h4><p id="maintenanceCompletionDescription" class="muted">Validiert und archiviert das Protokoll ausschließlich auf dem Pi. Block 100, Block 104 und das Bestätigungsbit bleiben unverändert.</p></div>
-            <div class="maintenance-completion-fields"><label id="maintenanceAuthLevelField" hidden>Auth-Level<input id="maintenanceAuthLevel" type="number" min="0" max="255" value="4"></label><label id="maintenancePass4Field" hidden>PW4 / Passwort<input id="maintenancePass4" type="password" autocomplete="off"></label><label>Bestätigung<input id="maintenanceConfirmation" autocomplete="off" placeholder="DEMO ABSCHLIESSEN"></label><button id="maintenanceComplete" class="primary" type="button">Demolauf abschließen</button></div>
+            <div class="maintenance-completion-fields"><label id="maintenanceAuthLevelField" hidden>Auth-Level<select id="maintenanceAuthLevel"><option value="1">1 · Betreiber erweitert</option><option value="2">2 · Service</option><option value="3">3 · Werksservice</option><option value="4" selected>4 · Administrator</option><option value="5">5 · Legacy/V2</option></select></label><div id="maintenancePass4Field" class="maintenance-pass4-control" hidden><label>PW4 / Passwort<input id="maintenancePass4" type="password" inputmode="numeric" maxlength="4" autocomplete="off"></label><button id="maintenancePw4Read" type="button">PW4 auslesen</button><small id="maintenancePw4Status" class="muted">Noch nicht gelesen</small></div><label>Bestätigung<input id="maintenanceConfirmation" autocomplete="off" placeholder="DEMO ABSCHLIESSEN"></label><button id="maintenanceComplete" class="primary" type="button">Demolauf abschließen</button></div>
           </section>
         </section>
       </section>
 
       <section id="backupView" class="app-view" hidden>
         <header class="page-head">
-          <div><p class="eyebrow">MSR2 SICHERUNGSABBILD</p><h2>Backup &amp; Wiederherstellung</h2><p class="muted">Alle 36 Reglerblöcke auf CPU 0 sowie Netzschutz-Block 16 auf CPU 1 und CPU 2 sichern – vollständig oder als freie Auswahl. Ein Abbild wird vor einer Wiederherstellung vollständig geprüft; erst danach lassen sich enthaltene Ziele auswählen.</p></div>
+          <div><p class="eyebrow">MSR2 SICHERUNGSABBILD</p><h2>Backup &amp; Wiederherstellung</h2><p class="muted">Alle 36 Reglerblöcke auf CPU 0 sowie Block 16, 20 und 21 auf CPU 1 und CPU 2 sichern – insgesamt 42 Ziele. Wiederherstellbar bleiben ausschließlich die 36 Reglerblöcke und die beiden geprüften Block-16-Ziele.</p></div>
           <span class="status-pill neutral">CPU 0 / 1 / 2 · Blockweise</span>
         </header>
 
         <section id="backupArchivePanel" class="panel backup-archive-panel backup-admin" hidden>
           <div class="section-head backup-section-head">
-            <div><p class="eyebrow">WARTUNGSBACKUPS · ADMIN</p><h3>Geschütztes Backup-Archiv</h3><p class="muted">Bei jedem Wartungsstart entsteht automatisch ein vollständiges 38-Ziele-Abbild. Das Archiv ist nur lesbar: Es gibt hier weder einen Löschknopf noch eine manuelle Autoarchivierung.</p></div>
+            <div><p class="eyebrow">WARTUNGSBACKUPS · ADMIN</p><h3>Geschütztes Backup-Archiv</h3><p class="muted">Bei jedem Wartungsstart entsteht automatisch ein vollständiges 42-Ziele-Abbild mit 38 Restore-Zielen. Ältere geprüfte 38er-Abbilder bleiben weiterhin lesbar und nutzbar.</p></div>
             <button id="backupArchiveRefresh" type="button">Archiv aktualisieren</button>
           </div>
           <div id="backupArchiveStatus" class="backup-status backup-status-neutral">Archiv wurde noch nicht geladen.</div>
@@ -676,7 +687,7 @@
           <div class="backup-selection-actions restore-selection-actions"><button id="restoreSelectAll" type="button" disabled>Alle gültigen Ziele auswählen</button><button id="restoreSelectNone" type="button" disabled>Auswahl aufheben</button></div>
           <div id="restoreBlockList" class="backup-block-list restore-block-list" role="group" aria-label="CPU- und Blockziele für die Wiederherstellung auswählen"><p class="muted">Nach dem Einlesen erscheinen hier die gültigen CPU-/Blockziele.</p></div>
           <div class="restore-guard">
-            <label>Auth-Level<input id="restoreAuthLevel" type="number" min="0" max="255" value="4"></label>
+            <label>Auth-Level<select id="restoreAuthLevel"><option value="1">1 · Betreiber erweitert</option><option value="2">2 · Service</option><option value="3">3 · Werksservice</option><option value="4" selected>4 · Administrator</option><option value="5">5 · Legacy/V2</option></select></label>
             <label>PW4 / Passwort-Override<input id="restorePass4" type="password" autocomplete="off" placeholder="leer = berechnete PW4 verwenden"></label>
             <label class="check-label"><input id="restoreWriteEnabled" type="checkbox"> Hardware-Wiederherstellung aktivieren</label>
             <label>Bestätigung<input id="restoreConfirmation" autocomplete="off" placeholder="SICHERUNG WIEDERHERSTELLEN"></label>
@@ -704,7 +715,7 @@
         <header class="page-head"><div><p class="eyebrow">MSR2 REGISTER</p><h2>Einstellungen und Register</h2><p class="muted">Regler-CPU und beide Netzüberwachungs-CPUs besitzen getrennte Blockräume. Auf CPU 1 und CPU 2 sind Block 16 und der durch Originaldienst 21 belegte Block 20 geschützt schreibbar; Block 21 bleibt strikt nur lesbar. Jede freigegebene Änderung bleibt an Admin-Login, Auth-Level und den expliziten Hardware-Schalter gebunden.</p></div><span id="settingsRoleHint" class="status-pill neutral"></span></header>
         <section id="writeControls" class="panel write-controls" hidden>
           <div class="write-intro"><p class="eyebrow">SCHREIBSCHUTZ</p><h3>Admin-Schreibfreigabe</h3><p class="muted">Ohne Haken bleibt der Vorgang ein Dry-Run. Beim echten Schreiben folgen Lesen, Kodierung, Authentifizierung, bytegenauer Ausgangszustandsvergleich, Schreibdienst, positives ACK und Rückleseprüfung; Block 20 verwendet Dienst 21 und verlangt einen exakten Vollblockvergleich.</p></div>
-          <label>Auth-Level<input id="authLevel" type="number" min="0" max="255" value="4"></label>
+          <label>Auth-Level<select id="authLevel"><option value="1">1 · Betreiber erweitert</option><option value="2">2 · Service</option><option value="3">3 · Werksservice</option><option value="4" selected>4 · Administrator</option><option value="5">5 · Legacy/V2</option></select></label>
           <label>PW4 / Passwort-Override<input id="pass4" type="password" autocomplete="off" placeholder="leer = berechnete PW4 verwenden"></label>
           <label class="check-label"><input id="writeEnabled" type="checkbox"> Hardware-Schreiben aktivieren</label>
           <div id="writeGuardStatus" class="write-guard-status neutral">Dry-Run: Hardware bleibt unverändert.</div>
@@ -750,7 +761,7 @@
         </div>
 
         <div id="systemTokensTab" data-system-panel="tokens" hidden>
-          <section class="panel api-settings-panel"><div><p class="eyebrow">EDOMI-SCHREIBSCHUTZ</p><h3>Serverseitige API-Logik</h3><p class="muted">HTTP bleibt lokal aktiv. HTTPS kann extern durch nginx terminiert werden. EDOMI übergibt nur logische Keys und Werte; PW4, Blockkodierung, ACK und Readback bleiben im Dachs Manager.</p></div><form id="apiSettingsForm" class="api-settings-form"><label class="check-label"><input id="apiWriteEnabled" type="checkbox"> API-Schreibaktionen aktivieren</label><label>MSR2 Auth-Level<input id="apiAuthLevel" type="number" min="0" max="255" value="4" required></label><button class="primary" type="submit">API-Einstellung speichern</button><div id="apiWriteStatus" class="write-guard-status ok">API-Schreiben ist deaktiviert.</div></form></section>
+          <section class="panel api-settings-panel"><div><p class="eyebrow">EDOMI-SCHREIBSCHUTZ</p><h3>Serverseitige API-Logik</h3><p class="muted">HTTP bleibt lokal aktiv. HTTPS kann extern durch nginx terminiert werden. EDOMI übergibt nur logische Keys und Werte; PW4, Blockkodierung, ACK und Readback bleiben im Dachs Manager.</p></div><form id="apiSettingsForm" class="api-settings-form"><label class="check-label"><input id="apiWriteEnabled" type="checkbox"> API-Schreibaktionen aktivieren</label><label>MSR2 Auth-Level<select id="apiAuthLevel"><option value="1">1 · Betreiber erweitert</option><option value="2">2 · Service</option><option value="3">3 · Werksservice</option><option value="4" selected>4 · Administrator</option><option value="5">5 · Legacy/V2</option></select></label><button class="primary" type="submit">API-Einstellung speichern</button><div id="apiWriteStatus" class="write-guard-status ok">API-Schreiben ist deaktiviert.</div></form></section>
           <section class="panel system-create-panel"><div><p class="eyebrow">NEUER API-TOKEN</p><h3>EDOMI-Zugang erzeugen</h3><p class="muted">Das Token wird nur einmal vollständig angezeigt. Danach speichert das System ausschließlich den Hash.</p></div><form id="tokenCreateForm" class="token-create-form"><label>Name<input id="tokenCreateName" minlength="3" maxlength="64" placeholder="EDOMI Heizung" required></label><fieldset><legend>Rechte</legend><label class="check-label"><input type="checkbox" name="tokenScope" value="read" checked> Lesen</label><label class="check-label"><input type="checkbox" name="tokenScope" value="history" checked> Historie</label><label class="check-label"><input type="checkbox" name="tokenScope" value="write"> Schreiben</label></fieldset><button class="primary" type="submit">Token erzeugen</button></form></section>
           <section id="tokenSecretPanel" class="panel token-secret-panel" hidden><div><p class="eyebrow">NUR EINMAL SICHTBAR</p><h3>Neues API-Token sichern</h3><p class="muted">Jetzt in den EDOMI-Logikbaustein übernehmen. Eine spätere Anzeige ist absichtlich nicht möglich.</p></div><code id="tokenSecret"></code><button id="tokenSecretCopy" type="button">Token kopieren</button></section>
           <section class="panel"><div class="section-head"><div><p class="eyebrow">TOKEN-MANAGER</p><h3>API-Zugänge</h3></div><button id="tokensRefresh" type="button">Aktualisieren</button></div><div class="table-wrap"><table class="data-table system-table"><thead><tr><th>Name</th><th>Token</th><th>Rechte</th><th>Status</th><th>Zuletzt benutzt</th><th>Aktionen</th></tr></thead><tbody id="tokenRows"><tr><td colspan="6" class="muted">Tokens werden geladen …</td></tr></tbody></table></div></section>
@@ -766,7 +777,7 @@
   </div>
   <div id="dashboardEditor" class="modal-backdrop" hidden>
     <section class="modal-card dashboard-editor" role="dialog" aria-modal="true" aria-labelledby="dashboardEditorTitle">
-      <div class="section-head"><div><p class="eyebrow">ÜBERSICHT ANPASSEN</p><h3 id="dashboardEditorTitle">Kacheln auswählen und sortieren</h3><p class="muted">Ziehen oder mit den Pfeilen verschieben. Mit + kannst du alle gemappten Anlagenwerte hinzufügen.</p></div><button id="dashboardClose" class="icon-button" type="button" aria-label="Schließen">×</button></div>
+      <div class="section-head"><div><p class="eyebrow">ÜBERSICHT ANPASSEN</p><h3 id="dashboardEditorTitle">Kacheln auswählen und sortieren</h3><p class="muted">Ziehen oder mit den Pfeilen verschieben. Mit + kannst du gemappte und berechnete Anlagenwerte hinzufügen.</p></div><button id="dashboardClose" class="icon-button" type="button" aria-label="Schließen">×</button></div>
       <div class="dashboard-editor-layout">
         <section><h4>Angezeigte Kacheln <span id="dashboardCardCount" class="muted"></span></h4><div id="dashboardCardList" class="dashboard-card-list"></div></section>
         <section><h4>+ Wert hinzufügen</h4><label>Wert oder Block suchen<input id="dashboardFieldSearch" type="search" placeholder="Temperatur, Betriebsstunden, Block 24 …"></label><div id="dashboardFieldList" class="dashboard-field-list"></div></section>
@@ -782,7 +793,23 @@
       </div>
       <div class="changelog-list">
         <article class="changelog-entry current">
-          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-08-18">18.08.2026</time><span>Aktuell</span></header>
+          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-08-20">20.08.2026</time><span>Aktuell</span></header>
+          <ul><li>Eine vierte, schmale Block-24-Zeitleiste zeigt Aus, Startvorbereitung, Start/Anlasser, Lauf und Abschaltroutine in eigenen Farben.</li><li>Jeder Statuswechsel wird unabhängig von der normalen Kurvenreduktion erhalten. Mouseover zeigt Nummer und Originaltext; echte Aufzeichnungslücken bleiben schraffiert.</li><li>Der gemeinsame Mauszoom gilt nun für alle vier Diagramme. Die Erweiterung liest keinen zusätzlichen Reglerblock und führt keine Schreibaktion aus.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.6.1</strong><time datetime="2026-08-19">19.08.2026</time></header>
+          <ul><li>Auth-Level 5 steht zusätzlich in CLI, TUI, Web-Schreiben, Netzschutz, Backup-Wiederherstellung, Wartungsabschluss und API-Einstellungen bereit.</li><li>Die Oberfläche bezeichnet Level 5 neutral als <code>Legacy/V2</code>, weil die älteren V2-Werkzeuge ihn verwenden, die Originaloberfläche aber nur Rollen 1 bis 4 benennt.</li><li>Für Authentifizierung und Live-Schreiben werden nur echte Ganzzahlen von 1 bis 5 akzeptiert; 0 und Werte ab 6 scheitern vor der seriellen Sitzung.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.6.0</strong><time datetime="2026-08-19">19.08.2026</time></header>
+          <ul><li>Historien lassen sich über zwölf Schnellbereiche, freie Stunden oder Start-/Enddatum wählen. Alle Diagramme zoomen gemeinsam und markieren Lauf/Stillstand leicht grün beziehungsweise rot.</li><li>Die Navigation ist neu geordnet; Wartung steht rechts vor dem Fehlerkatalog.</li><li>Der echte Wartungsabschluss besitzt einen schreibfreien PW4-Leseknopf.</li><li>Backups sichern 42 Ziele einschließlich Netzschutz-Block 20/21 beider CPUs; 38 geprüfte Konfigurationsziele bleiben wiederherstellbar.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.5.3</strong><time datetime="2026-08-19">19.08.2026</time></header>
+          <ul><li><code>Betriebsstunden je Start</code> steht unten im Motorbereich <code>Leistungszustand</code> und füllt dort den freien Platz.</li><li>Der berechnete Block-22-Wert lässt sich zusätzlich über <code>Bearbeiten</code> als obere Kachel auswählen, sortieren und wieder entfernen.</li><li>Die obere Auswahl löst keinen zusätzlichen seriellen Zugriff und keinen eigenen Verlaufseintrag aus.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.5.2</strong><time datetime="2026-08-18">18.08.2026</time></header>
           <ul><li>Die Stabilitätsprüfung von Block 50 erkennt ausschließlich die laufende Systemzeit an Byte 36 bis 39 als zulässige Zwischenänderung.</li><li>Der neue Leistungswert wird auf den frisch gelesenen Block gesetzt; jede Änderung an Zielwert, Nachbarfeldern, Blocklänge oder Felddefinition bricht den Vorgang weiterhin sicher ab.</li><li>Positive Reglerbestätigung und Rückleseprüfung bleiben zwingend, sodass keine veralteten Blockdaten zurückgeschrieben werden.</li></ul>
         </article>
         <article class="changelog-entry">
@@ -862,6 +889,6 @@
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="static/app.js?v=39"></script>
+  <script src="static/app.js?v=42"></script>
 </body>
 </html>

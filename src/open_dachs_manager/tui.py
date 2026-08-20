@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import re
 
+from .auth import validate_auth_level
 from .mapping import WriteAllowlist, is_reserved_key
 from .transport import validate_block
 
@@ -198,8 +199,12 @@ def _run(stdscr, service, state):
 
 def run_tui(service, args) -> int:
     validate_block(args.block)
-    if args.write_enabled and args.auth_level < 0:
-        raise ValueError("--write-enabled requires --auth-level so the device can be authenticated")
+    if args.write_enabled:
+        args.auth_level = validate_auth_level(
+            args.auth_level, "--auth-level für Live-Schreiben"
+        )
+    elif args.auth_level != -1:
+        args.auth_level = validate_auth_level(args.auth_level, "--auth-level")
     allowlist = WriteAllowlist(args.allowlist)
     block_ids = [args.block]
     if args.all_blocks:

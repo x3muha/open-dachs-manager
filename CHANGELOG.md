@@ -1,5 +1,74 @@
 # Änderungsverlauf
 
+## V3 1.6.2 - 2026-08-20
+
+- Die Überwachung besitzt ein viertes, schmales Motorstatusdiagramm aus dem
+  ohnehin im schnellen Zyklus gelesenen Block 24. Aus ist weiß,
+  Startvorbereitung orange, Start/Anlasser rot, Lauf beziehungsweise Regelung
+  grün, Abschaltroutinen violett und Störabschaltungen dunkelrot. Mouseover
+  zeigt Statusnummer und quellenbelegte Bezeichnung.
+- Kurze Zustände werden nicht über die auf 2.000 Punkte begrenzte
+  Kurvenhistorie bezogen. Eine eigene kompakte Ereignisspur speichert jeden im
+  etwa 0,75-sekündigen Lesezyklus beobachteten Wechsel und zusätzlich alle
+  30 Sekunden einen Stützpunkt. Dadurch bleiben auch sehr kurze erfasste
+  Start- und Stellmotorzustände erhalten; ein Zustand vollständig zwischen
+  zwei Reads ist technisch nicht beobachtbar. Echte Aufzeichnungslücken werden
+  schraffiert und nicht als Motor-Aus interpretiert.
+- Die Ereignisspur wird beim ersten Start rückwirkend aus den vorhandenen
+  30-Tage-Momentaufnahmen aufgebaut und anschließend direkt aus jedem
+  erfolgreichen Block-24-Zyklus fortgeschrieben. Sie erzeugt weder einen
+  weiteren seriellen Blockread noch Authentifizierung oder Reglerwrite. Der
+  gemeinsame Mauszoom umfasst jetzt alle vier Diagramme.
+
+## V3 1.6.1 - 2026-08-19
+
+- Auth-Level 5 ist zusätzlich zu den benannten Rollen 1 bis 4 in CLI, TUI,
+  Web-Schreiben, Netzschutz, Wiederherstellung, Wartungsabschluss und API-
+  Einstellungen verfügbar. Die ältere V2-Schreib- und Backup-Implementierung
+  verwendet diese Stufe bereits; in der Oberfläche heißt sie neutral
+  `Legacy/V2`, weil die originale Java-Oberfläche dafür keinen Rollennamen
+  liefert.
+- Die zentrale, typstrikte Grenze lautet jetzt 1 bis 5. Boolesche Werte,
+  Strings, Fließkommazahlen, 0 und Werte ab 6 scheitern weiterhin vor jeder
+  Authentifizierung und jedem Live-Schreiben. Eine Antwort gilt nur bei
+  exakter Übereinstimmung mit der angeforderten Stufe als erfolgreich.
+
+## V3 1.6.0 - 2026-08-19
+
+- Die Historienansicht besitzt Schnellbereiche von 1 bis 48 Stunden, eine
+  bestätigte freie Eingabe von 1 bis 720 Stunden sowie einen frei wählbaren
+  Start-/Endzeitraum. Unbestätigte Eingaben beeinflussen das laufende Diagramm
+  nicht.
+- Alle drei Diagramme verwenden dieselbe Zeitachse und denselben Mauszoom.
+  Helle grüne beziehungsweise rote Zeitbänder kennzeichnen anhand der bereits
+  gespeicherten Drehzahl, wann der Dachs lief oder stand; Messlücken bleiben
+  neutral.
+- Die Hauptnavigation folgt jetzt der Reihenfolge Übersicht, Überwachung,
+  Einstellung, Backup, Schreibprotokoll, System, Wartung und Fehlerkatalog.
+- Im echten Wartungsabschluss kann PW4 über einen eigenen, schreibfreien
+  Leseknopf aus frischen Block-20-/Block-22-Daten berechnet und übernommen
+  werden. Der Wert wird weder gespeichert noch protokolliert und nach dem
+  Vorgang verworfen.
+- Auth-Level sind in Oberfläche und Server auf die vier quellenbelegten Rollen
+  1 bis 4 begrenzt. Der Gerätetest zeigte, dass höhere Einbytewerte lediglich
+  zurückgespiegelt werden und keine dokumentierten zusätzlichen Rollen
+  darstellen.
+- Backups sichern zusätzlich Block 20 und 21 beider Netzschutz-CPUs. Der neue
+  vollständige Umfang beträgt 42 Ziele; wiederherstellbar bleiben bewusst nur
+  die bisherigen 38 Konfigurationsziele. Vorhandene geprüfte 38er-
+  Wartungsarchive bleiben kompatibel.
+
+## V3 1.5.3 - 2026-08-19
+
+- `Betriebsstunden je Start` steht jetzt fest im Motorbereich
+  `Leistungszustand` und füllt dort den bislang freien Platz.
+- Der berechnete Block-22-Wert ist zusätzlich über `Bearbeiten` als obere
+  Kachel auswählbar, sortierbar und wieder entfernbar; standardmäßig wird er
+  dort nicht mehr ungefragt eingeblendet.
+- Berechnung, kohärenter Block-22-Zeitpunkt und schreibfreier Leseweg bleiben
+  unverändert. Die neue Auswahl löst keinen zusätzlichen seriellen Zugriff und
+  keinen eigenen Verlaufseintrag aus.
+
 ## V3 1.5.2 - 2026-08-18
 
 - die Stabilitätsprüfung vor dem Schreiben von Block 50 behandelt ausschließlich

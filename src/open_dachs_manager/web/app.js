@@ -12,15 +12,22 @@ const state = {
   histories: new Map(),
   chartSeries: { temperature: [], motor: [], exhaust: [] },
   chartHidden: { temperature: new Set(), motor: new Set(), exhaust: new Set() },
-  chartZoomRanges: new Map(),
+  chartZoomRange: null,
+  chartRunBands: [],
+  motorStatusSegments: [],
+  motorStatusBackfillComplete: true,
+  motorStatusHitboxes: new WeakMap(),
   chartPointers: new WeakMap(),
   chartGeometries: new WeakMap(),
+  historyRequest: { mode: "hours", hours: 24 },
   historyWindow: null,
-  chartRefresh: { inFlight: false, pending: false },
+  chartRefresh: { inFlight: false, pending: false, lastCompletedAt: 0 },
   authPreview: null,
+  authPreviewGeneration: 0,
+  authPreviewClearTimer: null,
   maintenanceSettings: null,
   sootFilterSettings: null,
-  maintenance: { reports: [], current: null, autosaveTimer: null },
+  maintenance: { reports: [], current: null, autosaveTimer: null, pw4Generation: 0, pw4ClearTimer: null },
   dashboard: { settings: null, editCards: [], draggedIndex: null },
   system: { selectedTab: "users", users: [], tokens: [], apiSettings: null },
   backup: { image: null, inspection: null, busy: false, importGeneration: 0, archive: [], archiveLoaded: false },
@@ -78,7 +85,6 @@ async function api(path, options = {}) {
 
 function showLogin(message = "") {
   state.user = null;
-  state.authPreview = null;
   state.backup.image = null;
   state.backup.inspection = null;
   state.backup.busy = false;
@@ -88,8 +94,8 @@ function showLogin(message = "") {
   if (state.refreshTimer) clearInterval(state.refreshTimer);
   if (state.chartTimer) clearInterval(state.chartTimer);
   if ($("writeEnabled")) $("writeEnabled").checked = false;
-  if ($("pass4")) $("pass4").value = "";
-  if ($("authPreviewSerial")) renderAuthPreview(null);
+  clearAuthPreview();
+  clearMaintenancePw4();
   if ($("writeGuardStatus")) updateWriteGuard();
   if ($("restoreFile")) $("restoreFile").value = "";
   if ($("restorePass4")) $("restorePass4").value = "";
@@ -163,7 +169,7 @@ async function boot() {
     refreshAudit();
     state.refreshTimer = setInterval(refreshLive, 1100);
     state.chartTimer = setInterval(() => {
-      if (state.selectedView === "monitorView") refreshCharts();
+      if (state.selectedView === "monitorView" && historyAutoRefreshDue()) refreshCharts();
     }, 6500);
   } catch (error) {
     if (error.message !== "Anmeldung erforderlich") showLogin(error.message);
@@ -397,6 +403,8 @@ async function openCurrentFaultCatalog() {
 }
 
 function dashboardField(block, key) {
+  const derived = dashboardDerivedFields().find((item) => Number(item.block) === Number(block) && item.key === key);
+  if (derived) return { ...derived, label: derived.label || derived.key, reserved: false, derived: true };
   const series = (state.schema?.series || []).find((item) => Number(item.block) === Number(block) && item.key === key);
   if (series) return { ...series, label: series.title, reserved: false };
   const blockSchema = (state.schema?.blocks || []).find((item) => Number(item.block) === Number(block));
@@ -412,7 +420,11 @@ function dashboardCards() {
   return state.dashboard.settings?.cards || state.dashboard.settings?.default_cards || [];
 }
 
-function operatingHoursPerStartCard() {
+function dashboardDerivedFields() {
+  return state.dashboard.settings?.derived_fields || state.schema?.dashboard?.derived_fields || [];
+}
+
+function operatingHoursPerStartDisplay() {
   const metric = state.live?.operating_hours_per_start;
   const ratio = Number(metric?.value);
   const available = metric?.available === true && Number.isFinite(ratio);
@@ -422,13 +434,26 @@ function operatingHoursPerStartCard() {
   const extra = available
     ? `Block 22 · ${Number(metric.starts).toLocaleString("de-DE")} Starts`
     : "Block 22 · wartet auf gültige Betriebssekunden und Starts";
+  return { value, extra };
+}
+
+function operatingHoursPerStartCard() {
+  const { value, extra } = operatingHoursPerStartDisplay();
   return `<article class="metric-card metric-card-derived"><div class="metric-label">Betriebsstunden je Start</div><div class="metric-value">${escapeHtml(value)}</div><div class="metric-extra">${escapeHtml(extra)}</div></article>`;
+}
+
+function operatingHoursPerStartDetail() {
+  const { value } = operatingHoursPerStartDisplay();
+  return `<div class="detail-item detail-item-derived"><div class="detail-label">Betriebsstunden je Start</div><div class="detail-value">${escapeHtml(value)}</div></div>`;
 }
 
 function renderOverview() {
   const cards = dashboardCards();
   const configuredCards = cards.map((card) => {
     const field = dashboardField(card.block, card.key);
+    if (field?.derived === true && field?.source === "operating_hours_per_start") {
+      return operatingHoursPerStartCard();
+    }
     const row = dashboardRow(card.block, card.key);
     const knownSeries = (state.schema?.series || []).find((item) => Number(item.block) === Number(card.block) && item.key === card.key);
     const invalid = knownSeries && isInvalidSensor(knownSeries.id, row);
@@ -436,9 +461,11 @@ function renderOverview() {
     const value = row && !invalid ? formatValue(row.value, row.unit || field?.unit || "") : "—";
     return `<article class="metric-card"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${value}</div><div class="metric-extra">Block ${escapeHtml(card.block)} · ${row && !invalid ? escapeHtml(row.recorded_at) : "wartet auf Messung"}</div></article>`;
   }).join("");
-  $("overviewCards").innerHTML = operatingHoursPerStartCard() + configuredCards;
+  $("overviewCards").innerHTML = configuredCards || `<article class="metric-card metric-card-empty"><div class="metric-label">Keine Kacheln ausgewählt</div><div class="metric-extra">Als Admin über „Bearbeiten“ Werte hinzufügen.</div></article>`;
   const motor = ["motorstatus", "drehzahl", "wirkleistung", "betriebsstunden", "kuehlwasser", "regler"].map((id) => seriesValue(id)).filter((row, index) => row && !isInvalidSensor(["motorstatus", "drehzahl", "wirkleistung", "betriebsstunden", "kuehlwasser", "regler"][index], row));
-  $("motorStateCards").innerHTML = motor.map((row) => `<div class="detail-item"><div class="detail-label">${escapeHtml(row.label)}</div><div class="detail-value">${formatValue(row.value, row.unit)}</div></div>`).join("") || `<p class="muted">Noch keine Motordaten.</p>`;
+  const motorCards = motor.map((row) => `<div class="detail-item"><div class="detail-label">${escapeHtml(row.label)}</div><div class="detail-value">${formatValue(row.value, row.unit)}</div></div>`);
+  motorCards.push(operatingHoursPerStartDetail());
+  $("motorStateCards").innerHTML = motorCards.join("");
   const system = ["servicecode", "warncode", "anzahl_warnungen", "anzahl_stoerungen"].map((id) => seriesValue(id)).filter(Boolean);
   $("systemStateCards").innerHTML = system.map((row) => `<div class="detail-item"><div class="detail-label">${escapeHtml(row.label)}</div><div class="detail-value">${formatValue(row.value, row.unit)}</div></div>`).join("") || `<p class="muted">Noch keine Statusdaten.</p>`;
   const ids = {
@@ -513,8 +540,11 @@ function allDashboardFields() {
       key: field.key,
       label: field.label || field.title || field.key,
       reserved: Boolean(field.reserved),
+      derived: Boolean(field.derived),
+      source: field.source || "",
     });
   };
+  for (const field of dashboardDerivedFields()) add(field);
   for (const series of (state.schema?.series || [])) add({ ...series, label: series.title });
   for (const block of (state.schema?.blocks || [])) {
     for (const field of (block.fields || [])) add({ ...field, block: block.block });
@@ -528,7 +558,8 @@ function renderDashboardEditor() {
   $("dashboardCardCount").textContent = `${cards.length}/${maximum}`;
   $("dashboardCardList").innerHTML = cards.map((card, index) => {
     const field = dashboardField(card.block, card.key);
-    return `<article class="dashboard-edit-card" draggable="true" data-dashboard-index="${index}"><span class="drag-handle" aria-hidden="true">⠿</span><div><strong>${escapeHtml(field?.label || card.key)}</strong><small>Block ${escapeHtml(card.block)} · ${escapeHtml(card.key)}</small></div><div class="dashboard-card-actions"><button type="button" data-dashboard-move="up" data-dashboard-index="${index}" aria-label="Nach oben">↑</button><button type="button" data-dashboard-move="down" data-dashboard-index="${index}" aria-label="Nach unten">↓</button><button class="danger" type="button" data-dashboard-remove="${index}" aria-label="Entfernen">×</button></div></article>`;
+    const source = field?.derived ? `Berechnet aus Block ${escapeHtml(card.block)}` : `Block ${escapeHtml(card.block)} · ${escapeHtml(card.key)}`;
+    return `<article class="dashboard-edit-card" draggable="true" data-dashboard-index="${index}"><span class="drag-handle" aria-hidden="true">⠿</span><div><strong>${escapeHtml(field?.label || card.key)}</strong><small>${source}</small></div><div class="dashboard-card-actions"><button type="button" data-dashboard-move="up" data-dashboard-index="${index}" aria-label="Nach oben">↑</button><button type="button" data-dashboard-move="down" data-dashboard-index="${index}" aria-label="Nach unten">↓</button><button class="danger" type="button" data-dashboard-remove="${index}" aria-label="Entfernen">×</button></div></article>`;
   }).join("") || `<p class="muted">Noch keine Kachel gewählt.</p>`;
 
   const selected = new Set(cards.map((card) => `${Number(card.block)}:${card.key}`));
@@ -538,7 +569,7 @@ function renderDashboardEditor() {
     const haystack = `${field.block} ${field.label} ${field.key}`.toLocaleLowerCase("de");
     return !query || haystack.includes(query);
   });
-  $("dashboardFieldList").innerHTML = available.slice(0, 160).map((field, index) => `<button type="button" data-dashboard-add="${index}"><span><strong>${escapeHtml(field.label)}</strong><small>Block ${field.block} · ${escapeHtml(field.key)}${field.reserved ? " · Reserve" : ""}</small></span><b>+</b></button>`).join("") || `<p class="muted">Kein weiterer passender Wert.</p>`;
+  $("dashboardFieldList").innerHTML = available.slice(0, 160).map((field, index) => `<button type="button" data-dashboard-add="${index}"><span><strong>${escapeHtml(field.label)}</strong><small>${field.derived ? `Berechnet aus Block ${field.block}` : `Block ${field.block} · ${escapeHtml(field.key)}${field.reserved ? " · Reserve" : ""}`}</small></span><b>+</b></button>`).join("") || `<p class="muted">Kein weiterer passender Wert.</p>`;
   $("dashboardFieldList").dataset.fields = JSON.stringify(available.slice(0, 160).map((field) => ({ block: field.block, key: field.key })));
   $("dashboardSave").disabled = cards.length > maximum;
 
@@ -747,6 +778,12 @@ function refreshMonitorStatus() {
 
 function showView(viewId) {
   if (viewId === "systemView" && state.user?.role !== "admin") return;
+  if (state.selectedView === "settingsView" && viewId !== "settingsView") {
+    clearAuthPreview("Beim Verlassen der Einstellung verworfen");
+  }
+  if (state.selectedView === "maintenanceView" && viewId !== "maintenanceView") {
+    clearMaintenancePw4("Beim Verlassen der Wartung verworfen");
+  }
   state.selectedView = viewId;
   document.querySelectorAll(".app-view").forEach((view) => { view.hidden = view.id !== viewId; });
   document.querySelectorAll(".tab-button").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
@@ -844,7 +881,7 @@ function maintenanceBackupTableMarkup(backup) {
     : `<strong>Backup #${escapeHtml(backup.id)}</strong>`;
   return `<div class="maintenance-backup-cell">
     ${identity}
-    <small class="${complete ? "backup-integrity-ok" : "backup-integrity-error"}">${successful}/${requested || 38}${failed ? ` · ${failed} Fehler` : ""}</small>
+    <small class="${complete ? "backup-integrity-ok" : "backup-integrity-error"}">${successful}/${requested || "?"}${failed ? ` · ${failed} Fehler` : ""}</small>
   </div>`;
 }
 
@@ -856,14 +893,14 @@ function renderMaintenanceBackupSummary(item) {
     container.innerHTML = `<div class="maintenance-backup-card legacy"><div><p class="eyebrow">SICHERHEITSBACKUP</p><strong>Altbericht ohne verknüpftes Pflichtbackup</strong><small>Berichte aus früheren Versionen bleiben weiterhin lesbar.</small></div></div>`;
     return;
   }
-  const requested = archiveTargetCount(backup, "requested") || 38;
+  const requested = archiveTargetCount(backup, "requested");
   const successful = archiveTargetCount(backup, "successful");
   const failed = archiveTargetCount(backup, "failed");
   const ready = archiveEntryReady(backup);
   const digest = String(backup.image_sha256 || "");
   const archiveAction = state.user?.role === "admin" ? `<button type="button" data-open-backup="${escapeHtml(backup.id)}">Im Backup-Archiv anzeigen</button>` : "";
   container.innerHTML = `<div class="maintenance-backup-card ${ready ? "verified" : "invalid"}">
-    <div><p class="eyebrow">SICHERHEITSBACKUP #${escapeHtml(backup.id)}</p><strong>${ready ? "Vollständig und geprüft" : "Backupstatus prüfen"}</strong><small>${escapeHtml(formatArchiveDate(backup.created_at))} · ${successful}/${requested} Ziele${failed ? ` · ${failed} fehlgeschlagen` : ""}</small></div>
+    <div><p class="eyebrow">SICHERHEITSBACKUP #${escapeHtml(backup.id)}</p><strong>${ready ? "Vollständig und geprüft" : "Backupstatus prüfen"}</strong><small>${escapeHtml(formatArchiveDate(backup.created_at))} · ${successful}/${requested || "?"} Ziele${failed ? ` · ${failed} fehlgeschlagen` : ""}</small></div>
     <code title="${escapeHtml(digest)}">SHA-256 ${escapeHtml(digest || "nicht gemeldet")}</code>
     ${archiveAction}
   </div>`;
@@ -892,13 +929,14 @@ async function createMaintenanceReport() {
   button.textContent = "Lese gesamten Anlagenzustand …";
   try {
     const item = await api("/api/maintenance/reports", { method: "POST", body: "{}" });
+    clearMaintenancePw4();
     state.maintenance.current = item;
     renderMaintenanceEditor();
     await refreshMaintenance(false);
     if (state.user?.role === "admin") await refreshBackupArchive(true);
     const snapshot = item.snapshot || {};
     const backup = maintenanceBackupMetadata(item);
-    const backupText = backup ? ` Pflichtbackup #${backup.id}: ${archiveTargetCount(backup, "successful")}/${archiveTargetCount(backup, "requested") || 38} Ziele geprüft.` : "";
+    const backupText = backup ? ` Pflichtbackup #${backup.id}: ${archiveTargetCount(backup, "successful")}/${archiveTargetCount(backup, "requested") || "?"} Ziele geprüft.` : "";
     toast(`Anlagenzustand schreibfrei gelesen: ${(snapshot.captured_blocks || []).length}/${(snapshot.attempted_blocks || []).length} Blöcke lokal archiviert.${backupText}`);
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; button.textContent = "Wartung starten & Pflichtbackup erstellen"; }
@@ -908,6 +946,7 @@ async function loadMaintenanceReport(reportId) {
   try {
     clearTimeout(state.maintenance.autosaveTimer);
     state.maintenance.autosaveTimer = null;
+    if (Number(state.maintenance.current?.id) !== Number(reportId)) clearMaintenancePw4();
     state.maintenance.current = await api(`/api/maintenance/reports/${reportId}`);
     renderMaintenanceEditor();
   } catch (error) { toast(error.message); }
@@ -947,7 +986,7 @@ async function deleteMaintenanceReport(reportId) {
 
 function renderMaintenanceEditor() {
   const item = state.maintenance.current;
-  if (!item) { $("maintenanceEditor").hidden = true; $("maintenanceBackupSummary").innerHTML = ""; return; }
+  if (!item) { clearMaintenancePw4(); $("maintenanceEditor").hidden = true; $("maintenanceBackupSummary").innerHTML = ""; return; }
   $("maintenanceEditor").hidden = false;
   $("maintenanceReportNumber").textContent = `#${item.id}`;
   $("maintenanceReportTitle").textContent = item.status === "draft" ? "Wartungsentwurf bearbeiten"
@@ -997,6 +1036,7 @@ function renderMaintenanceEditor() {
   $("maintenanceCompletionDescription").textContent = liveCompletion ? "Schreibt Block 100 und setzt anschließend das Bestätigungsbit in Block 104. Beide Schritte benötigen ACK und Readback." : "Validiert und archiviert das Protokoll ausschließlich auf dem Pi. Block 100, Block 104 und das Bestätigungsbit bleiben unverändert.";
   $("maintenanceAuthLevelField").hidden = !liveCompletion;
   $("maintenancePass4Field").hidden = !liveCompletion;
+  if (!liveCompletion) clearMaintenancePw4();
   $("maintenanceConfirmation").placeholder = item.confirmation_text || (liveCompletion ? "WARTUNG ABSCHLIESSEN" : "DEMO ABSCHLIESSEN");
   $("maintenanceComplete").textContent = liveCompletion ? "Wartung endgültig abschließen" : "Demolauf abschließen";
   $("maintenanceComplete").classList.toggle("danger", liveCompletion);
@@ -1060,13 +1100,15 @@ async function completeMaintenance() {
   state.maintenance.autosaveTimer = null;
   const button = $("maintenanceComplete");
   button.disabled = true;
+  const requestPayload = {
+    protocol: maintenanceProtocolFromForm(),
+    auth_level: Number($("maintenanceAuthLevel").value || -1),
+    pass4: $("maintenancePass4").value,
+    confirmation: $("maintenanceConfirmation").value,
+  };
+  clearMaintenancePw4("Nach Abschlussversuch verworfen");
   try {
-    state.maintenance.current = await api(`/api/maintenance/reports/${item.id}/complete`, { method: "POST", body: JSON.stringify({
-      protocol: maintenanceProtocolFromForm(),
-      auth_level: Number($("maintenanceAuthLevel").value || -1),
-      pass4: $("maintenancePass4").value,
-      confirmation: $("maintenanceConfirmation").value,
-    }) });
+    state.maintenance.current = await api(`/api/maintenance/reports/${item.id}/complete`, { method: "POST", body: JSON.stringify(requestPayload) });
     renderMaintenanceEditor();
     await refreshMaintenance(false);
     await refreshAudit();
@@ -1486,23 +1528,104 @@ function renderAuthPreview(data) {
   $("authPreviewApply").disabled = !(data?.ok && data?.pw4);
 }
 
+function clearAuthPreview(status = "Noch nicht gelesen") {
+  state.authPreviewGeneration += 1;
+  if (state.authPreviewClearTimer) clearTimeout(state.authPreviewClearTimer);
+  state.authPreviewClearTimer = null;
+  state.authPreview = null;
+  if ($("pass4")) $("pass4").value = "";
+  if ($("authPreviewSerial")) {
+    renderAuthPreview(null);
+    $("authPreviewStatus").textContent = status;
+  }
+}
+
 async function refreshAuthPreview() {
-  if (state.user?.role !== "admin") return;
+  if (state.user?.role !== "admin" || state.selectedView !== "settingsView") return;
+  const username = state.user.username;
+  clearAuthPreview("Lese Block 20 und 22 …");
+  const generation = state.authPreviewGeneration;
   const status = $("authPreviewStatus");
-  status.textContent = "Lese Block 20 und 22 …";
   status.className = "muted";
   try {
-    renderAuthPreview(await api("/api/auth-preview"));
+    const preview = await api("/api/auth-preview");
+    if (generation !== state.authPreviewGeneration
+      || state.user?.role !== "admin"
+      || state.user?.username !== username
+      || state.selectedView !== "settingsView") return;
+    if (!preview?.ok || !/^\d{4}$/.test(String(preview.pw4 || ""))) {
+      throw new Error("PW4 konnte nicht sicher berechnet werden");
+    }
+    renderAuthPreview(preview);
+    state.authPreviewClearTimer = setTimeout(() => {
+      if (generation === state.authPreviewGeneration) {
+        clearAuthPreview("PW4 nach 60 Sekunden verworfen");
+      }
+    }, 60_000);
   } catch (error) {
-    renderAuthPreview({ ok: false, error: error.message });
+    if (generation === state.authPreviewGeneration
+      && state.user?.role === "admin"
+      && state.user?.username === username
+      && state.selectedView === "settingsView") {
+      renderAuthPreview({ ok: false, error: error.message });
+    }
   }
 }
 
 function applyAuthPreview() {
   const pw4 = state.authPreview?.pw4;
-  if (!state.authPreview?.ok || !pw4) return;
+  if (state.user?.role !== "admin"
+    || state.selectedView !== "settingsView"
+    || !state.authPreview?.ok
+    || !/^\d{4}$/.test(String(pw4 || ""))) return;
   $("pass4").value = pw4;
   toast("Berechnete PW4 ins Eingabefeld übernommen.");
+}
+
+function clearMaintenancePw4(status = "Noch nicht gelesen") {
+  state.maintenance.pw4Generation += 1;
+  if (state.maintenance.pw4ClearTimer) clearTimeout(state.maintenance.pw4ClearTimer);
+  state.maintenance.pw4ClearTimer = null;
+  if ($("maintenancePass4")) $("maintenancePass4").value = "";
+  if ($("maintenancePw4Status")) $("maintenancePw4Status").textContent = status;
+}
+
+async function readMaintenancePw4() {
+  if (state.user?.role !== "admin"
+    || state.maintenance.current?.status !== "draft"
+    || !state.maintenance.current?.maintenance_live_writes_enabled) return;
+  const button = $("maintenancePw4Read");
+  const reportId = Number(state.maintenance.current.id);
+  const generation = ++state.maintenance.pw4Generation;
+  if (state.maintenance.pw4ClearTimer) clearTimeout(state.maintenance.pw4ClearTimer);
+  state.maintenance.pw4ClearTimer = null;
+  $("maintenancePass4").value = "";
+  button.disabled = true;
+  $("maintenancePw4Status").textContent = "Lese Block 20 und 22 …";
+  try {
+    const preview = await api("/api/auth-preview");
+    if (generation !== state.maintenance.pw4Generation
+      || state.user?.role !== "admin"
+      || Number(state.maintenance.current?.id) !== reportId
+      || state.maintenance.current?.status !== "draft"
+      || !state.maintenance.current?.maintenance_live_writes_enabled) return;
+    if (!preview?.ok || !/^\d{4}$/.test(String(preview.pw4 || ""))) throw new Error("PW4 konnte nicht sicher berechnet werden");
+    $("maintenancePass4").value = preview.pw4;
+    $("maintenancePw4Status").textContent = `PW4 ${preview.pw4} gelesen und für diese Wartung übernommen`;
+    state.maintenance.pw4ClearTimer = setTimeout(() => {
+      if (generation === state.maintenance.pw4Generation) {
+        clearMaintenancePw4("PW4 nach 60 Sekunden verworfen");
+      }
+    }, 60_000);
+    toast("PW4 schreibfrei aus der Anlage berechnet und übernommen.");
+  } catch (error) {
+    if (generation === state.maintenance.pw4Generation) {
+      clearMaintenancePw4(`Fehler: ${error.message}`);
+      toast(error.message, "error");
+    }
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function toggleMonitor() {
@@ -1701,7 +1824,133 @@ async function deleteApiToken(tokenId) {
   } catch (error) { toast(error.message); }
 }
 
-function chartColors() { return { grid:getComputedStyle(document.documentElement).getPropertyValue("--chart-grid").trim() || "#dbe3e5", ink:getComputedStyle(document.documentElement).getPropertyValue("--muted").trim() || "#69767b", background:getComputedStyle(document.documentElement).getPropertyValue("--surface-alt").trim() || "#f7f9f9" }; }
+function chartColors() {
+  const style = getComputedStyle(document.documentElement);
+  return {
+    grid: style.getPropertyValue("--chart-grid").trim() || "#dbe3e5",
+    ink: style.getPropertyValue("--muted").trim() || "#69767b",
+    background: style.getPropertyValue("--surface-alt").trim() || "#f7f9f9",
+    running: style.getPropertyValue("--chart-running-bg").trim() || "rgba(22,163,74,.11)",
+    stopped: style.getPropertyValue("--chart-stopped-bg").trim() || "rgba(220,38,38,.09)",
+  };
+}
+
+function motorStatusColors() {
+  const style = getComputedStyle(document.documentElement);
+  const color = (name, fallback) => style.getPropertyValue(name).trim() || fallback;
+  return {
+    background: color("--surface-alt", "#f7f9f9"),
+    ink: color("--muted", "#69767b"),
+    grid: color("--chart-grid", "#dbe3e5"),
+    gap: color("--motor-status-gap-line", "rgba(105,118,123,.2)"),
+    off: color("--motor-status-off", "#ffffff"),
+    offBorder: color("--motor-status-off-border", "#94a3b8"),
+    preparation: color("--motor-status-preparation", "#f59e0b"),
+    start: color("--motor-status-start", "#dc2626"),
+    running: color("--motor-status-running", "#16a34a"),
+    shutdown: color("--motor-status-shutdown", "#7c3aed"),
+    fault: color("--motor-status-fault", "#7f1d1d"),
+    ok: color("--motor-status-ok", "#64748b"),
+    unknown: color("--motor-status-unknown", "#94a3b8"),
+  };
+}
+
+function motorStatusTone(code) {
+  if (code === 0) return "ok";
+  if (code === 15 || code === 16) return "off";
+  if (code === 20) return "preparation";
+  if (code >= 21 && code <= 24) return "start";
+  if (code >= 30 && code <= 35) return "running";
+  if (code >= 11 && code <= 13) return "shutdown";
+  if (code === 10 || code === 14) return "fault";
+  return "unknown";
+}
+
+function motorStatusCatalog() {
+  const block = (state.schema?.blocks || []).find((item) => Number(item.block) === 24);
+  const field = (block?.fields || []).find((item) => item.key === "Hka_Mw1.bMotorStatus");
+  return new Map((field?.choices || []).map((choice) => [Number(choice.value), String(choice.label)]));
+}
+
+function motorStatusLabel(code) {
+  return motorStatusCatalog().get(Number(code)) || "Unbekannter Status";
+}
+
+function median(values) {
+  if (!values.length) return null;
+  const ordered = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
+}
+
+function buildChartRunBands(points, windowRange) {
+  if (!windowRange || !Number.isFinite(windowRange.start) || !Number.isFinite(windowRange.end)) return [];
+  const samples = (points || []).map((point) => ({
+    time: new Date(point.recorded_at).getTime(),
+    rpm: numeric(point.value),
+  })).filter((point) => Number.isFinite(point.time) && point.rpm !== null && point.rpm >= 0 && point.rpm <= 3000)
+    .sort((a, b) => a.time - b.time);
+  if (!samples.length) return [];
+  const diffs = samples.slice(1).map((point, index) => point.time - samples[index].time).filter((value) => value > 0);
+  const duration = windowRange.end - windowRange.start;
+  const bucketGap = Math.max(1000, duration / 2000);
+  const observedGap = median(diffs);
+  // A regular observed interval is trustworthy only while it is plausible
+  // for the server's 2,000-point reduction of the selected window.  Two lone
+  // points hours apart must not redefine that outage as the normal cadence.
+  const observedTrusted = Number.isFinite(observedGap)
+    && observedGap <= Math.max(60_000, bucketGap * 2);
+  const expectedGap = observedTrusted ? observedGap : bucketGap;
+  // Consecutive non-empty server buckets can place their first samples almost
+  // two bucket widths apart.  Keep a small margin above that, but do not carry
+  // a known RPM state across several empty buckets: that would paint a real
+  // history outage red or green instead of leaving it neutral.
+  const maximumGap = Math.max(
+    60_000,
+    Math.min(6 * 3600_000, Math.max(bucketGap * 2.5, observedTrusted ? observedGap * 2.5 : 0)),
+  );
+  const bands = [];
+  const append = (from, to, running) => {
+    const start = Math.max(windowRange.start, from);
+    const end = Math.min(windowRange.end, to);
+    if (!(end > start)) return;
+    const previous = bands[bands.length - 1];
+    if (previous && previous.running === running && start <= previous.end + 1) previous.end = end;
+    else bands.push({ start, end, running });
+  };
+  samples.forEach((point, index) => {
+    const next = samples[index + 1];
+    let start = point.time;
+    if (index === 0 && point.time - windowRange.start <= maximumGap) start = windowRange.start;
+    let end;
+    if (next && next.time - point.time <= maximumGap) end = next.time;
+    else if (next) end = point.time + Math.min(expectedGap, maximumGap);
+    else if (windowRange.end - point.time <= maximumGap) end = windowRange.end;
+    else end = point.time + Math.min(expectedGap, maximumGap);
+    append(start, end, point.rpm > 0);
+  });
+  return bands;
+}
+
+function drawChartRunBands(ctx, colors, start, end, left, top, plotW, plotH) {
+  for (const band of state.chartRunBands) {
+    const bandStart = Math.max(start, band.start);
+    const bandEnd = Math.min(end, band.end);
+    if (!(bandEnd > bandStart)) continue;
+    const x = left + ((bandStart - start) / Math.max(1, end - start)) * plotW;
+    const width = ((bandEnd - bandStart) / Math.max(1, end - start)) * plotW;
+    ctx.fillStyle = band.running ? colors.running : colors.stopped;
+    ctx.fillRect(x, top, width, plotH);
+  }
+}
+
+function chartTimeLabel(timestamp, duration) {
+  const date = new Date(timestamp);
+  if (duration >= 12 * 3600000) {
+    return date.toLocaleString("de-DE", { day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit" });
+  }
+  return date.toLocaleTimeString("de-DE", { hour:"2-digit", minute:"2-digit" });
+}
 
 function chartPoints(series) {
   return series.flatMap((item) => (item.points || []).map((point) => ({ ...point, item, number:numeric(point.value), time:new Date(point.recorded_at).getTime() })))
@@ -1852,21 +2101,33 @@ function drawChartHover(ctx, pointer, visibleSeries, dataById, start, end, left,
   ctx.restore();
 }
 
+function chartBaseHeight(canvas) {
+  if (!canvas.dataset.chartHeight) {
+    canvas.dataset.chartHeight = canvas.getAttribute("height") || "300";
+  }
+  return Number(canvas.dataset.chartHeight) || 300;
+}
+
 function drawChart(canvas, series, rangeHours, group, requestedWindow = null) {
   if (!canvas) return;
-  const rect = canvas.getBoundingClientRect(); const dpr = window.devicePixelRatio || 1; const width = Math.max(280, Math.floor(rect.width)); const baseHeight = Number(canvas.dataset.chartHeight || canvas.height) || 300; const compact = width < 560 || window.matchMedia?.("(max-width: 780px)").matches; const height = compact ? Math.min(baseHeight, canvas.id === "temperatureChart" ? 250 : 230) : baseHeight;
+  const rect = canvas.getBoundingClientRect(); const dpr = window.devicePixelRatio || 1; const width = Math.max(280, Math.floor(rect.width)); const baseHeight = chartBaseHeight(canvas); const compact = width < 560 || window.matchMedia?.("(max-width: 780px)").matches; const height = compact ? Math.min(baseHeight, canvas.id === "temperatureChart" ? 250 : 230) : baseHeight;
   canvas.width = width * dpr; canvas.height = height * dpr; const ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const colors = chartColors(); ctx.fillStyle = colors.background; ctx.fillRect(0, 0, width, height);
   const axisConfig = chartAxisConfig(group); const dualAxis = Boolean(axisConfig);
-  const left = dualAxis ? (compact ? 52 : 78) : (compact ? 46 : 58), right = dualAxis ? (compact ? 52 : 78) : (compact ? 12 : 18), top = compact ? 22 : 20, bottom = compact ? 29 : 32, plotW = Math.max(80, width - left - right), plotH = Math.max(80, height - top - bottom);
+  // Uniform margins align one timestamp vertically across all four charts.
+  const left = compact ? 52 : 78, right = compact ? 52 : 78, top = compact ? 22 : 20, bottom = compact ? 29 : 32, plotW = Math.max(80, width - left - right), plotH = Math.max(80, height - top - bottom);
   const visibleSeries = series.filter((item) => !chartSeriesHidden(group, item));
   const allPoints = chartPoints(series); const points = chartPoints(visibleSeries);
   const customWindow = requestedWindow && Number.isFinite(requestedWindow.start) && Number.isFinite(requestedWindow.end) && requestedWindow.end > requestedWindow.start;
-  const geometry = { left, top, width:plotW, height:plotH, group, start:customWindow ? requestedWindow.start : 0, end:customWindow ? requestedWindow.end : 0 };
-  if (!allPoints.length) { ctx.fillStyle=colors.ink; ctx.font="13px system-ui"; ctx.fillText("Noch keine gespeicherten Messwerte", 20, height / 2); state.chartGeometries.set(canvas, geometry); return; }
-  const times = allPoints.map((point) => point.time); const fullStart = customWindow ? requestedWindow.start : Math.min(...times); const fullEnd = customWindow ? requestedWindow.end : Math.max(...times, fullStart + rangeHours * 3600000);
-  const zoom = state.chartZoomRanges.get(group); const start = zoom ? zoom.start : fullStart; const end = zoom ? zoom.end : fullEnd;
+  const times = allPoints.map((point) => point.time);
+  const fallbackEnd = Date.now();
+  const fullStart = customWindow ? requestedWindow.start : (times.length ? Math.min(...times) : fallbackEnd - rangeHours * 3600000);
+  const fullEnd = customWindow ? requestedWindow.end : (times.length ? Math.max(...times, fullStart + rangeHours * 3600000) : fallbackEnd);
+  const zoom = state.chartZoomRange; const start = zoom ? zoom.start : fullStart; const end = zoom ? zoom.end : fullEnd;
+  const geometry = { left, top, width:plotW, height:plotH, canvasWidth:width, canvasHeight:height, group, start, end };
   geometry.start = start; geometry.end = end; state.chartGeometries.set(canvas, geometry);
+  drawChartRunBands(ctx, colors, start, end, left, top, plotW, plotH);
+  const noStoredPoints = !allPoints.length;
   const visible = points.filter((point) => point.time >= start && point.time <= end); const numbers = visible.map((point) => point.number);
   const dataById = new Map();
   for (const item of visibleSeries) {
@@ -1913,33 +2174,327 @@ function drawChart(canvas, series, rangeHours, group, requestedWindow = null) {
     ctx.strokeStyle=item.color; ctx.lineWidth=2.2; ctx.beginPath();
     data.forEach((point,index)=>{const x=left+((point.time-start)/Math.max(1,end-start))*plotW;const y=top+((axis.max-point.number)/Math.max(1,axis.max-axis.min))*plotH;if(index)ctx.lineTo(x,y);else ctx.moveTo(x,y);}); ctx.stroke();
   }
-  if (!visibleSeries.length || !visible.length) { ctx.fillStyle=colors.ink; ctx.font="13px system-ui"; ctx.textAlign="center"; ctx.fillText("Alle Werte ausgeblendet", left+plotW/2, top+plotH/2); ctx.textAlign="left"; }
-  ctx.fillStyle=colors.ink; ctx.textAlign="left"; ctx.fillText(new Date(start).toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"}),left,height-8); ctx.textAlign="right"; ctx.fillText(new Date(end).toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"}),left+plotW,height-8); ctx.textAlign="left";
+  if (noStoredPoints || !visibleSeries.length || !visible.length) { ctx.fillStyle=colors.ink; ctx.font="13px system-ui"; ctx.textAlign="center"; ctx.fillText(noStoredPoints ? "Noch keine gespeicherten Messwerte" : "Alle Werte ausgeblendet", left+plotW/2, top+plotH/2); ctx.textAlign="left"; }
+  ctx.fillStyle=colors.ink; ctx.textAlign="left"; ctx.fillText(chartTimeLabel(start, end - start),left,height-8); ctx.textAlign="right"; ctx.fillText(chartTimeLabel(end, end - start),left+plotW,height-8); ctx.textAlign="left";
   const pointer = state.chartPointers.get(canvas);
   drawChartHover(ctx, pointer, visibleSeries, dataById, start, end, left, top, plotW, plotH, width, height, group, axisConfig, leftScale, rightScale);
   if (pointer?.dragging && Number.isFinite(pointer.currentX)) { const x1=Math.max(left,Math.min(left+plotW,pointer.startX)); const x2=Math.max(left,Math.min(left+plotW,pointer.currentX)); ctx.fillStyle="rgba(40,99,167,.16)"; ctx.fillRect(Math.min(x1,x2),top,Math.abs(x2-x1),plotH); ctx.strokeStyle="#2863a7"; ctx.setLineDash([5,4]); ctx.strokeRect(Math.min(x1,x2),top,Math.abs(x2-x1),plotH); ctx.setLineDash([]); }
 }
 
+function normalizedMotorStatusSegments() {
+  return (state.motorStatusSegments || []).map((segment) => ({
+    start: new Date(segment.from).getTime(),
+    end: new Date(segment.to).getTime(),
+    status: Number(segment.status),
+  })).filter((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end)
+    && segment.end > segment.start && Number.isInteger(segment.status))
+    .sort((a, b) => a.start - b.start);
+}
+
+function motorStatusSegmentAt(segments, time) {
+  return segments.find((segment) => time >= segment.start && time < segment.end) || null;
+}
+
+function layoutMotorStatusMarkers(segments, start, end, left, top, plotW, plotH) {
+  const events = segments.filter((segment) => segment.start >= start && segment.start <= end)
+    .map((segment) => ({
+      segment,
+      x: left + ((segment.start - start) / Math.max(1, end - start)) * plotW,
+    }));
+  const groups = [];
+  for (const event of events) {
+    const group = groups[groups.length - 1];
+    if (group && event.x - group.anchor <= 4) group.events.push(event);
+    else groups.push({ anchor: event.x, events: [event] });
+  }
+  const hitboxes = [];
+  const tileWidth = 4;
+  const rowsPerColumn = Math.max(1, Math.floor(plotH / 4));
+  for (const group of groups) {
+    const columns = Math.ceil(group.events.length / rowsPerColumn);
+    const groupWidth = columns * tileWidth;
+    const center = group.events.reduce((sum, event) => sum + event.x, 0) / group.events.length;
+    const baseX = Math.max(left, Math.min(left + plotW - groupWidth, center - groupWidth / 2));
+    for (let column = 0; column < columns; column += 1) {
+      const columnEvents = group.events.slice(column * rowsPerColumn, (column + 1) * rowsPerColumn);
+      const tileHeight = plotH / columnEvents.length;
+      columnEvents.forEach((event, row) => hitboxes.push({
+        x: baseX + column * tileWidth,
+        y: top + row * tileHeight,
+        width: tileWidth,
+        height: tileHeight,
+        segment: event.segment,
+      }));
+    }
+  }
+  return hitboxes;
+}
+
+function drawMotorStatusHover(ctx, pointer, segments, hitboxes, start, end, left, top, plotW, plotH, width) {
+  const output = $("motorStatusHoverText");
+  if (!pointer || !Number.isFinite(pointer.hoverX) || pointer.hoverX < left || pointer.hoverX > left + plotW) {
+    if (output) output.textContent = "";
+    return;
+  }
+  const hoverTime = start + ((pointer.hoverX - left) / Math.max(1, plotW)) * (end - start);
+  const marker = (hitboxes || []).find((hitbox) => pointer.hoverX >= hitbox.x
+    && pointer.hoverX <= hitbox.x + hitbox.width
+    && Number.isFinite(pointer.hoverY)
+    && pointer.hoverY >= hitbox.y
+    && pointer.hoverY <= hitbox.y + hitbox.height);
+  const segment = marker?.segment || motorStatusSegmentAt(segments, hoverTime);
+  const displayTime = segment ? segment.start : hoverTime;
+  const colors = motorStatusColors();
+  const title = new Date(displayTime).toLocaleString("de-DE", {
+    day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+  const line = segment
+    ? `${segment.status} · ${motorStatusLabel(segment.status)}`
+    : "Keine Messdaten";
+  if (output) output.textContent = `${title}: ${line}`;
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(40, 99, 167, .72)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(pointer.hoverX, top);
+  ctx.lineTo(pointer.hoverX, top + plotH);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.font = "11px system-ui";
+  const boxWidth = Math.min(width - 16, Math.max(210, title.length * 6.2 + 24, line.length * 6.2 + 38));
+  const boxHeight = 50;
+  let boxX = pointer.hoverX + 12;
+  if (boxX + boxWidth > width - 8) boxX = pointer.hoverX - boxWidth - 12;
+  boxX = Math.max(8, Math.min(width - boxWidth - 8, boxX));
+  const boxY = Math.max(6, top + Math.floor((plotH - boxHeight) / 2));
+  ctx.fillStyle = "rgba(22, 34, 39, .95)";
+  ctx.strokeStyle = "rgba(255, 255, 255, .24)";
+  ctx.beginPath();
+  ctx.roundRect(boxX, boxY, boxWidth, boxHeight, 5);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "600 11px system-ui";
+  ctx.textAlign = "left";
+  ctx.fillText(title, boxX + 10, boxY + 17);
+  if (segment) {
+    ctx.fillStyle = colors[motorStatusTone(segment.status)];
+    ctx.fillRect(boxX + 10, boxY + 30, 9, 9);
+  } else {
+    ctx.fillStyle = colors.background;
+    ctx.fillRect(boxX + 10, boxY + 30, 9, 9);
+    ctx.strokeStyle = colors.gap;
+    ctx.beginPath();
+    ctx.moveTo(boxX + 10, boxY + 39);
+    ctx.lineTo(boxX + 19, boxY + 30);
+    ctx.moveTo(boxX + 14, boxY + 39);
+    ctx.lineTo(boxX + 19, boxY + 34);
+    ctx.stroke();
+  }
+  if (!segment || motorStatusTone(segment.status) === "off") {
+    ctx.strokeStyle = colors.offBorder;
+    ctx.strokeRect(boxX + 10, boxY + 30, 9, 9);
+  }
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "11px system-ui";
+  ctx.fillText(line, boxX + 25, boxY + 39);
+  ctx.restore();
+}
+
+function drawMotorStatusChart(canvas, rangeHours, requestedWindow = null) {
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(280, Math.floor(rect.width));
+  const compact = width < 560 || window.matchMedia?.("(max-width: 780px)").matches;
+  const height = compact ? 96 : 112;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const colors = motorStatusColors();
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(0, 0, width, height);
+  const left = compact ? 52 : 78;
+  const right = compact ? 52 : 78;
+  const top = 15;
+  const bottom = compact ? 25 : 27;
+  const plotW = Math.max(80, width - left - right);
+  const plotH = Math.max(34, height - top - bottom);
+  const customWindow = requestedWindow && Number.isFinite(requestedWindow.start)
+    && Number.isFinite(requestedWindow.end) && requestedWindow.end > requestedWindow.start;
+  const fallbackEnd = Date.now();
+  const fullStart = customWindow ? requestedWindow.start : fallbackEnd - rangeHours * 3600000;
+  const fullEnd = customWindow ? requestedWindow.end : fallbackEnd;
+  const zoom = state.chartZoomRange;
+  const start = zoom ? zoom.start : fullStart;
+  const end = zoom ? zoom.end : fullEnd;
+  state.chartGeometries.set(canvas, {
+    left, top, width: plotW, height: plotH,
+    canvasWidth: width, canvasHeight: height,
+    group: "motorStatus", start, end,
+  });
+
+  // The hatched base is deliberately distinct from white "Aus" intervals.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(left, top, plotW, plotH);
+  ctx.clip();
+  ctx.strokeStyle = colors.gap;
+  ctx.lineWidth = 1;
+  for (let x = left - plotH; x < left + plotW + plotH; x += 12) {
+    ctx.beginPath();
+    ctx.moveTo(x, top + plotH);
+    ctx.lineTo(x + plotH, top);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  const segments = normalizedMotorStatusSegments().filter((segment) => segment.end > start && segment.start < end);
+  for (const segment of segments) {
+    const clippedStart = Math.max(start, segment.start);
+    const clippedEnd = Math.min(end, segment.end);
+    const x1 = left + ((clippedStart - start) / Math.max(1, end - start)) * plotW;
+    const x2 = left + ((clippedEnd - start) / Math.max(1, end - start)) * plotW;
+    const tone = motorStatusTone(segment.status);
+    ctx.fillStyle = colors[tone];
+    ctx.fillRect(x1, top, Math.max(1, x2 - x1), plotH);
+    if (tone === "off") {
+      ctx.strokeStyle = colors.offBorder;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x1 + .5, top + .5, Math.max(0, x2 - x1 - 1), plotH - 1);
+    }
+  }
+  // Colliding sub-pixel transitions become separate colour tiles in a narrow
+  // marker column. This keeps every event visible and individually hoverable
+  // even when a 24-hour view compresses a complete start to one x-coordinate.
+  const hitboxes = layoutMotorStatusMarkers(segments, start, end, left, top, plotW, plotH);
+  for (const hitbox of hitboxes) {
+    const tone = motorStatusTone(hitbox.segment.status);
+    ctx.fillStyle = colors[tone];
+    ctx.fillRect(hitbox.x, hitbox.y, hitbox.width, hitbox.height);
+    ctx.strokeStyle = tone === "off" ? colors.offBorder : "rgba(255,255,255,.5)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(hitbox.x + .5, hitbox.y + .5, Math.max(0, hitbox.width - 1), Math.max(0, hitbox.height - 1));
+  }
+  state.motorStatusHitboxes.set(canvas, hitboxes);
+  ctx.strokeStyle = colors.grid;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(left + .5, top + .5, plotW - 1, plotH - 1);
+  if (!segments.length) {
+    ctx.fillStyle = colors.ink;
+    ctx.font = "12px system-ui";
+    ctx.textAlign = "center";
+    ctx.fillText("Keine Motorstatusdaten im Zeitraum", left + plotW / 2, top + plotH / 2 + 4);
+  }
+  ctx.fillStyle = colors.ink;
+  ctx.font = compact ? "10px system-ui" : "11px system-ui";
+  ctx.textAlign = "left";
+  ctx.fillText(chartTimeLabel(start, end - start), left, height - 7);
+  ctx.textAlign = "right";
+  ctx.fillText(chartTimeLabel(end, end - start), left + plotW, height - 7);
+  ctx.textAlign = "left";
+  const pointer = state.chartPointers.get(canvas);
+  drawMotorStatusHover(ctx, pointer, segments, hitboxes, start, end, left, top, plotW, plotH, width);
+  if (pointer?.dragging && Number.isFinite(pointer.currentX)) {
+    const x1 = Math.max(left, Math.min(left + plotW, pointer.startX));
+    const x2 = Math.max(left, Math.min(left + plotW, pointer.currentX));
+    ctx.fillStyle = "rgba(40,99,167,.16)";
+    ctx.fillRect(Math.min(x1, x2), top, Math.abs(x2 - x1), plotH);
+    ctx.strokeStyle = "#2863a7";
+    ctx.setLineDash([5, 4]);
+    ctx.strokeRect(Math.min(x1, x2), top, Math.abs(x2 - x1), plotH);
+    ctx.setLineDash([]);
+  }
+}
+
 function redrawChartGroup(group) {
-  const canvas = group === "temperature" ? $("temperatureChart") : group === "motor" ? $("motorChart") : $("exhaustChart");
-  const range = Number($("temperatureRange")?.value || 24); drawChart(canvas, state.chartSeries[group] || [], range, group, state.historyWindow); updateZoomControl(group);
+  const request = state.historyRequest || { mode: "hours", hours: 24 };
+  const range = request.mode === "hours" ? Number(request.hours) : Math.max(1, (Number(request.end) - Number(request.start)) / 3600000);
+  if (group === "motorStatus") {
+    drawMotorStatusChart($("motorStatusChart"), range, state.historyWindow);
+  } else {
+    const canvas = group === "temperature" ? $("temperatureChart") : group === "motor" ? $("motorChart") : $("exhaustChart");
+    drawChart(canvas, state.chartSeries[group] || [], range, group, state.historyWindow);
+  }
+  updateZoomControl();
 }
 
-function updateZoomControl(group) {
-  document.querySelectorAll(`[data-action="reset-chart-zoom"][data-chart-group="${group}"]`).forEach((button) => { button.hidden = !state.chartZoomRanges.has(group); });
+function redrawAllCharts() {
+  ["temperature", "motor", "motorStatus", "exhaust"].forEach(redrawChartGroup);
 }
 
-function resetChartZoom(group) { state.chartZoomRanges.delete(group); state.chartPointers.delete($(group === "temperature" ? "temperatureChart" : group === "motor" ? "motorChart" : "exhaustChart")); redrawChartGroup(group); }
+function updateZoomControl() {
+  document.querySelectorAll('[data-action="reset-chart-zoom"]').forEach((button) => { button.hidden = !state.chartZoomRange; });
+}
+
+function chartPointerPosition(canvas, event) {
+  const rect = canvas.getBoundingClientRect();
+  const geometry = state.chartGeometries.get(canvas);
+  const logicalWidth = Number(geometry?.canvasWidth) || rect.width;
+  const logicalHeight = Number(geometry?.canvasHeight) || rect.height;
+  return {
+    x: (event.clientX - rect.left) * (rect.width > 0 ? logicalWidth / rect.width : 1),
+    y: (event.clientY - rect.top) * (rect.height > 0 ? logicalHeight / rect.height : 1),
+  };
+}
+
+function resetChartZoom() {
+  state.chartZoomRange = null;
+  ["temperatureChart", "motorChart", "motorStatusChart", "exhaustChart"].forEach((id) => state.chartPointers.delete($(id)));
+  redrawAllCharts();
+}
 
 function bindChartZoom(canvas, group) {
   if (!canvas || canvas.dataset.zoomBound) return;
   canvas.dataset.zoomBound = "1";
-  const position = (event) => { const rect=canvas.getBoundingClientRect(); return { x:event.clientX-rect.left, y:event.clientY-rect.top }; };
-  canvas.addEventListener("pointerdown", (event) => { if (event.pointerType === "mouse" && event.button !== 0) return; const point=position(event); const geometry=state.chartGeometries.get(canvas); if (!geometry || point.x < geometry.left || point.x > geometry.left+geometry.width || point.y < geometry.top || point.y > geometry.top+geometry.height) return; state.chartPointers.set(canvas,{dragging:true,startX:point.x,currentX:point.x,hoverX:point.x,hoverY:point.y,pointerId:event.pointerId}); canvas.setPointerCapture?.(event.pointerId); event.preventDefault(); redrawChartGroup(group); });
+  const position = (event) => chartPointerPosition(canvas, event);
+  canvas.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    const point=position(event); const geometry=state.chartGeometries.get(canvas);
+    if (!geometry || point.x < geometry.left || point.x > geometry.left+geometry.width || point.y < geometry.top || point.y > geometry.top+geometry.height) return;
+    if (group === "motorStatus" && event.pointerType !== "mouse") {
+      // A touch selects a status but keeps vertical page scrolling available.
+      // Drag zoom remains available in each of the three larger charts.
+      state.chartPointers.set(canvas,{dragging:false,hoverX:point.x,hoverY:point.y});
+      redrawChartGroup(group);
+      return;
+    }
+    state.chartPointers.set(canvas,{dragging:true,startX:point.x,currentX:point.x,hoverX:point.x,hoverY:point.y,pointerId:event.pointerId}); canvas.setPointerCapture?.(event.pointerId); event.preventDefault(); redrawChartGroup(group);
+  });
   canvas.addEventListener("pointermove", (event) => { const point=position(event); const pointer=state.chartPointers.get(canvas); if (pointer?.dragging) state.chartPointers.set(canvas,{...pointer,currentX:point.x,hoverX:point.x,hoverY:point.y}); else state.chartPointers.set(canvas,{hoverX:point.x,hoverY:point.y,dragging:false}); redrawChartGroup(group); });
-  canvas.addEventListener("pointerup", (event) => { const pointer=state.chartPointers.get(canvas); if (!pointer?.dragging || pointer.pointerId !== event.pointerId) return; const geometry=state.chartGeometries.get(canvas); const point=position(event); const endX=point.x; if (geometry && Math.abs(endX-pointer.startX)>=8) { const x1=Math.max(geometry.left,Math.min(geometry.left+geometry.width,pointer.startX)); const x2=Math.max(geometry.left,Math.min(geometry.left+geometry.width,endX)); state.chartZoomRanges.set(group,{start:geometry.start+(Math.min(x1,x2)-geometry.left)/geometry.width*(geometry.end-geometry.start),end:geometry.start+(Math.max(x1,x2)-geometry.left)/geometry.width*(geometry.end-geometry.start)}); } state.chartPointers.set(canvas,{dragging:false,hoverX:endX,hoverY:point.y}); canvas.releasePointerCapture?.(event.pointerId); redrawChartGroup(group); event.preventDefault(); });
+  canvas.addEventListener("pointerup", (event) => { const pointer=state.chartPointers.get(canvas); if (!pointer?.dragging || pointer.pointerId !== event.pointerId) return; const geometry=state.chartGeometries.get(canvas); const point=position(event); const endX=point.x; if (geometry && Math.abs(endX-pointer.startX)>=8) { const x1=Math.max(geometry.left,Math.min(geometry.left+geometry.width,pointer.startX)); const x2=Math.max(geometry.left,Math.min(geometry.left+geometry.width,endX)); state.chartZoomRange={start:geometry.start+(Math.min(x1,x2)-geometry.left)/geometry.width*(geometry.end-geometry.start),end:geometry.start+(Math.max(x1,x2)-geometry.left)/geometry.width*(geometry.end-geometry.start)}; } state.chartPointers.set(canvas,{dragging:false,hoverX:endX,hoverY:point.y}); canvas.releasePointerCapture?.(event.pointerId); redrawAllCharts(); event.preventDefault(); });
   canvas.addEventListener("pointerleave", () => { const pointer=state.chartPointers.get(canvas); if (pointer?.dragging) return; state.chartPointers.delete(canvas); redrawChartGroup(group); });
-  canvas.addEventListener("dblclick", (event) => { resetChartZoom(group); event.preventDefault(); });
+  if (group === "motorStatus") canvas.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End", "Escape"].includes(event.key)) return;
+    if (event.key === "Escape") {
+      state.chartPointers.delete(canvas);
+      redrawChartGroup(group);
+      event.preventDefault();
+      return;
+    }
+    const hitboxes = [...(state.motorStatusHitboxes.get(canvas) || [])]
+      .sort((first, second) => first.segment.start - second.segment.start);
+    if (!hitboxes.length) return;
+    const pointer = state.chartPointers.get(canvas);
+    let index = hitboxes.findIndex((hitbox) => hitbox.segment.start === pointer?.eventStart);
+    if (event.key === "Home") index = 0;
+    else if (event.key === "End") index = hitboxes.length - 1;
+    else if (event.key === "ArrowRight") index = Math.min(hitboxes.length - 1, index + 1);
+    else index = index < 0 ? hitboxes.length - 1 : Math.max(0, index - 1);
+    const hitbox = hitboxes[index];
+    state.chartPointers.set(canvas,{
+      dragging:false,
+      hoverX:hitbox.x + hitbox.width / 2,
+      hoverY:hitbox.y + hitbox.height / 2,
+      eventStart:hitbox.segment.start,
+    });
+    redrawChartGroup(group);
+    event.preventDefault();
+  });
+  canvas.addEventListener("dblclick", (event) => { resetChartZoom(); event.preventDefault(); });
 }
 
 function renderChartLegend(group, elementId) {
@@ -1968,7 +2523,6 @@ async function refreshCharts() {
   state.chartRefresh.pending = false;
   try {
     const selection = historySelection();
-    state.historyWindow = selection.window;
     $("historyRangeStatus").textContent = `Lade Diagramme · ${selection.label}`;
     const groups = {
       temperature: ["kuehlwasser", "dachs_eintritt", "kapsel", "regler"],
@@ -1980,7 +2534,15 @@ async function refreshCharts() {
     const params = new URLSearchParams(selection.query);
     params.set("limit", "2000");
     params.set("series", JSON.stringify(chartItems.map(({ id, block, key }) => ({ id, block, key }))));
-    const batch = await api(`/api/history-batch?${params.toString()}`);
+    const [batch, motorStatus] = await Promise.all([
+      api(`/api/history-batch?${params.toString()}`),
+      api(`/api/motor-status-history?${selection.query}`),
+    ]);
+    const responseStart = new Date(batch.from).getTime();
+    const responseEnd = new Date(batch.to).getTime();
+    state.historyWindow = Number.isFinite(responseStart) && Number.isFinite(responseEnd) && responseEnd > responseStart
+      ? { start: responseStart, end: responseEnd }
+      : selection.window;
     const historyFor = (groupIds) => groupIds.map((id) => {
       const item = chartItems.find((candidate) => candidate.id === id);
       return item ? { ...item, points: batch.series?.[id] || [] } : null;
@@ -1988,15 +2550,19 @@ async function refreshCharts() {
     state.chartSeries.temperature = historyFor(groups.temperature);
     state.chartSeries.motor = historyFor(groups.motor);
     state.chartSeries.exhaust = historyFor(groups.exhaust);
-    $("historyRangeStatus").textContent = `Aktiv: ${selection.label} · ${chartItems.length} Kurven`;
+    state.chartRunBands = buildChartRunBands(batch.series?.drehzahl || [], state.historyWindow);
+    state.motorStatusSegments = motorStatus.segments || [];
+    state.motorStatusBackfillComplete = motorStatus.backfill_complete !== false;
+    $("historyRangeStatus").textContent = `Aktiv: ${selection.label} · ${chartItems.length} Kurven · Motorstatus${state.motorStatusBackfillComplete ? "" : " · ältere Statusdaten werden nachgetragen"}`;
     renderChartLegend("temperature", "temperatureLegend");
     renderChartLegend("motor", "motorLegend");
     renderChartLegend("exhaust", "exhaustLegend");
-    bindChartZoom($("temperatureChart"), "temperature"); bindChartZoom($("motorChart"), "motor"); bindChartZoom($("exhaustChart"), "exhaust");
-    redrawChartGroup("temperature"); redrawChartGroup("motor"); redrawChartGroup("exhaust");
+    bindChartZoom($("temperatureChart"), "temperature"); bindChartZoom($("motorChart"), "motor"); bindChartZoom($("motorStatusChart"), "motorStatus"); bindChartZoom($("exhaustChart"), "exhaust");
+    redrawAllCharts();
   } catch (error) {
     $("historyRangeStatus").textContent = `Fehler: ${error.message}`;
   } finally {
+    state.chartRefresh.lastCompletedAt = Date.now();
     state.chartRefresh.inFlight = false;
     if (state.chartRefresh.pending && state.selectedView === "monitorView") {
       state.chartRefresh.pending = false;
@@ -2006,22 +2572,94 @@ async function refreshCharts() {
 }
 
 function historySelection() {
-  const quickHours = Number($("temperatureRange")?.value || 24);
-  const startText = $("historyStart")?.value || "";
-  const endText = $("historyEnd")?.value || "";
-  if (!startText && !endText) {
-    return { query: `hours=${quickHours}`, window: null, label: `letzte ${quickHours === 24 ? "24 Stunden" : `${quickHours} Stunden`}` };
+  const request = state.historyRequest || { mode: "hours", hours: 24 };
+  if (request.mode === "hours") {
+    const hours = Number(request.hours);
+    if (!Number.isInteger(hours) || hours < 1 || hours > 720) throw new Error("Stunden müssen eine ganze Zahl von 1 bis 720 sein");
+    return { query: `hours=${hours}`, window: null, label: `letzte ${hours} ${hours === 1 ? "Stunde" : "Stunden"}` };
   }
-  let start = startText ? new Date(startText).getTime() : null;
-  let end = endText ? new Date(endText).getTime() : null;
-  if (start !== null && !Number.isFinite(start)) throw new Error("ungültiges Startdatum");
-  if (end !== null && !Number.isFinite(end)) throw new Error("ungültiges Enddatum");
-  if (start === null) start = end - 24 * 3600000;
-  if (end === null) end = start + 24 * 3600000;
+  const start = Number(request.start);
+  const end = Number(request.end);
+  if (!Number.isFinite(start)) throw new Error("ungültiges Startdatum");
+  if (!Number.isFinite(end)) throw new Error("ungültiges Enddatum");
   if (end <= start) throw new Error("Ende muss nach dem Start liegen");
   if (end - start > 30 * 24 * 3600000) throw new Error("Der Zeitraum darf höchstens 30 Tage umfassen");
   const query = new URLSearchParams({ from: new Date(start).toISOString(), to: new Date(end).toISOString() }).toString();
   return { query, window: { start, end }, label: `${new Date(start).toLocaleString("de-DE")} bis ${new Date(end).toLocaleString("de-DE")}` };
+}
+
+function historyAutoRefreshInterval() {
+  const request = state.historyRequest || { mode: "hours", hours: 24 };
+  if (request.mode !== "hours") return null;
+  const hours = Number(request.hours);
+  if (hours <= 6) return 6500;
+  if (hours <= 24) return 30_000;
+  if (hours <= 48) return 60_000;
+  return 5 * 60_000;
+}
+
+function historyAutoRefreshDue() {
+  const interval = historyAutoRefreshInterval();
+  return interval !== null
+    && Date.now() - Number(state.chartRefresh.lastCompletedAt || 0) >= interval;
+}
+
+function activateHistoryRequest(request) {
+  state.historyRequest = request;
+  state.chartZoomRange = null;
+  state.chartRunBands = [];
+  state.motorStatusSegments = [];
+  ["temperatureChart", "motorChart", "motorStatusChart", "exhaustChart"].forEach((id) => state.chartPointers.delete($(id)));
+  refreshCharts();
+}
+
+function applyHistoryPreset() {
+  const hours = Number($("temperatureRange").value);
+  $("historyHours").value = "";
+  $("historyStart").value = "";
+  $("historyEnd").value = "";
+  activateHistoryRequest({ mode: "hours", hours });
+}
+
+function applyHistoryHours(event) {
+  event.preventDefault();
+  const raw = $("historyHours").value.trim();
+  const hours = Number(raw);
+  if (!raw || !Number.isInteger(hours) || hours < 1 || hours > 720) {
+    $("historyRangeStatus").textContent = "Fehler: Freie Stunden müssen eine ganze Zahl von 1 bis 720 sein";
+    return;
+  }
+  $("historyStart").value = "";
+  $("historyEnd").value = "";
+  activateHistoryRequest({ mode: "hours", hours });
+}
+
+function applyHistoryDates(event) {
+  event.preventDefault();
+  const startText = $("historyStart").value;
+  const endText = $("historyEnd").value;
+  let start = startText ? new Date(startText).getTime() : null;
+  let end = endText ? new Date(endText).getTime() : null;
+  if (start === null && end === null) {
+    $("historyRangeStatus").textContent = "Fehler: Bitte mindestens Start oder Ende eingeben";
+    return;
+  }
+  if (start !== null && !Number.isFinite(start)) return void ($("historyRangeStatus").textContent = "Fehler: ungültiges Startdatum");
+  if (end !== null && !Number.isFinite(end)) return void ($("historyRangeStatus").textContent = "Fehler: ungültiges Enddatum");
+  if (start === null) start = end - 24 * 3600000;
+  if (end === null) end = start + 24 * 3600000;
+  if (end <= start) return void ($("historyRangeStatus").textContent = "Fehler: Ende muss nach dem Start liegen");
+  if (end - start > 30 * 24 * 3600000) return void ($("historyRangeStatus").textContent = "Fehler: Der Zeitraum darf höchstens 30 Tage umfassen");
+  $("historyHours").value = "";
+  activateHistoryRequest({ mode: "dates", start, end });
+}
+
+function resetHistoryRange() {
+  $("historyHours").value = "";
+  $("historyStart").value = "";
+  $("historyEnd").value = "";
+  $("temperatureRange").value = "24";
+  activateHistoryRequest({ mode: "hours", hours: 24 });
 }
 
 function setBackupStatus(id, message, tone = "neutral") {
@@ -2143,11 +2781,12 @@ function archiveEntryReady(item) {
   const failed = archiveTargetCount(item, "failed");
   const archiveState = String(item?.state || "").toLowerCase();
   const stateReady = !archiveState || archiveState === "ready";
+  const completeContract = requested === 38 || requested === 42;
   return archiveIntegrityOk(item)
     && item?.pack_compatible === true
     && stateReady
-    && requested === 38
-    && successful === 38
+    && completeContract
+    && successful === requested
     && failed === 0;
 }
 
@@ -2205,7 +2844,7 @@ function renderBackupArchive() {
     return `<article class="backup-archive-card ${ready ? "verified" : "invalid"}" data-backup-archive-item="${escapeHtml(id)}">
       <header><div><p class="eyebrow">BACKUP #${escapeHtml(id)}</p><h4>${escapeHtml(formatArchiveDate(item?.created_at))}</h4></div><span class="status-pill ${ready ? "ok" : "warn"}">${ready ? "Integrität geprüft" : "Nicht vollständig geprüft"}</span></header>
       <div class="backup-archive-metrics">
-        <div><span>Ziele</span><strong>${successful}/${requested || 38}</strong><small>${failed ? `${failed} fehlgeschlagen` : "38 von 38 erforderlich"}</small></div>
+        <div><span>Ziele</span><strong>${successful}/${requested || "?"}</strong><small>${failed ? `${failed} fehlgeschlagen` : `${requested} von ${requested} vollständig`}</small></div>
         <div><span>Status</span><strong>${escapeHtml(stateText)}</strong><small>${escapeHtml(source)} · ${escapeHtml(item?.created_by || "unbekannt")}</small></div>
         <div><span>Packrevision</span><strong>${escapeHtml(item?.pack_revision || "—")}</strong><small>${escapeHtml(formatArchiveBytes(item?.size_bytes))}</small></div>
       </div>
@@ -2214,7 +2853,7 @@ function renderBackupArchive() {
     </article>`;
   }).join("");
   const complete = items.filter(archiveEntryReady).length;
-  setBackupStatus("backupArchiveStatus", `${items.length} Wartungsbackup${items.length === 1 ? "" : "s"} archiviert · ${complete} vollständig mit 38/38 Zielen und geprüfter Integrität.`, complete === items.length ? "ok" : "warn");
+  setBackupStatus("backupArchiveStatus", `${items.length} Wartungsbackup${items.length === 1 ? "" : "s"} archiviert · ${complete} vollständig mit geprüftem 38er- oder 42er-Vertrag.`, complete === items.length ? "ok" : "warn");
 }
 
 async function refreshBackupArchive(silent = false) {
@@ -2250,7 +2889,7 @@ async function loadBackupArchiveForRestore(archiveId, button = null) {
   if (state.user?.role !== "admin" || archiveId === null || archiveId === undefined || archiveId === "") return;
   const archived = (state.backup.archive || []).find((item) => String(item?.id) === String(archiveId));
   if (!archived || !archiveEntryReady(archived)) {
-    return setBackupStatus("backupArchiveStatus", `Backup #${archiveId} ist nicht als vollständig, bereit und 38/38 geprüft freigegeben.`, "error");
+    return setBackupStatus("backupArchiveStatus", `Backup #${archiveId} ist nicht als vollständig und geprüft freigegeben.`, "error");
   }
   if ($("restoreFile")) $("restoreFile").value = "";
   clearRestoreImage(`Lade Backup #${archiveId} aus dem geschützten Archiv …`);
@@ -2272,16 +2911,19 @@ async function loadBackupArchiveForRestore(archiveId, button = null) {
     const successful = Number(inspection.successful_blocks);
     const failed = Number(inspection.failed_blocks);
     const inspectedTargets = restoreInspectionBlocks(inspection);
+    const restorable = inspectedTargets.filter((item) => item.restorable === true).length;
+    const archivedRequested = archiveTargetCount(archived, "requested");
     if (!restoreIntegrityOk(inspection)
       || inspection.digest_present !== true
       || inspection.digest_verified !== true
       || inspection.live_restore_compatible !== true
-      || requested !== 38
-      || successful !== 38
+      || ![38, 42].includes(requested)
+      || requested !== archivedRequested
+      || successful !== requested
       || failed !== 0
-      || inspectedTargets.length !== 38
-      || inspectedTargets.some((item) => item.restorable !== true)) {
-      throw new Error("Das Wartungsbackup erfüllt nach erneuter Prüfung nicht den vollständigen 38/38-Integritäts- und Gerätevertrag");
+      || inspectedTargets.length !== requested
+      || restorable !== 38) {
+      throw new Error("Das Wartungsbackup erfüllt nach erneuter Prüfung nicht den vollständigen 38er-/42er-Integritätsvertrag mit exakt 38 Restore-Zielen");
     }
     state.backup.image = image;
     state.backup.inspection = inspection;
@@ -2799,6 +3441,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("maintenanceForm").addEventListener("change", (event) => {
     if (event.target.id !== "maintenanceFuelType") scheduleMaintenanceAutosave();
   });
+  $("maintenancePw4Read").addEventListener("click", readMaintenancePw4);
   $("maintenanceComplete").addEventListener("click", completeMaintenance);
   $("settingsTabs").addEventListener("click", (event) => { const button=event.target.closest("button[data-block]"); if (button) loadBlock(Number(button.dataset.block), Number(button.dataset.cpu || 0)); });
   $("showReserved").addEventListener("change", () => {
@@ -2847,16 +3490,17 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   $("maintenanceTestMode").addEventListener("change", changeMaintenanceMode);
   $("sootFilterSettingsForm").addEventListener("submit", saveSootFilterSettings);
-  $("temperatureRange").addEventListener("change", () => { $("historyStart").value = ""; $("historyEnd").value = ""; refreshCharts(); });
-  $("applyHistoryRange").addEventListener("click", refreshCharts);
-  $("resetHistoryRange").addEventListener("click", () => { $("historyStart").value = ""; $("historyEnd").value = ""; $("temperatureRange").value = "24"; refreshCharts(); });
-  document.querySelectorAll('[data-action="reset-chart-zoom"]').forEach((button) => button.addEventListener("click", () => resetChartZoom(button.dataset.chartGroup)));
+  $("temperatureRange").addEventListener("change", applyHistoryPreset);
+  $("historyHoursForm").addEventListener("submit", applyHistoryHours);
+  $("historyDateForm").addEventListener("submit", applyHistoryDates);
+  $("resetHistoryRange").addEventListener("click", resetHistoryRange);
+  document.querySelectorAll('[data-action="reset-chart-zoom"]').forEach((button) => button.addEventListener("click", resetChartZoom));
   document.querySelectorAll("[data-action=refresh-live]").forEach((button)=>button.addEventListener("click", refreshLive));
   document.querySelectorAll("[data-action=reload-block]").forEach((button)=>button.addEventListener("click",()=>loadBlock(state.selectedBlock, state.selectedCpu)));
   document.querySelectorAll("[data-action=refresh-audit]").forEach((button)=>button.addEventListener("click",refreshAudit));
   window.addEventListener("resize", () => {
     if (state.selectedView !== "monitorView") return;
-    ["temperature", "motor", "exhaust"].forEach(redrawChartGroup);
+    redrawAllCharts();
   });
   boot();
 });

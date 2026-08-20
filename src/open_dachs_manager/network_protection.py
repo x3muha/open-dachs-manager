@@ -28,7 +28,8 @@ NETWORK_PROTECTION_CPUS = (1, 2)
 NETWORK_PROTECTION_BLOCKS = (16, 20, 21)
 NETWORK_PROTECTION_PAYLOAD_LENGTHS = {16: 18, 20: 59, 21: 56}
 NETWORK_PROTECTION_WRITABLE_BLOCKS = (16, 20)
-NETWORK_PROTECTION_BACKUP_BLOCKS = (16,)
+NETWORK_PROTECTION_BACKUP_BLOCKS = NETWORK_PROTECTION_BLOCKS
+NETWORK_PROTECTION_RESTORE_BLOCKS = (16,)
 
 
 COUNTRY_CHOICES = (
@@ -517,6 +518,7 @@ def network_protection_schema(cpu: int, block: int = NETWORK_PROTECTION_BLOCK) -
         "payload_length": network_protection_payload_length(block),
         "writable": writable,
         "backup_eligible": block in NETWORK_PROTECTION_BACKUP_BLOCKS,
+        "restore_eligible": block in NETWORK_PROTECTION_RESTORE_BLOCKS,
         "live_values": block == 21,
         "read_only_reason": read_only_reason,
         "fields": [

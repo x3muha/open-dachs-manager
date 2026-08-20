@@ -23,7 +23,7 @@ class RepositoryLayoutTests(unittest.TestCase):
             project["tool"]["setuptools"]["dynamic"]["version"],
             {"attr": "open_dachs_manager.__version__"},
         )
-        self.assertEqual(__version__, "1.5.2")
+        self.assertEqual(__version__, "1.6.2")
         self.assertEqual(DachsRequestHandler.server_version, f"OpenDachsManager/{__version__}")
         scripts = project["project"]["scripts"]
         self.assertEqual(scripts["open-dachs"], "open_dachs_manager.cli:main")
@@ -229,13 +229,24 @@ class RepositoryLayoutTests(unittest.TestCase):
 
     def test_overview_has_derived_hours_per_start_and_automatic_pw4(self):
         app = (ROOT / "src/open_dachs_manager/web/app.js").read_text(encoding="utf-8")
-        ratio_start = app.index("function operatingHoursPerStartCard()")
+        ratio_start = app.index("function operatingHoursPerStartDisplay()")
         ratio_end = app.index("\nfunction renderOverview()", ratio_start)
         ratio = app[ratio_start:ratio_end]
         self.assertIn("state.live?.operating_hours_per_start", ratio)
         self.assertIn('maximumFractionDigits: 1', ratio)
         self.assertIn("Bh/Start", ratio)
         self.assertIn("Betriebsstunden je Start", ratio)
+        self.assertIn("function operatingHoursPerStartCard()", ratio)
+        self.assertIn("function operatingHoursPerStartDetail()", ratio)
+
+        overview_start = app.index("function renderOverview()")
+        overview_end = app.index("\nfunction allDashboardFields()", overview_start)
+        overview = app[overview_start:overview_end]
+        self.assertIn('field?.source === "operating_hours_per_start"', overview)
+        self.assertIn("return operatingHoursPerStartCard();", overview)
+        self.assertIn("motorCards.push(operatingHoursPerStartDetail());", overview)
+        self.assertNotIn("operatingHoursPerStartCard() + configuredCards", overview)
+        self.assertIn("for (const field of dashboardDerivedFields()) add(field);", app)
 
         write_start = app.index("async function applyOverviewPowerTarget(event)")
         write_end = app.index("\nfunction updateConnection()", write_start)

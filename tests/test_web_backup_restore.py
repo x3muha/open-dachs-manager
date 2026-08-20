@@ -15,6 +15,7 @@ from open_dachs_manager.web import (
     BACKUP_RESTORE_CONFIRMATION,
     DachsHTTPServer,
     DachsWebApp,
+    MAINTENANCE_CONFIRMATION,
     init_users,
 )
 
@@ -290,7 +291,7 @@ class WebBackupRestoreTests(unittest.TestCase):
         self.assertIn('state.backup.image = null;', app)
         self.assertNotIn('fetch("/api/backup', app)
 
-    def test_layout4_config_is_writable_live_values_fail_closed_and_backup_stays_proven(self):
+    def test_layout4_config_is_writable_live_values_are_read_only_and_both_are_captured(self):
         complete_schema = self.app.schema()
         schemas = complete_schema["network_protection"]
         self.assertEqual(
@@ -309,10 +310,10 @@ class WebBackupRestoreTests(unittest.TestCase):
             for item in schemas
             if item["backup_eligible"]
         ]
-        self.assertEqual(len(backup_targets), 38)
+        self.assertEqual(len(backup_targets), 42)
         self.assertEqual(
             [target for target in backup_targets if target[0]],
-            [(1, 16), (2, 16)],
+            [(1, 16), (1, 20), (1, 21), (2, 16), (2, 20), (2, 21)],
         )
 
         self.service.device_payloads[(1, 20)] = SYNTHETIC_NETWORK_CONFIG_PAYLOAD
@@ -359,11 +360,154 @@ class WebBackupRestoreTests(unittest.TestCase):
         self.assertEqual(self.service.auth_calls, [])
         self.assertEqual(self.service.wire_writes, [])
 
-        for block in (20, 21):
+        for block, block_payload in (
+            (20, SYNTHETIC_NETWORK_CONFIG_PAYLOAD),
+            (21, SYNTHETIC_NETWORK_LIVE_PAYLOAD),
+        ):
             with self.subTest(backup_block=block):
-                with self.assertRaises(ValueError):
-                    self.app.create_backup([{"cpu": 1, "block": block}])
-        self.assertEqual(self.service.session_entries, 0)
+                self.service.reset_telemetry()
+                self.service.device_payloads[(1, block)] = block_payload
+                created = self.app.create_backup([{"cpu": 1, "block": block}])
+                self.assertTrue(created["ok"])
+                inspected = created["inspection"]["blocks"]
+                self.assertEqual(len(inspected), 1)
+                self.assertFalse(inspected[0]["restorable"])
+                self.assertEqual(inspected[0]["payload_len"], len(block_payload))
+                self.assertEqual(self.service.auth_calls, [])
+                self.assertEqual(self.service.wire_writes, [])
+
+    def test_out_of_range_auth_levels_fail_before_serial_access(self):
+        invalid_levels = (0, 6, 255, 99999, True, "5", 5.0)
+        for level in invalid_levels:
+            with self.subTest(level=level):
+                self.service.reset_telemetry()
+                with self.assertRaisesRegex(ValueError, "zwischen 1 und 5|ganze Zahl"):
+                    self.app.write_block(
+                        "admin",
+                        20,
+                        [{"key": "Hka_Bd_Stat.ubSoftwareVersion", "value": "1"}],
+                        level,
+                        "",
+                        True,
+                    )
+                self.assertEqual(self.service.session_entries, 0)
+                self.assertEqual(self.service.auth_calls, [])
+                self.assertEqual(self.service.wire_writes, [])
+
+        self.service.device_payloads[(1, 16)] = network_payload(0)
+        for level in invalid_levels:
+            with self.subTest(surface="network", level=level):
+                self.service.reset_telemetry()
+                with self.assertRaisesRegex(ValueError, "zwischen 1 und 5|ganze Zahl"):
+                    self.app.write_network_protection(
+                        "admin",
+                        1,
+                        [{"key": "UC1.SA1.usSpannungUntenFix", "value": "184,1"}],
+                        level,
+                        "",
+                        True,
+                    )
+                self.assertEqual(self.service.session_entries, 0)
+                self.assertEqual(self.service.auth_calls, [])
+                self.assertEqual(self.service.wire_writes, [])
+
+        image = self.service.image_for({20: payload(20)})
+        for level in invalid_levels:
+            with self.subTest(surface="restore", level=level):
+                self.service.reset_telemetry()
+                with self.assertRaisesRegex(ValueError, "zwischen 1 und 5|ganze Zahl"):
+                    self.app.restore_backup(
+                        "admin",
+                        image,
+                        image["image_sha256"],
+                        [20],
+                        level,
+                        "1234",
+                        True,
+                        BACKUP_RESTORE_CONFIRMATION,
+                    )
+                self.assertEqual(self.service.session_entries, 0)
+                self.assertEqual(self.service.auth_calls, [])
+                self.assertEqual(self.service.wire_writes, [])
+
+        for level in invalid_levels:
+            with self.subTest(surface="maintenance", level=level):
+                with self.assertRaisesRegex(ValueError, "zwischen 1 und 5|ganze Zahl"):
+                    DachsWebApp.complete_maintenance(
+                        SimpleNamespace(),
+                        "admin",
+                        1,
+                        {},
+                        level,
+                        "1234",
+                        MAINTENANCE_CONFIRMATION,
+                    )
+
+            with self.subTest(surface="api-settings", level=level):
+                with self.assertRaisesRegex(ValueError, "zwischen 1 und 5|ganze Zahl"):
+                    DachsWebApp._normalize_api_settings({
+                        "write_enabled": True,
+                        "auth_level": level,
+                    })
+
+    def test_level_five_reaches_generic_and_network_live_authentication(self):
+        result = self.app.write_block(
+            "admin",
+            20,
+            [{"key": "Hka_Bd_Stat.bDispHelligkeit", "value": "1"}],
+            5,
+            "1234",
+            True,
+        )
+        self.assertTrue(result["written"])
+        self.assertEqual(result["auth_level_requested"], 5)
+        self.assertEqual(result["auth_level_granted"], 5)
+        self.assertEqual(self.service.auth_calls, [(5, "1234")])
+
+        self.service.reset_telemetry()
+        self.service.device_payloads[(1, 16)] = network_payload(0)
+        result = self.app.write_network_protection(
+            "admin",
+            1,
+            [{"key": "UC1.SA1.usSpannungUntenFix", "value": "184,1"}],
+            5,
+            "1234",
+            True,
+        )
+        self.assertTrue(result["written"])
+        self.assertEqual(result["auth_level_requested"], 5)
+        self.assertEqual(result["auth_level_granted"], 5)
+        self.assertEqual(self.service.auth_calls, [(5, "1234")])
+
+    def test_network_capture_only_blocks_cannot_enter_any_restore_session(self):
+        image = self.service.image_for({
+            (1, 20): SYNTHETIC_NETWORK_CONFIG_PAYLOAD,
+            (1, 21): SYNTHETIC_NETWORK_LIVE_PAYLOAD,
+            (2, 20): SYNTHETIC_NETWORK_CONFIG_PAYLOAD,
+            (2, 21): SYNTHETIC_NETWORK_LIVE_PAYLOAD,
+        })
+
+        for cpu in (1, 2):
+            for block in (20, 21):
+                for write_enabled in (False, True):
+                    with self.subTest(
+                        cpu=cpu, block=block, write_enabled=write_enabled
+                    ):
+                        self.service.reset_telemetry()
+                        with self.assertRaisesRegex(ValueError, "nicht wiederherstellbar"):
+                            self.app.restore_backup(
+                                "admin",
+                                image,
+                                image["image_sha256"],
+                                [public_target(cpu, block)],
+                                4,
+                                "1234",
+                                write_enabled,
+                                BACKUP_RESTORE_CONFIRMATION if write_enabled else "",
+                            )
+                        self.assertEqual(self.service.session_entries, 0)
+                        self.assertEqual(self.service.auth_calls, [])
+                        self.assertEqual(self.service.wire_writes, [])
 
     def test_layout4_profile_is_encoded_before_dependent_times(self):
         self.service.device_payloads[(1, 20)] = SYNTHETIC_NETWORK_CONFIG_PAYLOAD
@@ -700,7 +844,7 @@ class WebBackupRestoreTests(unittest.TestCase):
             image,
             image["image_sha256"],
             [20, 22, 24],
-            4,
+            5,
             "1234",
             True,
             BACKUP_RESTORE_CONFIRMATION,
@@ -709,7 +853,7 @@ class WebBackupRestoreTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["differing_blocks"], 3)
         self.assertEqual(result["written_blocks"], 3)
-        self.assertEqual(result["auth_level_granted"], 4)
+        self.assertEqual(result["auth_level_granted"], 5)
         self.assertEqual(result["summary"], {
             "requested": 3,
             "planned": 0,
@@ -734,7 +878,7 @@ class WebBackupRestoreTests(unittest.TestCase):
 
         self.assertEqual(self.service.session_entries, 1)
         self.assertEqual(self.service.maximum_active_sessions, 1)
-        self.assertEqual(self.service.auth_calls, [(4, "1234")])
+        self.assertEqual(self.service.auth_calls, [(5, "1234")])
         self.assertEqual(self.service.identity_calls, 1)
         self.assertEqual(
             self.service.calls[:9],
@@ -747,7 +891,7 @@ class WebBackupRestoreTests(unittest.TestCase):
                 ("read", 22),
                 ("read", 24),
                 ("identity",),
-                ("auth", 4, "1234"),
+                ("auth", 5, "1234"),
             ],
         )
         self.assertEqual(
@@ -790,8 +934,8 @@ class WebBackupRestoreTests(unittest.TestCase):
             self.assertEqual(item["username"], "admin")
             self.assertEqual(audit["operation"], "backup-restore")
             self.assertEqual(audit["image_sha256"], image["image_sha256"])
-            self.assertEqual(audit["auth_level_requested"], 4)
-            self.assertEqual(audit["auth_level_granted"], 4)
+            self.assertEqual(audit["auth_level_requested"], 5)
+            self.assertEqual(audit["auth_level_granted"], 5)
             self.assertEqual(audit["before_hex"], payload(0).hex(" ").upper())
             self.assertEqual(audit["after_hex"], targets[block].hex(" ").upper())
             self.assertTrue(audit["written"])
@@ -1005,6 +1149,89 @@ class WebBackupRestoreTests(unittest.TestCase):
 
 
 class BackupRestoreHTTPTests(unittest.TestCase):
+    def test_auth_preview_is_admin_only_and_performs_exactly_two_reads(self):
+        class PreviewSession:
+            def __init__(self, owner):
+                self.owner = owner
+
+            def read_block(self, block, packet=None, timeout=0.9):
+                self.owner.reads.append(int(block))
+                if block == 20:
+                    block_payload = bytearray(PAYLOAD_LENGTH)
+                    block_payload[:10] = b"1234567890"
+                elif block == 22:
+                    block_payload = bytearray(PAYLOAD_LENGTH)
+                    block_payload[:4] = (4567 * 3600).to_bytes(4, "little")
+                else:
+                    raise AssertionError(f"unexpected PW4 input block {block}")
+                return SimpleNamespace(ok=True, payload=bytes(block_payload))
+
+            def request(self, *_args, **_kwargs):
+                raise AssertionError("PW4 preview must not authenticate")
+
+            def write_block(self, *_args, **_kwargs):
+                raise AssertionError("PW4 preview must not write")
+
+        class PreviewService(DachsService):
+            def __init__(self, pack):
+                super().__init__("/dev/null", 19200, 0.1, pack)
+                self.sessions = 0
+                self.reads = []
+
+            @contextmanager
+            def session(self):
+                self.sessions += 1
+                yield PreviewSession(self)
+
+        with tempfile.TemporaryDirectory() as directory:
+            init_users(
+                directory,
+                admin_password="AdminPasswort123",
+                guest_password="GastPasswort123",
+            )
+            app = DachsWebApp(data_dir=directory, interval=60)
+            service = PreviewService(app.pack)
+            app.service = service
+            admin_token = app.login("admin", "AdminPasswort123")[0]
+            guest_token = app.login("gast", "GastPasswort123")[0]
+            server = DachsHTTPServer(("127.0.0.1", 0), app, base_path="/dachs")
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+
+            def request(token):
+                connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+                connection.request(
+                    "GET",
+                    "/dachs/api/auth-preview",
+                    headers={"Cookie": f"open_dachs_session={token}"},
+                )
+                response = connection.getresponse()
+                body = json.loads(response.read().decode("utf-8"))
+                result = response.status, response.getheader("Cache-Control"), body
+                connection.close()
+                return result
+
+            try:
+                guest_status, _guest_cache, _guest_body = request(guest_token)
+                self.assertEqual(guest_status, 403)
+                self.assertEqual(service.sessions, 0)
+                self.assertEqual(service.reads, [])
+
+                audit_before = app.store.audits()
+                status, cache_control, body = request(admin_token)
+                self.assertEqual(status, 200)
+                self.assertEqual(cache_control, "no-store")
+                self.assertTrue(body["ok"])
+                self.assertEqual(len(body["pw4"]), 4)
+                self.assertTrue(body["pw4"].isdigit())
+                self.assertEqual(service.sessions, 1)
+                self.assertEqual(service.reads, [20, 22])
+                self.assertEqual(app.store.audits(), audit_before)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
     def test_network_routes_write_config_but_keep_live_values_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             init_users(

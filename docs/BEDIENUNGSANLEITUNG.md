@@ -1,6 +1,6 @@
 # Open Dachs Manager – Bedienungsanleitung
 
-Stand: 18.08.2026 · Version V3 1.5.2
+Stand: 20.08.2026 · Version V3 1.6.2
 
 Diese Anleitung beschreibt den täglichen Betrieb der Weboberfläche, CLI und
 TUI. Installation und Migration stehen ausführlich in
@@ -56,6 +56,10 @@ Die Anmeldung läuft lokal. Sitzungen enden nach zwölf Stunden oder beim
 Abmelden. Passwörter werden gesalzen und gehasht in der lokalen Benutzerdatei
 gespeichert.
 
+Die Hauptleiste ist fest geordnet als `Übersicht → Überwachung → Einstellung
+→ Backup → Audit → System → Wartung → Fehlerkatalog`. `System` wird nur für
+Admins eingeblendet; die Reihenfolge der übrigen Bereiche bleibt gleich.
+
 ### Übersicht
 
 Die Startseite beginnt mit `Wirkleistung Ist / Soll`. Der Wartungsstatus steht
@@ -66,13 +70,16 @@ Betriebsstunden frisch aus der Anlage, berechnet daraus PW4 und fordert fest
 Auth-Level 4 an. Positive Reglerbestätigung und Rückleseprüfung bleiben
 zwingend; der Browser übermittelt weder PW4 noch Auth-Level.
 
-Die feste Kachel `Betriebsstunden je Start` verwendet die rohen
-Betriebssekunden und Starts aus demselben Block-22-Telegramm. Sie löst keinen
-zusätzlichen seriellen Zugriff aus. Bei null Starts, ungültigen Zählern oder
-nicht zusammengehörigen Messzeitpunkten zeigt sie bewusst keinen Wert.
+`Betriebsstunden je Start` steht fest unten im Motorbereich
+`Leistungszustand`. Der Wert verwendet die rohen Betriebssekunden und Starts
+aus demselben Block-22-Telegramm und löst keinen zusätzlichen seriellen Zugriff
+aus. Bei null Starts, ungültigen Zählern oder nicht zusammengehörigen
+Messzeitpunkten zeigt er bewusst keinen Wert.
 
 Admins können die Live-Kacheln über `Bearbeiten` frei sortieren, entfernen und
-mit `+` aus allen gemappten Werten ergänzen. Die Pfeile funktionieren auch auf
+mit `+` aus allen gemappten Werten ergänzen. Auch der berechnete Wert
+`Betriebsstunden je Start` steht dort optional zur Auswahl, wird aber nicht
+ungefragt als obere Kachel eingeblendet. Die Pfeile funktionieren auch auf
 Touch-Geräten. Die gemeinsame Auswahl wird lokal auf dem Pi gespeichert und
 gilt auch für den Gastzugang. Werte aus zusätzlichen Blöcken werden alle zehn
 Sekunden gelesen; sie vergrößern nicht automatisch die Zeitreihen-Datenbank.
@@ -81,7 +88,7 @@ Die technische Anlagenansicht zeigt am Waben-Rußfilter links die
 Motorabgastemperatur und rechts die Dachs-Abgastemperatur nach dem Filter.
 Darunter steht ein ausdrücklich als Schätzung gekennzeichneter Füllstand. Die
 Standardkennlinie setzt 420 °C auf 0 % und 520 °C auf 100 %; dazwischen wird
-linear interpoliert. Unter `Einstellungen → Geschätzter Füllstand` kann der
+linear interpoliert. Unter `Einstellung → Geschätzter Füllstand` kann der
 Admin beide Temperaturen lokal ändern. Die Anzeige schreibt nie in den Regler.
 
 ### Überwachung
@@ -89,6 +96,37 @@ Admin beide Temperaturen lokal ändern. Die Anzeige schreibt nie in den Regler.
 Die Überwachung schreibt ausgewählte Werte in die lokale SQLite-Datenbank und
 stellt Zeitreihen dar. `Web-Serialzugriff pausieren` stoppt nur das
 Web-Polling. Worker, CLI und TUI bleiben erreichbar.
+
+Der Schnellbereich bietet 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24 und 48 Stunden.
+Eine freie ganze Stundenzahl von 1 bis 720 wird erst durch den Button oder
+Enter übernommen. Alternativ können Start und Ende mit Datum und Uhrzeit
+gesetzt und gemeinsam bestätigt werden; eine einzelne Grenze ergänzt die
+Oberfläche um 24 Stunden. Unbestätigte Eingaben verändern den aktiven Zeitraum
+nicht.
+
+Temperatur-, Motor-/Generator-, Motorstatus- und Abgasdiagramm verwenden immer
+dieselbe Zeitachse. Ein mit der Maus gezogener Zoom wird deshalb auf alle vier Diagramme
+übertragen; `Zoom zurücksetzen` oder ein Doppelklick setzt alle gemeinsam
+zurück. Der Hintergrund ist leicht grün, wenn die gespeicherte Drehzahl größer
+null war, und leicht rot bei Drehzahl null. Größere Messlücken bleiben neutral,
+statt einen nicht belegten Betriebszustand vorzutäuschen.
+
+Die schmale Motorstatusleiste stammt aus dem ohnehin live gelesenen Block 24:
+Aus (15/16) ist weiß, Startvorbereitung (20) orange, Start und Anlasser (21–24)
+rot, Lauf und Stellmotorregelung (30–35) grün und die Abschaltroutine (11–13)
+violett. Störabschaltungen (10/14) sind dunkelrot. Beim Darüberfahren zeigt der
+Hinweis Nummer und Originalbezeichnung, zum Beispiel `22 · Anlasser ein`.
+Statuswechsel werden ereignistreu gespeichert und gehen auch in langen
+Zeiträumen nicht durch die Kurvenreduktion verloren, sofern sie im etwa
+0,75-sekündigen Block-24-Lesezyklus beobachtet wurden. Ein Zustand vollständig
+zwischen zwei Reads kann technisch nicht erfasst werden. Schraffierte
+Abschnitte sind echte Aufzeichnungslücken und werden nicht als `Aus` ausgegeben.
+
+Die Block-24-Werte `sStellmotorGas` und `sStellmotorOel` sowie die Zustände
+33/34/35 zeigen nur die Ansteuerung beziehungsweise Bewegungsrichtung
+`zu`/`aus`/`auf`. Sie sind **keine absolute Stellmotorposition**. Eine
+Positions-, Winkel- oder Weg-Rückmeldung ist im gemappten MSR2-Datenbestand
+nicht vorhanden und darf aus den Impulsen nicht errechnet werden.
 
 Alle regulär überwachten Livewerte werden zusätzlich zunächst 24 Stunden als
 komprimierte Roh-Snapshots gehalten. Sobald die Drehzahl größer als null ist,
@@ -99,8 +137,9 @@ voller Auflösung erhalten. Übrige Stillstandszeiten werden danach in
 
 ### Wartung
 
-`Wartung starten & Pflichtbackup erstellen` liest alle 38 freigegebenen
-Sicherungsziele genau einmal in einer gemeinsamen seriellen Sitzung. Derselbe
+`Wartung starten & Pflichtbackup erstellen` liest alle 42 Sicherungsziele genau
+einmal in einer gemeinsamen seriellen Sitzung: 36 Reglerblöcke sowie Block 16,
+20 und 21 beider Netzschutz-CPUs. Derselbe
 eingefrorene Lesezustand speist gleichzeitig das vollständige JSON-Abbild und
 den Anlagenstand des Berichts; es folgt keine zweite Blockrunde. Nur wenn das
 Abbild atomar gespeichert und über Abbild- sowie Datei-SHA-256 geprüft ist,
@@ -111,7 +150,7 @@ Der daraus erzeugte Entwurf wird lokal gespeichert. Checkliste, zusätzliche
 lokale Arbeitsliste, Monteur, Messwerte und Bemerkungen lassen sich fortlaufend
 ergänzen. HTML-, dreiseitiger PDF-Bericht und JSON-Export stehen zur Verfügung.
 
-V3 1.5.2 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
+V3 1.6.2 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
 die Oberfläche die exakte Eingabe `DEMO ABSCHLIESSEN`. Danach wird der Bericht
 lokal validiert, unveränderlich archiviert und deutlich als Demo gekennzeichnet.
 Der Abschluss öffnet keine Serialworker-Sitzung, schreibt weder Block 100 noch
@@ -126,9 +165,16 @@ Hardwareabschluss weiterhin:
 
 - vollständig bewertete Checkliste
 - Adminrolle
-- gültiges Auth-Level/PW4
+- eines der unterstützten Auth-Level 1 bis 5 und eine gültige PW4
 - die exakte Bestätigung `WARTUNG ABSCHLIESSEN`
 - positives ACK und vollständigen Readback
+
+Neben dem PW4-Feld steht im Echtbetrieb `PW4 auslesen`. Der Button liest
+schreibfrei die dafür benötigten Blöcke 20 und 22, berechnet die vier Ziffern
+und übernimmt sie nur in den aktuellen Wartungsentwurf. Er authentifiziert
+nicht und schreibt nichts. PW4 wird weder im Bericht noch im Audit gespeichert
+und bei Berichtswechsel, Verlassen der Wartung, Logout, Abschlussversuch oder
+spätestens nach 60 Sekunden wieder aus der Oberfläche entfernt.
 
 Erst in diesem ausdrücklich freigeschalteten Echtbetrieb würden die gemappten
 Wartungswerte übertragen, zurückgelesen und danach das Bestätigungsbit separat
@@ -152,8 +198,8 @@ sind.
 ### Backup und Wiederherstellung
 
 Der Hauptbereich `Backup` ist für angemeldete Benutzer sichtbar. Beim Öffnen
-sind alle 38 Sicherungsziele ausgewählt: 36 adressierbare Blöcke der
-Regler-CPU 0 sowie Block 16 der Netzschutz-CPU 1 und der Netzschutz-CPU 2. Über
+sind alle 42 Sicherungsziele ausgewählt: 36 adressierbare Blöcke der
+Regler-CPU 0 sowie Block 16, 20 und 21 der Netzschutz-CPU 1 und CPU 2. Über
 `Alle auswählen`, `Auswahl aufheben` und die einzelnen Blockkarten kann eine
 beliebige Teilmenge zusammengestellt werden. `Backup erstellen und
 herunterladen` liest nur diese Ziele in einer gemeinsamen Serialworker-Sitzung
@@ -161,13 +207,15 @@ und speichert ein JSON-Abbild. Einzelne Lesefehler bleiben darin sichtbar.
 
 Administratoren sehen darüber das geschützte Wartungsbackup-Archiv. Jede Karte
 nennt Backup-ID, Zeitpunkt und Ersteller, Herkunft, verknüpften
-Wartungsbericht, Zustand, Integrität, Größe, Packrevision, das Ergebnis 38/38
-sowie Abbild- und Datei-SHA-256. Es gibt bewusst weder Löschen noch einen Knopf
+Wartungsbericht, Zustand, Integrität, Größe, Packrevision, das Ergebnis 42/42,
+die 38 Restore-Ziele sowie Abbild- und Datei-SHA-256. Es gibt bewusst weder Löschen noch einen Knopf
 für manuelle Autoarchivierung. `JSON herunterladen` liefert die archivierte
 V3-Datei unverändert. `Für Wiederherstellung laden` lädt dieselbe Datei und
-prüft sie erneut über die bestehende Abbildprüfung. Nur 38/38 Ziele mit
-Prüfsummen, passender Packrevision und Gerätebindung werden übernommen; die
-Zielauswahl bleibt leer und der Dry-Run aktiv.
+prüft sie erneut über die bestehende Abbildprüfung. Neue Archive benötigen
+42/42 erfolgreiche Sicherungsziele mit exakt 38 Restore-Zielen. Geprüfte alte
+38/38-Wartungsarchive bleiben kompatibel. Prüfsummen, passende Packrevision
+und Gerätebindung sind in beiden Fällen zwingend; die Zielauswahl bleibt leer
+und der Dry-Run aktiv.
 
 Im Abbild wird jedes Ziel als eindeutiges Paar aus CPU und Blocknummer geführt.
 Dadurch bleiben `CPU 1 · Block 16` und `CPU 2 · Block 16` trotz gleicher
@@ -208,7 +256,7 @@ Bestätigung oder Rückleseprüfung erhalten, wird der Block ausdrücklich als
 `Zustand unklar` gekennzeichnet und muss vor jedem weiteren Versuch neu gelesen
 und geprüft werden.
 
-### Einstellungen und Register
+### Einstellung und Register
 
 Der integrierte `Fehlerkatalog` löst bekannte Service- und Warncodes direkt in
 deutschen Klartext auf. Die Suche nimmt Code oder Text an; beispielsweise wird
@@ -270,10 +318,11 @@ Ausgangszustandsvergleich oder Rückleseprüfung.
 
 Die Kodierung und der schreibfreie Dry-Run für Block 20 sind geprüft. Ein
 physischer Schreibvorgang auf Block 20 wurde am Gerät noch nicht ausgeführt.
-Deshalb bleibt Block 20 vorerst außerhalb von Backup und Wiederherstellung;
-die Auswahl umfasst unverändert 38 geprüfte Ziele: 36 Reglerblöcke plus
-Block 16 beider Netzschutz-CPUs. Block 21 darf als flüchtiger Messwertblock
-niemals als Konfiguration zurückgeschrieben werden. Das reine Öffnen oder
+Block 20 und 21 werden deshalb im 42-Ziele-Backup nur gelesen, geprüft und
+gesichert. Wiederherstellbar bleiben die 38 geprüften Ziele: 36 Reglerblöcke
+plus Block 16 beider Netzschutz-CPUs. Block 20 wartet auf eine physische
+Restore-Abnahme; Block 21 darf als flüchtiger Messwertblock niemals als
+Konfiguration zurückgeschrieben werden. Das reine Öffnen oder
 Neuladen einer Netzschutzkarte sendet weiterhin nur ein Lesetelegramm.
 
 Die geprüften Standarddefinitionen enthalten für die Netzüberwachungs-CPUs
@@ -431,6 +480,14 @@ open-dachs auth --level 4 --pass4 1234
 
 PW4 nur bewusst mit `--show-secret` anzeigen und nie in gemeinsame Logs
 kopieren.
+
+Zulässig sind ausschließlich Auth-Level 1 bis 5. Die Original-Java-Oberfläche
+benennt Rollen 1 bis 4; die älteren V2-Schreib- und Backup-Werkzeuge verwenden
+zusätzlich Level 5, der deshalb in den Auswahllisten neutral `Legacy/V2` heißt.
+Das Protokollfeld ist zwar ein Byte breit, der getestete Regler spiegelt aber
+auch höhere Werte zurück. CLI, TUI, Web und API weisen deshalb 0 sowie Werte ab
+6 bereits vor dem seriellen Auth-Lesevorgang ab und akzeptieren nur eine exakt
+zum angeforderten Level passende Antwort.
 
 ## 8. Schreiben mit der CLI
 

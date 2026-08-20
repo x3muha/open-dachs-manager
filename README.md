@@ -1,9 +1,9 @@
-# Open Dachs Manager · V3 1.5.2
+# Open Dachs Manager · V3 1.6.2
 
 Lokale Bedienung, Überwachung und Wartungsdokumentation für Dachs-Anlagen mit
 MSR2-Regler – über die optische serielle Schnittstelle und ohne Cloud-Zwang.
 
-> **Projektstatus: Version 1.5.2.** Lesen, Dekodieren, Wartungs-Testmodus und der
+> **Projektstatus: Version 1.6.2.** Lesen, Dekodieren, Wartungs-Testmodus und der
 > zentrale Serialworker sind an einer Anlage praktisch erprobt. Ein echter
 > Schreibvorgang erfordert immer die ausdrückliche Schreibfreigabe,
 > Authentifizierung, eine positive Antwort und die anschließende Rückleseprüfung.
@@ -16,11 +16,11 @@ Open Dachs Manager ist ein unabhängiges Open-Source-Community-Projekt.
 
 | Bereich | Funktionen |
 |---|---|
-| **Übersicht** | Wirkleistung Ist/Soll mit automatisch berechnetem PW4, Betriebsstunden je Start, Wartungsrestzeit, frei auswählbare Live-Kacheln und technisches Anlagenbild mit Rußfilterschätzung |
-| **Überwachung** | Live-Werte, Anlagenbild, Historien, Service- und Warnmeldungen |
-| **Wartung** | Vollständiges 38-Ziele-Pflichtbackup, schreibfreier Gesamtsnapshot, digitale Checkliste, Vorher-/Nachher-Werte und PDF/HTML/JSON |
-| **Backup** | Geschütztes Wartungsarchiv, alle 36 Reglerblöcke und Block 16 beider Netzschutz-CPUs sichern, Abbilder prüfen und ausgewählte Ziele im Dry-Run oder kontrolliert wiederherstellen |
-| **Einstellungen** | Vollständig dekodierte Register, kontrollierte Schreibvorgänge sowie je Netzschutz-CPU Legacy-Schutz, zusätzliche Schutzparameter und Live-Netzwerte |
+| **Übersicht** | Wirkleistung Ist/Soll mit automatisch berechnetem PW4, Betriebsstunden je Start im Motorstatus und optional als auswählbare Kachel, Wartungsrestzeit, frei auswählbare Live-Kacheln und technisches Anlagenbild mit Rußfilterschätzung |
+| **Überwachung** | Live-Werte und Historien mit Stunden-/Datumsauswahl, gemeinsamer Zeitachse und Zoom, Laufzustandsbändern sowie ereignistreuer Block-24-Motorstatusleiste |
+| **Wartung** | Vollständiges 42-Ziele-Pflichtbackup, schreibfreier Gesamtsnapshot, digitale Checkliste, PW4-Leseknopf, Vorher-/Nachher-Werte und PDF/HTML/JSON |
+| **Backup** | Geschütztes Wartungsarchiv, 36 Reglerblöcke sowie Block 16/20/21 beider Netzschutz-CPUs sichern; die 38 geprüften Konfigurationsziele lassen sich im Dry-Run oder kontrolliert wiederherstellen |
+| **Einstellung** | Vollständig dekodierte Register, kontrollierte Schreibvorgänge sowie je Netzschutz-CPU Legacy-Schutz, zusätzliche Schutzparameter und Live-Netzwerte |
 | **System** | Mehrere Benutzer, Rollen, Passwortverwaltung, API-Freigabe und Token-Manager |
 | **Werkzeuge** | Weboberfläche, CLI, TUI, JSON-Backups, Audit-Protokoll und systemd-Dienste |
 
@@ -39,7 +39,8 @@ Weitere Merkmale:
 - ein gemeinsamer FIFO-Serialworker für Web, CLI und TUI
 - atomare Abläufe für Wartungssnapshots und `Auth → Write → ACK → Readback`
 - geschütztes Backup-Archiv: Jeder Wartungsstart verlangt ein vollständiges,
-  SHA-256-geprüftes Abbild aller 38 freigegebenen CPU-/Blockziele
+  SHA-256-geprüftes Abbild aller 42 Sicherungsziele; 38 geprüfte
+  Konfigurationsziele bleiben wiederherstellbar
 - umschaltbarer Testmodus: Wartung vollständig durchspielen und lokal
   abschließen, ohne den Regler zu verändern; nur ein Admin kann den
   kontrollierten Echtabschluss freischalten
@@ -54,9 +55,30 @@ Weitere Merkmale:
 
 ## Einblicke
 
+### Überwachung und Historie
+
+Die Schnellbereiche umfassen 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24 und
+48 Stunden. Alternativ lassen sich 1 bis 720 freie Stunden per Button oder
+Enter bestätigen oder Start und Ende mit Datum und Uhrzeit festlegen.
+Temperatur-, Motor-, Motorstatus- und Abgasdiagramm verwenden immer denselben
+Zeitraum; ein mit der Maus gezogener Zoom gilt deshalb gleichzeitig für alle
+vier.
+Helle grüne und rote Hintergründe kennzeichnen anhand der bereits erfassten
+Drehzahl Lauf und Stillstand. Datenlücken bleiben ohne Zustandsfarbe.
+Die eigene Block-24-Statusleiste zeigt Aus weiß, Startvorbereitung orange,
+Start/Anlasser rot, Lauf grün und Abschaltroutinen violett. Jeder Statuswechsel
+der im etwa 0,75-sekündigen Lesezyklus beobachtet wird, bleibt unabhängig von
+der Kurvenreduktion erhalten; beim Darüberfahren stehen Statusnummer und
+Originaltext im Hinweis. Aufzeichnungslücken sind schraffiert.
+
+Block 24 liefert außerdem die Zustände 33/34/35 und die Signale
+`sStellmotorGas`/`sStellmotorOel`. Das sind Ansteuerung beziehungsweise
+Bewegungsrichtung (`zu`/`aus`/`auf`), **keine absolute Stellmotorposition**;
+eine Winkel- oder Weg-Rückmeldung ist im gemappten MSR2-Bestand nicht vorhanden.
+
 ### Geführte Wartung
 
-Beim Start liest eine einzige gemeinsame serielle Sitzung alle 38 freigegebenen
+Beim Start liest eine einzige gemeinsame serielle Sitzung alle 42
 CPU-/Blockziele. Derselbe eingefrorene Lesezustand speist gleichzeitig das
 vollständige, geprüfte Backup und den Anlagenstand des Wartungsberichts; eine
 zweite Blockrunde ist nicht nötig. Checkliste, Messwerte und Bemerkungen werden
@@ -75,8 +97,8 @@ oder gelöscht werden; `Zielzustand unklar` verlangt eine fachliche Prüfung.
 ### Kompakter Wartungsbericht
 
 Der Bericht fasst Anlagenstand, Prüfpunkte, Vorher-/Nachher-Messwerte und das
-Ergebnis kompakt zusammen. Backup-ID, Erstellzeit, 38/38-Ergebnis und
-Abbild-SHA-256 sind Teil der Herkunftsinformation. Ein technischer
+Ergebnis kompakt zusammen. Backup-ID, Erstellzeit, 42/42-Sicherungsergebnis,
+die 38 Restore-Ziele und Abbild-SHA-256 sind Teil der Herkunftsinformation. Ein technischer
 Anlagenanhang kann zusätzlich ausgegeben werden.
 
 <p align="center">
@@ -101,9 +123,12 @@ Vollblock-Readback`; mehrdeutige Profilwerte können nur ausdrücklich als
 physischer Block-20-Schreibvorgang am Gerät wurde noch nicht ausgeführt.
 
 Block 21 besitzt keinen Schreibdienst und bleibt als laufender Messwertblock
-strikt nur lesbar. Block 20 ist bis zur realen Abnahme weiterhin nicht für
-Backup oder Wiederherstellung freigegeben; die Auswahl bleibt bei den 36
-Reglerblöcken plus Block 16 beider Netzschutz-CPUs, also 38 Zielen. Die
+strikt nur lesbar. Backups erfassen Block 20 und 21 beider Netzschutz-CPUs
+zusätzlich schreibfrei, damit Schutzkonfiguration und Diagnosezustand im
+Abbild vollständig nachvollziehbar sind. Wiederherstellbar bleiben weiterhin
+nur die 36 Reglerblöcke plus Block 16 beider Netzschutz-CPUs, also 38 Ziele;
+Block 20 wartet noch auf die physische Restore-Abnahme und Block 21 darf als
+flüchtiger Messwertblock niemals zurückgeschrieben werden. Die
 geprüften Standarddefinitionen enthalten keine weiteren Netz-CPU-Datenblöcke.
 Die zusätzlich live gelesenen Diagnosedienste 17 und 18 werden mangels belegter
 Feldstruktur nur als Rohbefund geführt, nicht als dekodierte Felder angeboten.
@@ -122,6 +147,11 @@ EDOMI sendet beim Schreiben ausschließlich einen technischen Key und den
 logischen Zielwert. Blockkodierung, PW4, Authentifizierung, positives ACK,
 Readback und Audit verbleiben serverseitig im Open Dachs Manager. Rohe
 Blockpayloads oder PW4 werden nicht über die API entgegengenommen.
+Die frei definierbaren Protokollbytewerte sind für Bedien- und API-Schreibwege
+typstreng auf Auth-Level 1 bis 5 begrenzt. Die Originaloberfläche benennt die
+Rollen 1 bis 4; die älteren V2-Schreib- und Backup-Werkzeuge verwenden
+zusätzlich Level 5. Höhere Bytewerte werden trotz möglichem Reglerecho nicht
+als weitere Berechtigungsstufen akzeptiert.
 
 ## Warum ein zentraler Serialworker?
 

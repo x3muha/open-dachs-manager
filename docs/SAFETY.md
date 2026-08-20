@@ -31,11 +31,25 @@ Dry-Run bleibt der Standard. Ein vorbereiteter Wert beweist nicht, dass eine
 Änderung technisch unbedenklich ist. Vorher die Bedeutung anhand der richtigen
 Geräteunterlagen prüfen und ein Backup erstellen.
 
+## Authentifizierungsstufen
+
+Das Telegramm besitzt ein Byte für den Auth-Level. Die Original-Java-
+Oberfläche benennt Rollen 1 bis 4; die älteren V2-Schreib- und Backup-Werkzeuge
+verwenden zusätzlich Level 5. Der getestete Regler spiegelt auch höhere
+Bytewerte zurück; dieses Echo ist kein Beleg für weitere Rollen. CLI, TUI, Web
+und API akzeptieren deshalb ausschließlich echte Integer von 1 bis 5, prüfen
+vor jedem Auth-Lesevorgang und verlangen eine exakt passende Antwort.
+Boolesche, textuelle, gebrochene und außerhalb liegende Werte werden nicht
+still konvertiert.
+
 ## Backup-Wiederherstellung
 
-Ein vollständiges Sicherungsabbild umfasst die 36 adressierbaren Rohblöcke der
-Regler-CPU 0 sowie Block 16 der Netzschutz-CPU 1 und der Netzschutz-CPU 2. Die
-Ziele werden immer als eindeutiges Paar aus CPU und Blocknummer behandelt. Vor
+Ein vollständiges aktuelles Sicherungsabbild umfasst 42 Ziele: die 36
+adressierbaren Rohblöcke der Regler-CPU 0 sowie Block 16, 20 und 21 der
+Netzschutz-CPU 1 und der Netzschutz-CPU 2. Wiederherstellbar bleiben davon nur
+die 38 geprüften Konfigurationsziele, also CPU 0 sowie Block 16 beider
+Netzschutz-CPUs. Die Ziele werden immer als eindeutiges Paar aus CPU und
+Blocknummer behandelt. Vor
 dem Import werden Schema, Packrevision, Reglerkennung, eindeutige CPU-/Blockziele,
 Payloadlängen und SHA-256-Prüfsummen geprüft. Alte Abbilder ohne Prüfsummen sind
 nur für den Dry-Run zugelassen.
@@ -72,7 +86,7 @@ lesen und fachlich zu prüfen.
 ## Geschütztes Wartungsbackup-Archiv
 
 Jeder Wartungsstart verwendet einen einzigen exklusiven Lesevorgang für alle
-38 freigegebenen CPU-/Blockziele. Erst wenn daraus ein vollständiges
+42 Sicherungsziele. Erst wenn daraus ein vollständiges
 `dachs-msr2-backup/v3`-Abbild entstanden ist, dessen Abbild- und
 Datei-SHA-256 geprüft wurden und dessen Datei atomar gespeichert ist, darf der
 zugehörige Wartungsbericht angelegt werden. Der Anlagenstand des Berichts wird
@@ -89,9 +103,10 @@ fremdes Ziel umzueignen oder dessen Rechte zu ändern.
 Listen- und Download-API sind nur für Administratoren erreichbar. Es gibt
 bewusst keinen Archiv-Löschweg. Das Löschen eines Wartungsberichts lässt sein
 Sicherungsabbild bestehen. Vor der Übernahme in die Wiederherstellung werden
-Download, Abbildprüfsumme, Packrevision, Gerätebindung und exakt 38/38
-wiederherstellbare Ziele erneut geprüft. Danach bleibt die Zielauswahl leer und
-der schreibfreie Probelauf aktiv.
+Download, Abbildprüfsumme, Packrevision, Gerätebindung, 42/42 erfolgreiche
+Sicherungsziele und exakt 38 Restore-Ziele erneut geprüft. Geprüfte ältere
+38/38-Wartungsarchive bleiben unter ihrem unveränderten Altvertrag nutzbar.
+Danach bleibt die Zielauswahl leer und der schreibfreie Probelauf aktiv.
 
 Ein echter Wartungsabschluss wird vor dem ersten möglichen Reglerwrite als
 `completing` gespeichert. Dieser Zustand ist gegen Wiederholung und Löschen
@@ -127,10 +142,11 @@ dieser Block unmittelbar Netzschutzgrenzen und Abschaltzeiten enthält.
 
 Block 21 besitzt keinen Schreibdienst und bleibt als laufender Messwertblock
 serverseitig strikt nur lesbar. Das Öffnen oder Aktualisieren einer roten Seite
-schreibt weiterhin nichts. Block 20 bleibt bis zu seiner realen Abnahme
-ebenfalls außerhalb der restaurierbaren Backupziele; der Sicherungsumfang
-bleibt bei 38 Zielen. Flüchtige Messwerte aus Block 21 dürfen niemals als
-Konfiguration zurückgeschrieben werden.
+schreibt weiterhin nichts. Block 20 und 21 werden im 42-Ziele-Abbild gelesen,
+auf exakte Länge und Dekodierbarkeit geprüft und gehasht, bleiben aber außerhalb
+der 38 Restore-Ziele. Block 20 wartet auf eine physische Restore-Abnahme;
+flüchtige Messwerte aus Block 21 dürfen niemals als Konfiguration
+zurückgeschrieben werden.
 
 ## Webzugriff
 
@@ -158,7 +174,7 @@ URLs, Browser-Lesezeichen oder öffentliche Fehlerberichte gelangen.
 
 ## Reifegrad
 
-Version 1.5.2 basiert auf dem ersten stabilen öffentlichen Stand und wird ohne
+Version 1.6.2 basiert auf dem ersten stabilen öffentlichen Stand und wird ohne
 Garantie bereitgestellt. Gerätevarianten und Packstände können abweichen.
 Leseergebnisse und Feldlagen am tatsächlichen Zielgerät verifizieren, bevor
 Schreibvorgänge freigegeben werden.

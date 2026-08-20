@@ -102,7 +102,8 @@ class NetworkProtectionTests(unittest.TestCase):
                 NETWORK_PROTECTION_PAYLOAD_LENGTHS[item["block"]],
             )
             self.assertEqual(item["writable"], item["block"] in (16, 20))
-            self.assertEqual(item["backup_eligible"], item["block"] == 16)
+            self.assertTrue(item["backup_eligible"])
+            self.assertEqual(item["restore_eligible"], item["block"] == 16)
 
     def test_layout4_config_offsets_scaling_and_profile_are_source_aligned(self):
         self.assertEqual(len(CONFIG_FIELDS), 39)

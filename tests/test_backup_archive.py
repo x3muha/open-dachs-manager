@@ -8,8 +8,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from open_dachs_manager.mapping import PackRepository
+from open_dachs_manager.network_protection import (
+    NETWORK_PROTECTION_CPUS,
+    NETWORK_PROTECTION_RESTORE_BLOCKS,
+)
 from open_dachs_manager.service import (
+    BACKUP_LEGACY_TARGETS,
     BACKUP_PAYLOAD_LENGTHS,
+    BACKUP_RESTORE_TARGETS,
     BACKUP_TARGETS,
     DachsService,
     _image_sha256,
@@ -60,11 +66,33 @@ class BackupArchiveIdentityTests(unittest.TestCase):
         inspection = DachsWebApp._strict_backup_archive_inspection(
             self.guard, self.image, require_current_pack=True
         )
-        self.assertEqual(inspection["successful_blocks"], 38)
+        self.assertEqual(inspection["successful_blocks"], 42)
+        self.assertEqual(inspection["restorable_blocks"], 38)
+        self.assertEqual(
+            [
+                (item["cpu"], item["block"])
+                for item in inspection["records"]
+                if item["restorable"]
+            ],
+            list(BACKUP_RESTORE_TARGETS),
+        )
 
     def _redigest(self, image):
         image["image_sha256"] = _image_sha256(image)
         return image
+
+    def test_restore_contract_uses_the_network_schema_source_of_truth(self):
+        network_targets = tuple(
+            target for target in BACKUP_RESTORE_TARGETS if target[0] != 0
+        )
+        self.assertEqual(
+            network_targets,
+            tuple(
+                (cpu, block)
+                for cpu in NETWORK_PROTECTION_CPUS
+                for block in NETWORK_PROTECTION_RESTORE_BLOCKS
+            ),
+        )
 
     def test_declared_serial_cannot_disagree_with_bound_block20_payload(self):
         tampered = copy.deepcopy(self.image)
@@ -132,6 +160,30 @@ class BackupArchiveIdentityTests(unittest.TestCase):
                     DachsWebApp._strict_backup_archive_inspection(
                         self.guard, tampered
                     )
+
+    def test_legacy_38_target_archive_remains_strictly_compatible(self):
+        legacy = copy.deepcopy(self.image)
+        legacy["maintenance_archive"]["version"] = 1
+        allowed = set(BACKUP_LEGACY_TARGETS)
+        legacy["blocks"] = [
+            item
+            for item in legacy["blocks"]
+            if (int(item["cpu"]), int(item["block"])) in allowed
+        ]
+        legacy["requested_targets"] = [
+            {"cpu": cpu, "block": block} for cpu, block in BACKUP_LEGACY_TARGETS
+        ]
+        legacy["requested_blocks"] = len(BACKUP_LEGACY_TARGETS)
+        legacy["successful_blocks"] = len(BACKUP_LEGACY_TARGETS)
+        legacy["failed_blocks"] = 0
+        self._redigest(legacy)
+
+        inspection = DachsWebApp._strict_backup_archive_inspection(
+            self.guard, legacy, require_current_pack=True
+        )
+
+        self.assertEqual(inspection["successful_blocks"], 38)
+        self.assertEqual(inspection["restorable_blocks"], 38)
 
 
 class BackupArchiveLifecycleTests(unittest.TestCase):

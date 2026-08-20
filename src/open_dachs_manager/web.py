@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+import heapq
 import hashlib
 import hmac
 import http.server
@@ -32,7 +33,11 @@ from urllib.parse import parse_qs, urlparse
 import zlib
 
 from . import __version__
-from .auth import auth_inputs_from_payloads, calculate_pw4
+from .auth import (
+    auth_inputs_from_payloads,
+    calculate_pw4,
+    validate_auth_level as _validated_auth_level,
+)
 from .maintenance import (
     CHECKLIST_RAW_VALUES,
     CHECKLIST_STATUS,
@@ -57,6 +62,7 @@ from .maintenance import (
 )
 from .mapping import PackRepository, WriteAllowlist, is_reserved_key
 from .network_protection import (
+    NETWORK_PROTECTION_BACKUP_BLOCKS,
     NETWORK_PROTECTION_BLOCK,
     NETWORK_PROTECTION_CPUS,
     decode_network_protection,
@@ -70,7 +76,9 @@ from .network_protection import (
 )
 from .serial_worker import DEFAULT_SERIAL_WORKER_SOCKET
 from .service import (
+    BACKUP_LEGACY_TARGETS,
     BACKUP_PAYLOAD_LENGTHS,
+    BACKUP_RESTORE_TARGETS,
     BACKUP_TARGETS,
     DachsService,
     write_json_atomic,
@@ -120,6 +128,16 @@ MC_STATUS_BLOCKS = (26, 86, 90, 94)
 HISTORY_RETENTION_DAYS = 30
 HISTORY_MAX_POINTS = 2000
 HISTORY_CLEANUP_MARKER = "dashboard-cleanup-v1.done"
+MOTOR_STATUS_MIGRATION = "motor-status-v1"
+MOTOR_STATUS_BLOCK = 24
+MOTOR_STATUS_KEY = "Hka_Mw1.bMotorStatus"
+# Store every transition plus a sparse heartbeat.  The heartbeat makes real
+# recording outages distinguishable from a long, unchanged controller state
+# without duplicating the 0.75-second snapshot stream.
+MOTOR_STATUS_HEARTBEAT_SECONDS = 30.0
+MOTOR_STATUS_GAP_SECONDS = 75.0
+MOTOR_STATUS_OBSERVATION_GAP_SECONDS = 5.0
+MOTOR_STATUS_LEGACY_GAP_SECONDS = 30.0
 INVALID_SENSOR_VALUES = (0, -1, 90, 127, 255)
 DASHBOARD_TEMPERATURE_KEYS = (
     "Hka_Mw1.Temp.sbMotor",
@@ -202,6 +220,16 @@ DEFAULT_OVERVIEW_SERIES_IDS = (
     "arbeit_therm_hka",
     "arbeit_therm_kon",
     "servicecode",
+)
+DASHBOARD_OPERATING_HOURS_PER_START_KEY = "derived.operating_hours_per_start"
+DASHBOARD_DERIVED_FIELDS = (
+    (
+        "operating_hours_per_start",
+        "Betriebsstunden je Start",
+        22,
+        DASHBOARD_OPERATING_HOURS_PER_START_KEY,
+        "Bh/Start",
+    ),
 )
 MAX_DASHBOARD_CARDS = 24
 MAX_DASHBOARD_EXTRA_BLOCKS = 12
@@ -368,7 +396,14 @@ def _history_bounds(query: dict[str, list[str]]) -> tuple[datetime, datetime, fl
         if duration > HISTORY_RETENTION_DAYS * 86400:
             raise ValueError("der Zeitraum darf höchstens 30 Tage umfassen")
         return start, end, duration
-    hours = min(HISTORY_RETENTION_DAYS * 24, max(1, int(query.get("hours", ["24"])[0])))
+    try:
+        hours = int(query.get("hours", ["24"])[0])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Stunden müssen eine ganze Zahl sein") from exc
+    if not 1 <= hours <= HISTORY_RETENTION_DAYS * 24:
+        raise ValueError(
+            f"Stunden müssen zwischen 1 und {HISTORY_RETENTION_DAYS * 24} liegen"
+        )
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=hours)
     return start, end, hours * 3600.0
@@ -552,6 +587,15 @@ class DachsStore:
                     recorded_at TEXT PRIMARY KEY,
                     sample_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS motor_status_points (
+                    recorded_at TEXT PRIMARY KEY,
+                    status INTEGER CHECK(status IS NULL OR (status>=0 AND status<=255))
+                );
+                CREATE TABLE IF NOT EXISTS history_migrations (
+                    name TEXT PRIMARY KEY,
+                    completed_at TEXT NOT NULL,
+                    details_json TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS adaptive_series (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     block INTEGER NOT NULL,
@@ -697,6 +741,7 @@ class DachsStore:
                 (int(row["block"]), str(row["field_key"])): int(row["id"])
                 for row in db.execute("SELECT id,block,field_key FROM adaptive_series").fetchall()
             }
+            self._reload_motor_status_cache_db(db)
 
     def connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=30)
@@ -738,6 +783,27 @@ class DachsStore:
                 db.close()
 
     @staticmethod
+    def _merge_measurement_rows(
+        legacy: list[dict],
+        snapshot: list[dict],
+        limit: int,
+    ) -> list[dict]:
+        """Merge old per-field rows with compact snapshots at one point limit."""
+        limit = min(HISTORY_MAX_POINTS, max(1, int(limit)))
+        if not snapshot:
+            return legacy
+        merged = {str(row["recorded_at"]): row for row in legacy}
+        # New compact snapshots supersede a legacy row from the same cycle.
+        merged.update({str(row["recorded_at"]): row for row in snapshot})
+        rows = [merged[timestamp] for timestamp in sorted(merged)]
+        if len(rows) <= limit:
+            return rows
+        if limit == 1:
+            return [rows[-1]]
+        step = (len(rows) - 1) / (limit - 1)
+        return [rows[round(index * step)] for index in range(limit)]
+
+    @staticmethod
     def _measurements_between_db(
         db: sqlite3.Connection,
         block: int,
@@ -749,17 +815,7 @@ class DachsStore:
         limit = min(HISTORY_MAX_POINTS, max(1, int(limit)))
         legacy = DachsStore._legacy_measurements_between_db(db, block, key, start, end, limit)
         snapshot = DachsStore._snapshot_measurements_between_db(db, block, key, start, end, limit)
-        if not snapshot:
-            return legacy
-        merged = {str(row["recorded_at"]): row for row in legacy}
-        merged.update({str(row["recorded_at"]): row for row in snapshot})
-        rows = [merged[timestamp] for timestamp in sorted(merged)]
-        if len(rows) <= limit:
-            return rows
-        if limit == 1:
-            return [rows[-1]]
-        step = (len(rows) - 1) / (limit - 1)
-        return [rows[round(index * step)] for index in range(limit)]
+        return DachsStore._merge_measurement_rows(legacy, snapshot, limit)
 
     @staticmethod
     def _legacy_measurements_between_db(
@@ -802,47 +858,111 @@ class DachsStore:
         end: datetime,
         limit: int,
     ) -> list[dict]:
-        index = HISTORY_SERIES_INDEX.get((int(block), str(key)))
-        if index is None:
-            return []
+        result = DachsStore._snapshot_measurements_batch_db(
+            db,
+            [("requested", int(block), str(key))],
+            start,
+            end,
+            limit,
+        )
+        return result.get("requested", [])
+
+    @staticmethod
+    def _snapshot_measurements_batch_db(
+        db: sqlite3.Connection,
+        requests: list[tuple[str, int, str]],
+        start: datetime,
+        end: datetime,
+        limit: int,
+    ) -> dict[str, list[dict]]:
+        """Sample compact snapshots once and fan every row out to all series."""
+        targets: dict[int, list[tuple[str, int, str]]] = {}
+        output: dict[str, list[dict]] = {}
+        for requested_id, block, key in requests:
+            index = HISTORY_SERIES_INDEX.get((int(block), str(key)))
+            if index is None:
+                continue
+            output[requested_id] = []
+            targets.setdefault(index, []).append((requested_id, int(block), str(key)))
+        if not targets:
+            return output
+
+        limit = min(HISTORY_MAX_POINTS, max(1, int(limit)))
         start = start.astimezone(timezone.utc)
         end = end.astimezone(timezone.utc)
-        seconds = max(1.0, (end - start).total_seconds())
-        start_text = start.isoformat()
-        end_text = end.isoformat()
+        seconds = (end - start).total_seconds()
+        if seconds <= 0:
+            return output
         bucket_seconds = max(1.0, seconds / limit)
-        rows = db.execute(
-            "WITH sampled AS ("
-            " SELECT MIN(recorded_at) AS recorded_at FROM history_samples"
-            " WHERE recorded_at>=? AND recorded_at<=?"
-            " GROUP BY CAST(((julianday(recorded_at)-julianday(?))*86400.0)/? AS INTEGER)"
-            ") "
-            "SELECT h.recorded_at,h.sample_json FROM history_samples AS h "
-            "JOIN sampled AS s ON s.recorded_at=h.recorded_at ORDER BY h.recorded_at ASC",
-            (start_text, end_text, start_text, bucket_seconds),
-        ).fetchall()
-        series_id, title, _block, _key, unit, _color = HISTORY_SERIES[index]
-        output: list[dict] = []
+        bucket_count = max(1, min(limit, math.ceil(seconds / bucket_seconds)))
+        rows: list[sqlite3.Row] = []
+
+        # recorded_at is the table's primary key. Repeated bounded seeks are
+        # substantially faster on the Pi than GROUP BY over every sample in a
+        # 30-day window (about 0.3 s instead of 7 s per scan on the production
+        # database). One read transaction keeps all buckets on one WAL view.
+        began_transaction = not db.in_transaction
+        if began_transaction:
+            db.execute("BEGIN")
+        try:
+            for bucket_index in range(bucket_count):
+                lower = start + timedelta(seconds=bucket_seconds * bucket_index)
+                upper = (
+                    end
+                    if bucket_index == bucket_count - 1
+                    else min(
+                        end,
+                        start
+                        + timedelta(seconds=bucket_seconds * (bucket_index + 1)),
+                    )
+                )
+                if bucket_index == bucket_count - 1:
+                    sql = (
+                        "SELECT recorded_at,sample_json FROM history_samples "
+                        "WHERE recorded_at>=? AND recorded_at<=? "
+                        "ORDER BY recorded_at LIMIT 1"
+                    )
+                else:
+                    sql = (
+                        "SELECT recorded_at,sample_json FROM history_samples "
+                        "WHERE recorded_at>=? AND recorded_at<? "
+                        "ORDER BY recorded_at LIMIT 1"
+                    )
+                row = db.execute(
+                    sql, (lower.isoformat(), upper.isoformat())
+                ).fetchone()
+                if row is not None:
+                    rows.append(row)
+        finally:
+            if began_transaction:
+                db.rollback()
+
         for row in rows:
             try:
                 values = json.loads(row["sample_json"])["values"]
-                sample = values[index]
-                if sample is None:
-                    continue
-                raw, value, rtt_ms = sample
-            except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 continue
-            output.append({
-                "recorded_at": row["recorded_at"],
-                "block": int(block),
-                "field_key": str(key),
-                "label": title,
-                "raw": raw,
-                "value": value,
-                "unit": unit,
-                "rtt_ms": rtt_ms,
-                "series_id": series_id,
-            })
+            for index, requested_targets in targets.items():
+                try:
+                    sample = values[index]
+                    if sample is None:
+                        continue
+                    raw, value, rtt_ms = sample
+                except (IndexError, KeyError, TypeError, ValueError):
+                    continue
+                series_id, title, _block, _key, unit, _color = HISTORY_SERIES[index]
+                for requested_id, block, key in requested_targets:
+                    output[requested_id].append({
+                        "recorded_at": row["recorded_at"],
+                        "block": block,
+                        "field_key": key,
+                        "label": title,
+                        "raw": raw,
+                        "value": value,
+                        "unit": unit,
+                        "rtt_ms": rtt_ms,
+                        "series_id": series_id,
+                    })
         return output
 
     def measurements_batch(
@@ -852,23 +972,36 @@ class DachsStore:
         end: datetime,
         limit: int,
     ) -> dict[str, list[dict]]:
-        """Load chart series with two bounded WAL read connections."""
+        """Load chart series with one snapshot fanout and bounded legacy reads."""
         if not requests:
             return {}
 
-        def load(item: tuple[str, int, str]) -> tuple[str, list[dict]]:
+        limit = min(HISTORY_MAX_POINTS, max(1, int(limit)))
+        snapshot_db = self.connect()
+        try:
+            snapshots = self._snapshot_measurements_batch_db(
+                snapshot_db, requests, start, end, limit
+            )
+        finally:
+            snapshot_db.close()
+
+        def load_legacy(item: tuple[str, int, str]) -> tuple[str, list[dict]]:
             series_id, block, key = item
             db = self.connect()
             try:
-                return series_id, self._measurements_between_db(db, block, key, start, end, limit)
+                legacy = self._legacy_measurements_between_db(
+                    db, block, key, start, end, limit
+                )
             finally:
                 db.close()
+            return series_id, self._merge_measurement_rows(
+                legacy, snapshots.get(series_id, []), limit
+            )
 
-        # WAL permits concurrent readers while the monitor commits samples.
-        # Two workers are faster on the Pi's SD card than eight random readers
-        # and keep this endpoint bounded when more than one browser is open.
+        # Only the much smaller legacy per-field table still needs individual
+        # reads. WAL permits two of them while the monitor commits samples.
         with ThreadPoolExecutor(max_workers=min(2, len(requests))) as pool:
-            return dict(pool.map(load, requests))
+            return dict(pool.map(load_legacy, requests))
 
     def record(self, recorded_at: str, rows: list[dict]) -> None:
         if not rows:
@@ -911,6 +1044,475 @@ class DachsStore:
                 "INSERT OR REPLACE INTO history_samples(recorded_at,sample_json) VALUES(?,?)",
                 (recorded_at, payload),
             )
+            status_index = HISTORY_SERIES_INDEX.get((MOTOR_STATUS_BLOCK, MOTOR_STATUS_KEY))
+            status_sample = values[status_index] if status_index is not None else None
+            status = self._motor_status_code(status_sample[0] if status_sample else None)
+            if status is None and status_sample:
+                status = self._motor_status_code(status_sample[1])
+            if status is not None:
+                self._record_motor_status_observation_db(db, recorded_at, status)
+
+    @staticmethod
+    def _parse_recorded_at(value: object) -> datetime | None:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _motor_status_code(value: object) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            if isinstance(value, str):
+                match = re.match(r"^\s*([+-]?\d+)", value)
+                if match is None:
+                    return None
+                status = int(match.group(1))
+            else:
+                status = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return status if 0 <= status <= 255 else None
+
+    def _reload_motor_status_cache_db(
+        self,
+        db: sqlite3.Connection,
+        *,
+        preserve_newer_observation: bool = False,
+    ) -> None:
+        """Rebuild the live status cache from durable recorder state."""
+        latest_point = db.execute(
+            "SELECT recorded_at,status FROM motor_status_points "
+            "ORDER BY recorded_at DESC LIMIT 1"
+        ).fetchone()
+        latest_status = db.execute(
+            "SELECT recorded_at,status FROM motor_status_points "
+            "WHERE status IS NOT NULL ORDER BY recorded_at DESC LIMIT 1"
+        ).fetchone()
+        status = int(latest_status["status"]) if latest_status is not None else None
+        status_at = (
+            self._parse_recorded_at(latest_status["recorded_at"])
+            if latest_status is not None
+            else None
+        )
+        latest_point_at = (
+            self._parse_recorded_at(latest_point["recorded_at"])
+            if latest_point is not None
+            else None
+        )
+        gap_open = bool(
+            latest_point is not None
+            and latest_point["status"] is None
+            and latest_point_at is not None
+            and (status_at is None or latest_point_at >= status_at)
+        )
+
+        # Status transitions/heartbeats are deliberately sparse.  The compact
+        # history sample is written on every normal fast cycle, so it preserves
+        # the actual last successful Block-24 observation across a web-service
+        # restart without adding another high-frequency SQLite write stream.
+        observed_at = status_at
+        snapshots = db.execute(
+            "SELECT recorded_at,sample_json FROM history_samples "
+            "ORDER BY recorded_at DESC LIMIT 256"
+        )
+        for snapshot in snapshots:
+            snapshot_at = self._parse_recorded_at(snapshot["recorded_at"])
+            snapshot_status = None
+            try:
+                status_index = HISTORY_SERIES_INDEX[(MOTOR_STATUS_BLOCK, MOTOR_STATUS_KEY)]
+                sample = json.loads(snapshot["sample_json"])["values"][status_index]
+                if sample:
+                    snapshot_status = self._motor_status_code(sample[0])
+                    if snapshot_status is None and len(sample) > 1:
+                        snapshot_status = self._motor_status_code(sample[1])
+            except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                snapshot_status = None
+            if snapshot_at is None or snapshot_status is None:
+                continue
+            if observed_at is None or snapshot_at >= observed_at:
+                observed_at = snapshot_at
+                if not gap_open or latest_point_at is None or snapshot_at > latest_point_at:
+                    status = snapshot_status
+                    gap_open = False
+            break
+
+        current_observed_at = getattr(self, "_last_motor_status_observed_at", None)
+        if (
+            preserve_newer_observation
+            and current_observed_at is not None
+            and (observed_at is None or current_observed_at > observed_at)
+        ):
+            return
+        self._motor_status_gap_open = gap_open
+        self._last_motor_status = None if gap_open else status
+        self._last_motor_status_at = None if gap_open else status_at
+        self._last_motor_status_observed_at = observed_at
+
+    def _record_motor_status_observation_db(
+        self,
+        db: sqlite3.Connection,
+        recorded_at: str,
+        status: int,
+    ) -> bool:
+        point_time = self._parse_recorded_at(recorded_at)
+        if point_time is None:
+            return False
+        observed_time = self._last_motor_status_observed_at
+        if observed_time is not None and point_time < observed_time:
+            return False
+        observation_gap = (
+            not self._motor_status_gap_open
+            and observed_time is not None
+            and (point_time - observed_time).total_seconds()
+            > MOTOR_STATUS_OBSERVATION_GAP_SECONDS
+        )
+        if observation_gap:
+            gap_time = observed_time + timedelta(
+                seconds=MOTOR_STATUS_OBSERVATION_GAP_SECONDS
+            )
+            db.execute(
+                "INSERT OR IGNORE INTO motor_status_points(recorded_at,status) VALUES(?,NULL)",
+                (gap_time.isoformat(),),
+            )
+            self._motor_status_gap_open = True
+            self._last_motor_status = None
+            self._last_motor_status_at = None
+        last_time = self._last_motor_status_at
+        if last_time is not None and point_time < last_time:
+            return False
+        heartbeat_due = (
+            last_time is None
+            or (point_time - last_time).total_seconds() >= MOTOR_STATUS_HEARTBEAT_SECONDS
+        )
+        self._last_motor_status_observed_at = point_time
+        if self._last_motor_status == status and not heartbeat_due and not observation_gap:
+            return False
+        db.execute(
+            "INSERT OR REPLACE INTO motor_status_points(recorded_at,status) VALUES(?,?)",
+            (recorded_at, int(status)),
+        )
+        self._last_motor_status = int(status)
+        self._last_motor_status_at = point_time
+        self._motor_status_gap_open = False
+        return True
+
+    def record_motor_status_observation(
+        self,
+        recorded_at: str,
+        value: object,
+    ) -> bool:
+        """Record a B24 status independently from curve-history sampling."""
+        status = self._motor_status_code(value)
+        point_time = self._parse_recorded_at(recorded_at)
+        if status is None or point_time is None:
+            return False
+        with self.lock:
+            observed_time = self._last_motor_status_observed_at
+            observation_gap = (
+                observed_time is not None
+                and (point_time - observed_time).total_seconds()
+                > MOTOR_STATUS_OBSERVATION_GAP_SECONDS
+            )
+            heartbeat_due = (
+                self._last_motor_status_at is None
+                or (point_time - self._last_motor_status_at).total_seconds()
+                >= MOTOR_STATUS_HEARTBEAT_SECONDS
+            )
+            if (
+                observed_time is not None
+                and point_time >= observed_time
+                and not observation_gap
+                and not self._motor_status_gap_open
+                and self._last_motor_status == status
+                and not heartbeat_due
+            ):
+                self._last_motor_status_observed_at = point_time
+                return False
+            with self.database() as db:
+                return self._record_motor_status_observation_db(
+                    db,
+                    recorded_at,
+                    status,
+                )
+
+    def record_motor_status_missing(self, recorded_at: str) -> bool:
+        """Close the current status band once Block 24 has been absent for 5 s."""
+        point_time = self._parse_recorded_at(recorded_at)
+        if point_time is None:
+            return False
+        with self.lock:
+            observed_time = self._last_motor_status_observed_at
+            if (
+                observed_time is None
+                or self._motor_status_gap_open
+                or point_time <= observed_time
+                or (point_time - observed_time).total_seconds()
+                <= MOTOR_STATUS_OBSERVATION_GAP_SECONDS
+            ):
+                return False
+            gap_time = observed_time + timedelta(
+                seconds=MOTOR_STATUS_OBSERVATION_GAP_SECONDS
+            )
+            with self.database() as db:
+                db.execute(
+                    "INSERT OR IGNORE INTO motor_status_points(recorded_at,status) VALUES(?,NULL)",
+                    (gap_time.isoformat(),),
+                )
+            self._motor_status_gap_open = True
+            self._last_motor_status = None
+            self._last_motor_status_at = None
+            return True
+
+    def history_migration(self, name: str) -> dict | None:
+        db = self.connect()
+        try:
+            row = db.execute(
+                "SELECT completed_at,details_json FROM history_migrations WHERE name=?",
+                (str(name),),
+            ).fetchone()
+        finally:
+            db.close()
+        if row is None:
+            return None
+        try:
+            details = json.loads(row["details_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            details = {}
+        return {"completed_at": row["completed_at"], "details": details}
+
+    def complete_history_migration(self, name: str, details: dict) -> None:
+        with self.lock, self.database() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO history_migrations(name,completed_at,details_json) "
+                "VALUES(?,?,?)",
+                (
+                    str(name),
+                    _now(),
+                    json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+
+    def backfill_motor_status_points(
+        self,
+        stop_event: threading.Event | None = None,
+    ) -> dict:
+        """Build the compact transition/heartbeat history from old snapshots."""
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=HISTORY_RETENTION_DAYS)
+        ).isoformat()
+        source_db = self.connect()
+        source_db.execute("PRAGMA query_only=ON")
+        scanned = inserted = 0
+        complete = True
+        batch: list[tuple[str, int | None]] = []
+        last_status: int | None = None
+        last_time: datetime | None = None
+        last_source_time: datetime | None = None
+        last_source_gap_seconds: float | None = None
+
+        def flush() -> None:
+            nonlocal inserted
+            if not batch:
+                return
+            with self.lock, self.database() as target_db:
+                before = target_db.total_changes
+                target_db.executemany(
+                    "INSERT OR IGNORE INTO motor_status_points(recorded_at,status) VALUES(?,?)",
+                    batch,
+                )
+                inserted += target_db.total_changes - before
+            batch.clear()
+
+        try:
+            # Merge two already indexed streams in Python. A SQL UNION with a
+            # global ORDER BY makes SQLite sort more than a million large JSON
+            # rows into a temporary table on existing installations.
+            legacy_rows = (
+                (
+                    row["recorded_at"],
+                    row["raw"],
+                    None,
+                    MOTOR_STATUS_LEGACY_GAP_SECONDS,
+                )
+                for row in source_db.execute(
+                    "SELECT recorded_at,raw FROM measurements "
+                    "WHERE block=? AND field_key=? AND recorded_at>=? "
+                    "ORDER BY recorded_at",
+                    (MOTOR_STATUS_BLOCK, MOTOR_STATUS_KEY, cutoff),
+                )
+            )
+            snapshot_rows = (
+                (
+                    row["recorded_at"],
+                    None,
+                    row["sample_json"],
+                    MOTOR_STATUS_OBSERVATION_GAP_SECONDS,
+                )
+                for row in source_db.execute(
+                    "SELECT recorded_at,sample_json FROM history_samples "
+                    "WHERE recorded_at>=? ORDER BY recorded_at",
+                    (cutoff,),
+                )
+            )
+            status_index = HISTORY_SERIES_INDEX[(MOTOR_STATUS_BLOCK, MOTOR_STATUS_KEY)]
+            for recorded_at, value, sample_json, source_gap_seconds in heapq.merge(
+                legacy_rows,
+                snapshot_rows,
+                key=lambda item: item[0],
+            ):
+                if stop_event is not None and stop_event.is_set():
+                    complete = False
+                    break
+                scanned += 1
+                if value is None:
+                    try:
+                        sample = json.loads(sample_json)["values"][status_index]
+                        value = sample[0] if sample else None
+                        if value is None and sample:
+                            value = sample[1]
+                    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                status = self._motor_status_code(value)
+                point_time = self._parse_recorded_at(recorded_at)
+                if status is None or point_time is None:
+                    continue
+                gap_seconds = max(
+                    source_gap_seconds,
+                    last_source_gap_seconds or source_gap_seconds,
+                )
+                source_gap = (
+                    last_source_time is not None
+                    and (point_time - last_source_time).total_seconds() > gap_seconds
+                )
+                if source_gap:
+                    batch.append((
+                        (
+                            last_source_time
+                            + timedelta(seconds=gap_seconds)
+                        ).isoformat(),
+                        None,
+                    ))
+                    last_status = None
+                    last_time = None
+                heartbeat_due = (
+                    last_time is None
+                    or (point_time - last_time).total_seconds() >= MOTOR_STATUS_HEARTBEAT_SECONDS
+                )
+                if status != last_status or heartbeat_due:
+                    batch.append((str(recorded_at), status))
+                    last_status = status
+                    last_time = point_time
+                    if len(batch) >= 500:
+                        flush()
+                last_source_time = point_time
+                last_source_gap_seconds = source_gap_seconds
+            flush()
+        finally:
+            source_db.close()
+        with self.lock, self.database() as db:
+            self._reload_motor_status_cache_db(
+                db,
+                preserve_newer_observation=True,
+            )
+        return {"complete": complete, "scanned": scanned, "inserted": inserted}
+
+    def motor_status_segments(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> list[dict]:
+        """Return event-faithful status intervals while leaving outages empty."""
+        start = start.astimezone(timezone.utc)
+        end = end.astimezone(timezone.utc)
+        if end <= start:
+            return []
+        db = self.connect()
+        try:
+            previous = db.execute(
+                "SELECT recorded_at,status FROM motor_status_points "
+                "WHERE recorded_at<? ORDER BY recorded_at DESC LIMIT 1",
+                (start.isoformat(),),
+            ).fetchone()
+            rows = db.execute(
+                "SELECT recorded_at,status FROM motor_status_points "
+                "WHERE recorded_at>=? AND recorded_at<=? ORDER BY recorded_at",
+                (start.isoformat(), end.isoformat()),
+            )
+
+            def parsed_points():
+                if previous is not None:
+                    yield previous
+                yield from rows
+
+            def normalized_points():
+                for row in parsed_points():
+                    point_time = self._parse_recorded_at(row["recorded_at"])
+                    if point_time is None:
+                        continue
+                    status = (
+                        int(row["status"])
+                        if row["status"] is not None
+                        else None
+                    )
+                    yield point_time, status
+
+            iterator = iter(normalized_points())
+            current = next(iterator, None)
+            following = next(iterator, None)
+            segments: list[dict] = []
+            while current is not None:
+                point_time, status = current
+                next_time = following[0] if following is not None else None
+                next_status = following[1] if following is not None else None
+                if status is not None and not (
+                    point_time < start
+                    and (start - point_time).total_seconds() > MOTOR_STATUS_GAP_SECONDS
+                ):
+                    segment_start = max(start, point_time)
+                    if next_time is not None and next_status is None:
+                        segment_end = min(end, next_time)
+                    elif (
+                        next_time is not None
+                        and (next_time - point_time).total_seconds()
+                        <= MOTOR_STATUS_GAP_SECONDS
+                    ):
+                        segment_end = min(end, next_time)
+                    elif (
+                        next_time is None
+                        and (end - point_time).total_seconds()
+                        <= MOTOR_STATUS_GAP_SECONDS
+                    ):
+                        segment_end = end
+                    else:
+                        segment_end = min(
+                            end,
+                            point_time
+                            + timedelta(seconds=MOTOR_STATUS_HEARTBEAT_SECONDS),
+                        )
+                    if segment_end > segment_start:
+                        previous_segment = segments[-1] if segments else None
+                        if (
+                            previous_segment is not None
+                            and previous_segment["status"] == status
+                            and previous_segment["to"] == segment_start.isoformat()
+                        ):
+                            previous_segment["to"] = segment_end.isoformat()
+                        else:
+                            segments.append({
+                                "from": segment_start.isoformat(),
+                                "to": segment_end.isoformat(),
+                                "status": status,
+                            })
+                current = following
+                following = next(iterator, None)
+            return segments
+        finally:
+            db.close()
 
     def _adaptive_series_ids_db(self, db: sqlite3.Connection, rows: list[dict]) -> dict[tuple[int, str], int]:
         identities: list[tuple[int, str]] = []
@@ -1434,11 +2036,13 @@ class DachsStore:
         item["requested_count"] = item["requested_targets"]
         item["failed_count"] = item["failed_targets"]
         item["pack_revision"] = str(item.get("pack_rev") or "")
+        complete_contract_counts = {len(BACKUP_LEGACY_TARGETS), len(BACKUP_TARGETS)}
         item["ready"] = bool(
             item.get("status") == "ready"
             and item["verified"]
-            and int(item.get("target_count") or 0) == len(BACKUP_TARGETS)
-            and int(item.get("successful_count") or 0) == len(BACKUP_TARGETS)
+            and int(item.get("target_count") or 0) in complete_contract_counts
+            and int(item.get("successful_count") or 0)
+            == int(item.get("target_count") or 0)
         )
         return item
 
@@ -1698,7 +2302,7 @@ class DachsStore:
         protocol: dict,
         archive: dict,
     ) -> None:
-        """Atomically reserve one live completion with its ready 38/38 image."""
+        """Atomically reserve one live completion with its current 42/42 image."""
         now = _now()
         with self.lock, self.database() as db:
             row = db.execute(
@@ -1755,7 +2359,7 @@ class DachsStore:
                 and int(row["target_count"]) == len(BACKUP_TARGETS)
                 and int(row["successful_count"]) == len(BACKUP_TARGETS)
             ):
-                raise ValueError("Live-Abschluss benötigt ein bereites, verifiziertes 38/38-Backup")
+                raise ValueError("Live-Abschluss benötigt ein bereites, verifiziertes 42/42-Backup")
             cursor = db.execute(
                 "UPDATE maintenance_reports SET updated_at=?,fuel_type=?,protocol_json=?,status='completing' "
                 "WHERE id=? AND status='draft'",
@@ -1815,6 +2419,7 @@ class DachsStore:
         with self.lock, self.database() as db:
             db.execute("DELETE FROM measurements WHERE recorded_at < ?", (cutoff,))
             db.execute("DELETE FROM history_samples WHERE recorded_at < ?", (cutoff,))
+            db.execute("DELETE FROM motor_status_points WHERE recorded_at < ?", (cutoff,))
 
     def purge_invalid_dashboard(self) -> int:
         """Remove only known-invalid historical dashboard samples."""
@@ -1977,10 +2582,11 @@ class DachsWebApp:
         self, image: dict, *, require_current_pack: bool = False
     ) -> dict:
         context = image.get("maintenance_archive")
+        archive_version = context.get("version") if isinstance(context, dict) else None
         if (
             not isinstance(context, dict)
-            or type(context.get("version")) is not int
-            or context.get("version") != 1
+            or type(archive_version) is not int
+            or archive_version not in (1, 2)
         ):
             raise ValueError("Datei ist kein Wartungs-Backup-Archiv")
         created_by = context.get("created_by")
@@ -1992,13 +2598,17 @@ class DachsWebApp:
         ):
             raise ValueError("Wartungs-Backup besitzt keinen gebundenen Ursprung")
         inspection = self.service.inspect_backup(image)
+        target_contract = BACKUP_LEGACY_TARGETS if archive_version == 1 else BACKUP_TARGETS
+        restore_contract = set(BACKUP_RESTORE_TARGETS)
         expected_targets = [
-            {"cpu": cpu, "block": block} for cpu, block in BACKUP_TARGETS
+            {"cpu": cpu, "block": block} for cpu, block in target_contract
         ]
         if inspection.get("requested_targets") != expected_targets:
-            raise ValueError("Wartungs-Backup enthält nicht den exakten 38-Ziele-Satz")
+            raise ValueError(
+                f"Wartungs-Backup enthält nicht den exakten {len(target_contract)}-Ziele-Satz"
+            )
         if (
-            int(inspection.get("successful_blocks") or 0) != len(BACKUP_TARGETS)
+            int(inspection.get("successful_blocks") or 0) != len(target_contract)
             or int(inspection.get("failed_blocks") or 0) != 0
             or inspection.get("digest_present") is not True
             or inspection.get("digest_verified") is not True
@@ -2007,13 +2617,19 @@ class DachsWebApp:
         if require_current_pack and inspection.get("pack_compatible") is not True:
             raise ValueError("Wartungs-Backup ist nicht mit dem aktuellen Pack kompatibel")
         records = list(inspection.get("records") or [])
-        if len(records) != len(BACKUP_TARGETS):
-            raise ValueError("Wartungs-Backup enthält nicht exakt 38 Datensätze")
-        for target, record in zip(BACKUP_TARGETS, records, strict=True):
+        if len(records) != len(target_contract):
+            raise ValueError(
+                f"Wartungs-Backup enthält nicht exakt {len(target_contract)} Datensätze"
+            )
+        for target, record in zip(target_contract, records, strict=True):
             if (int(record.get("cpu", -1)), int(record.get("block", -1))) != target:
                 raise ValueError("Wartungs-Backup-Zielreihenfolge ist nicht kanonisch")
-            if not record.get("restorable"):
-                raise ValueError("Wartungs-Backup enthält einen nicht restaurierbaren Datensatz")
+            expected_restorable = target in restore_contract
+            if bool(record.get("restorable")) is not expected_restorable:
+                raise ValueError(
+                    "Wartungs-Backup besitzt einen falschen Restore-Status für "
+                    f"CPU {target[0]}, Block {target[1]}"
+                )
             if int(record.get("payload_len") or -1) != BACKUP_PAYLOAD_LENGTHS[target]:
                 raise ValueError(
                     f"Wartungs-Backup CPU {target[0]}, Block {target[1]} hat eine falsche Länge"
@@ -2114,6 +2730,9 @@ class DachsWebApp:
     ) -> dict:
         controller = dict(inspection.get("controller") or {})
         context = dict(image.get("maintenance_archive") or {})
+        requested_count = int(inspection.get("requested_blocks") or 0)
+        successful_count = int(inspection.get("successful_blocks") or 0)
+        restorable_count = int(inspection.get("restorable_blocks") or 0)
         return {
             "created_at": str(inspection.get("created_utc") or _now()),
             "created_by": str(context.get("created_by") or "recovery"),
@@ -2130,13 +2749,15 @@ class DachsWebApp:
             "schema_version": int(inspection["schema_version"]),
             "pack_rev": str((inspection.get("pack") or {}).get("revision") or ""),
             "controller_serial": str(controller["serial_number"]),
-            "target_count": len(BACKUP_TARGETS),
-            "successful_count": len(BACKUP_TARGETS),
-            "requested_targets": len(BACKUP_TARGETS),
-            "successful_targets": len(BACKUP_TARGETS),
-            "failed_targets": 0,
-            "requested_count": len(BACKUP_TARGETS),
-            "failed_count": 0,
+            "archive_contract_version": int(context.get("version") or 0),
+            "target_count": requested_count,
+            "successful_count": successful_count,
+            "restorable_count": restorable_count,
+            "requested_targets": requested_count,
+            "successful_targets": successful_count,
+            "failed_targets": max(0, requested_count - successful_count),
+            "requested_count": requested_count,
+            "failed_count": max(0, requested_count - successful_count),
             "pack_revision": str((inspection.get("pack") or {}).get("revision") or ""),
             "size_bytes": len(raw),
         }
@@ -2347,12 +2968,9 @@ class DachsWebApp:
         write_enabled = payload.get("write_enabled", False)
         if not isinstance(write_enabled, bool):
             raise ValueError("write_enabled muss true oder false sein")
-        try:
-            auth_level = int(payload.get("auth_level", API_DEFAULT_AUTH_LEVEL))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("API-Auth-Level muss eine Zahl sein") from exc
-        if not 0 <= auth_level <= 255:
-            raise ValueError("API-Auth-Level muss zwischen 0 und 255 liegen")
+        auth_level = _validated_auth_level(
+            payload.get("auth_level", API_DEFAULT_AUTH_LEVEL), "API-Auth-Level"
+        )
         return {"write_enabled": write_enabled, "auth_level": auth_level}
 
     def _load_api_settings(self) -> dict:
@@ -2400,6 +3018,20 @@ class DachsWebApp:
             if series_id in wanted
         ]
 
+    @staticmethod
+    def _derived_dashboard_fields() -> list[dict]:
+        return [
+            {
+                "source": source,
+                "label": label,
+                "block": int(block),
+                "key": key,
+                "unit": unit,
+                "derived": True,
+            }
+            for source, label, block, key, unit in DASHBOARD_DERIVED_FIELDS
+        ]
+
     def _dashboard_available_keys(self, block: int) -> set[str]:
         block = int(block)
         if block == 18 or block not in self.pack.addressable_blocks():
@@ -2422,6 +3054,11 @@ class DachsWebApp:
             keys.add(key)
         if block == 24:
             keys.add("Hka_Mw1.Temp.DachsAustritt")
+        keys.update(
+            key
+            for _source, _label, source_block, key, _unit in DASHBOARD_DERIVED_FIELDS
+            if int(source_block) == block
+        )
         return keys
 
     def _normalize_dashboard_cards(self, cards: object) -> list[dict]:
@@ -2477,6 +3114,7 @@ class DachsWebApp:
         return {
             "cards": cards,
             "default_cards": self._default_dashboard_cards(),
+            "derived_fields": self._derived_dashboard_fields(),
             "max_cards": MAX_DASHBOARD_CARDS,
             "max_extra_blocks": MAX_DASHBOARD_EXTRA_BLOCKS,
         }
@@ -2626,7 +3264,7 @@ class DachsWebApp:
                 self.sessions.pop(token, None)
 
     def _startup_maintenance(self) -> None:
-        """Clean known bad chart samples once, off the HTTP start path."""
+        """Run one-time history maintenance off the HTTP start path."""
         if self.stop_event.wait(1.0):
             return
         try:
@@ -2647,6 +3285,23 @@ class DachsWebApp:
             # Maintenance must not take down the web interface. The hourly
             # retention pass in the monitor loop remains a later retry point.
             print(f"Open Dachs Manager: Historienbereinigung fehlgeschlagen: {exc}", flush=True)
+        try:
+            if self.store.history_migration(MOTOR_STATUS_MIGRATION) is None:
+                result = self.store.backfill_motor_status_points(self.stop_event)
+                if result["complete"]:
+                    self.store.complete_history_migration(
+                        MOTOR_STATUS_MIGRATION,
+                        result,
+                    )
+                    print(
+                        "Open Dachs Manager: Motorstatus-Historie aufgebaut "
+                        f"({result['inserted']} Punkte aus {result['scanned']} Snapshots)",
+                        flush=True,
+                    )
+        except Exception as exc:
+            # A later service start retries the idempotent INSERT OR IGNORE
+            # backfill. Live transitions continue to be recorded meanwhile.
+            print(f"Open Dachs Manager: Motorstatus-Backfill fehlgeschlagen: {exc}", flush=True)
 
     def login(self, username: str, password: str) -> tuple[str, str] | None:
         for user in self._load_users():
@@ -2729,11 +3384,14 @@ class DachsWebApp:
                 self.monitor_state["connection_state"] = "verbunden" if serial_enabled else "getrennt"
                 self.monitor_state["running"] = enabled
             if not enabled:
+                with suppress(Exception):
+                    self.store.record_motor_status_missing(_now())
                 self.stop_event.wait(0.5)
                 continue
             cycle_started = time.monotonic()
             recorded_at = _now()
             rows: list[dict] = []
+            motor_status_observation: object | None = None
             ok_blocks = failed_blocks = 0
             error_text = None
             dashboard_fields = set(dashboard_cards)
@@ -2763,6 +3421,11 @@ class DachsWebApp:
                                     continue
                                 ok_blocks += 1
                                 for field in fields:
+                                    if (
+                                        block == MOTOR_STATUS_BLOCK
+                                        and field.key == MOTOR_STATUS_KEY
+                                    ):
+                                        motor_status_observation = field.raw
                                     dashboard_selected = (block, field.key) in dashboard_fields
                                     default_visible = (
                                         block in DEFAULT_MONITOR_BLOCKS
@@ -2842,6 +3505,11 @@ class DachsWebApp:
                                 failed_blocks += 1
                                 error_text = f"Block {block}: {exc}"
                 self.store.record_history_snapshot(recorded_at, rows)
+                if motor_status_observation is not None:
+                    self.store.record_motor_status_observation(
+                        recorded_at,
+                        motor_status_observation,
+                    )
                 with self.state_lock:
                     adaptive_rows = [
                         dict(row)
@@ -2862,6 +3530,11 @@ class DachsWebApp:
             except Exception as exc:
                 error_text = str(exc)
                 failed_blocks = len(DEFAULT_FAST_MONITOR_BLOCKS)
+            if motor_status_observation is None:
+                try:
+                    self.store.record_motor_status_missing(recorded_at)
+                except Exception as exc:
+                    error_text = error_text or f"Motorstatus-Historie: {exc}"
             with self.state_lock:
                 if self.serial_enabled:
                     self.monitor_state.update({
@@ -2995,6 +3668,7 @@ class DachsWebApp:
             "dashboard": {
                 "max_cards": MAX_DASHBOARD_CARDS,
                 "max_extra_blocks": MAX_DASHBOARD_EXTRA_BLOCKS,
+                "derived_fields": self._derived_dashboard_fields(),
             },
             "service_catalog": {
                 "available": bool(service_catalog["available"]),
@@ -3219,8 +3893,9 @@ class DachsWebApp:
         """Validate an ordered target selection without silent truncation.
 
         Plain integers retain the original API meaning of regulator CPU 0.
-        Target objects may additionally select block 16 on network-monitor
-        CPU 1 or 2.
+        Target objects may additionally select reviewed block 16, 20 or 21 on
+        network-monitor CPU 1 or 2. Restore callers pass a narrower available
+        set, so capture-only targets fail before any serial lease.
         """
         if not isinstance(value, list):
             raise ValueError("Blöcke müssen als Liste übergeben werden")
@@ -3233,7 +3908,9 @@ class DachsWebApp:
         }
         selectable = {(0, block) for block in mapped}
         selectable.update(
-            (cpu, NETWORK_PROTECTION_BLOCK) for cpu in NETWORK_PROTECTION_CPUS
+            (cpu, block)
+            for cpu in NETWORK_PROTECTION_CPUS
+            for block in NETWORK_PROTECTION_BACKUP_BLOCKS
         )
         allowed = selectable if available is None else selectable & set(available)
         selected: list[tuple[int, int]] = []
@@ -3267,7 +3944,8 @@ class DachsWebApp:
                 if cpu not in NETWORK_PROTECTION_CPUS:
                     raise ValueError("CPU muss 0, 1 oder 2 sein")
                 raise ValueError(
-                    f"Netzschutz CPU {cpu} unterstützt nur Block {NETWORK_PROTECTION_BLOCK}"
+                    f"Netzschutz CPU {cpu} unterstützt im Backup nur Block "
+                    f"{', '.join(str(item) for item in NETWORK_PROTECTION_BACKUP_BLOCKS)}"
                 )
             if target not in allowed:
                 raise ValueError(
@@ -3281,7 +3959,7 @@ class DachsWebApp:
 
     def _backup_target_name(self, cpu: int, block: int) -> str:
         if cpu:
-            return f"Netzschutz · Überwachungs-CPU {cpu}"
+            return network_protection_name(cpu, block)
         return self.pack.block_name(block)
 
     @staticmethod
@@ -3349,6 +4027,11 @@ class DachsWebApp:
                 inspection.get("failed_blocks")
                 if inspection.get("failed_blocks") is not None
                 else sum(not bool(record.get("ok")) for record in records)
+            ),
+            "restorable_blocks": int(
+                inspection.get("restorable_blocks")
+                if inspection.get("restorable_blocks") is not None
+                else sum(bool(record.get("restorable")) for record in records)
             ),
             "integrity": "verified" if digest_present and digest_verified else "legacy-unverified",
             "digest_present": digest_present,
@@ -3456,8 +4139,9 @@ class DachsWebApp:
         }
         selected = self._normalize_backup_blocks(blocks, available=set(records))
         if write_enabled:
-            if not 0 <= int(auth_level) <= 255:
-                raise ValueError("Hardware-Wiederherstellung benötigt ein Auth-Level von 0 bis 255")
+            auth_level = _validated_auth_level(
+                auth_level, "Auth-Level für Hardware-Wiederherstellung"
+            )
             if str(confirmation or "").strip() != BACKUP_RESTORE_CONFIRMATION:
                 raise ValueError(
                     f"Bestätigung muss exakt {BACKUP_RESTORE_CONFIRMATION!r} lauten"
@@ -3946,7 +4630,7 @@ class DachsWebApp:
         return item
 
     def create_maintenance_report(self, username: str) -> dict:
-        """Create one report and immutable 38/38 image from the same capture."""
+        """Create one report and immutable 42/42 image from the same capture."""
         with self.state_lock:
             if not self.serial_enabled:
                 raise TransportError("serielle Verbindung ist getrennt")
@@ -4076,7 +4760,7 @@ class DachsWebApp:
                 "started_at": started_at,
                 "completed_at": completed_at,
                 # Retain CPU-0 lists for old report consumers; target-aware
-                # fields are the authoritative 38-target provenance.
+                # fields are the authoritative 42-target provenance.
                 "attempted_blocks": [block for cpu, block in BACKUP_TARGETS if cpu == 0],
                 "captured_blocks": sorted(payloads),
                 "failed_blocks": failed_blocks,
@@ -4143,8 +4827,7 @@ class DachsWebApp:
             return self.maintenance_report(report_id)
         if str(confirmation).strip() != MAINTENANCE_CONFIRMATION:
             raise ValueError(f"zur Bestätigung exakt {MAINTENANCE_CONFIRMATION!r} eingeben")
-        if auth_level < 0:
-            raise ValueError("Wartungsabschluss benötigt ein Auth-Level")
+        auth_level = _validated_auth_level(auth_level, "Auth-Level für Wartungsabschluss")
         clean = validate_protocol(protocol, complete=True)
         archive_index = self.store.backup_archive_for_report(report_id)
         archive, _archive_raw, archive_image, archive_inspection = (
@@ -4153,9 +4836,14 @@ class DachsWebApp:
         self._strict_backup_archive_inspection(
             archive_image, require_current_pack=True
         )
-        if not archive.get("ready") or archive.get("pack_compatible") is not True:
+        if (
+            not archive.get("ready")
+            or archive.get("pack_compatible") is not True
+            or int(archive.get("target_count") or 0) != len(BACKUP_TARGETS)
+            or int(archive.get("successful_count") or 0) != len(BACKUP_TARGETS)
+        ):
             raise ValueError(
-                "Live-Abschluss benötigt ein bereites, verifiziertes, pack-kompatibles 38/38-Backup"
+                "Live-Abschluss benötigt ein bereites, verifiziertes, pack-kompatibles 42/42-Backup"
             )
         self.store.claim_live_maintenance_completion(report_id, clean, archive)
         claimed = True
@@ -4319,14 +5007,14 @@ class DachsWebApp:
     def write_block(self, username: str, block: int, changes: list[dict], auth_level: int, pass4: str, write_enabled: bool) -> dict:
         if not isinstance(write_enabled, bool):
             raise ValueError("write_enabled muss true oder false sein")
+        if write_enabled:
+            auth_level = _validated_auth_level(auth_level, "Auth-Level für Hardware-Schreiben")
         with self.state_lock:
             if not self.serial_enabled:
                 raise TransportError("serielle Verbindung ist getrennt")
         block = validate_block(block, writable=True)
         if not changes:
             raise ValueError("keine Änderungen übergeben")
-        if write_enabled and auth_level < 0:
-            raise ValueError("Hardware-Schreiben benötigt ein Auth-Level")
         allowlist = WriteAllowlist()
         with self.serial_lock, self.service.session() as session:
             auth = None
@@ -4373,6 +5061,8 @@ class DachsWebApp:
         """Apply CPU1/2 block-16/20 changes through the explicit write gate."""
         if not isinstance(write_enabled, bool):
             raise ValueError("write_enabled muss true oder false sein")
+        if write_enabled:
+            auth_level = _validated_auth_level(auth_level, "Auth-Level für Hardware-Schreiben")
         cpu = validate_network_cpu(cpu)
         block = validate_network_block(block)
         if not network_protection_schema(cpu, block)["writable"]:
@@ -4384,8 +5074,6 @@ class DachsWebApp:
                 raise TransportError("serielle Verbindung ist getrennt")
         if not changes:
             raise ValueError("keine Änderungen übergeben")
-        if write_enabled and auth_level < 0:
-            raise ValueError("Hardware-Schreiben benötigt ein Auth-Level")
         allowlist = WriteAllowlist()
         with self.serial_lock, self.service.session() as session:
             auth = None
@@ -4771,6 +5459,18 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                         "to": end.isoformat(),
                         "hours": duration / 3600.0,
                     })
+                if path == "/api/motor-status-history":
+                    query = parse_qs(parsed.query)
+                    start, end, duration = _history_bounds(query)
+                    return self._json({
+                        "segments": self.app.store.motor_status_segments(start, end),
+                        "from": start.isoformat(),
+                        "to": end.isoformat(),
+                        "hours": duration / 3600.0,
+                        "backfill_complete": self.app.store.history_migration(
+                            MOTOR_STATUS_MIGRATION
+                        ) is not None,
+                    })
                 if path == "/api/audit":
                     if user.get("role") != "admin":
                         return self._error(403, "admin role required")
@@ -4947,7 +5647,7 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     return
                 result = self.app.complete_maintenance(
                     user["username"], int(completion_match.group(1)), dict(payload.get("protocol") or {}),
-                    int(payload.get("auth_level", -1)), str(payload.get("pass4", "")),
+                    payload.get("auth_level", -1), str(payload.get("pass4", "")),
                     str(payload.get("confirmation", "")),
                     demo=self.app.maintenance_settings()["test_mode"],
                 )
@@ -4966,7 +5666,7 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                 block = int(path.rsplit("/", 1)[1])
                 result = self.app.write_block(
                     user["username"], block, list(payload.get("changes", [])),
-                    int(payload.get("auth_level", -1)), str(payload.get("pass4", "")), payload.get("write_enabled", False),
+                    payload.get("auth_level", -1), str(payload.get("pass4", "")), payload.get("write_enabled", False),
                 )
                 return self._json(result, status=502 if result.get("error") else 200)
             network_match = re.fullmatch(
@@ -4980,7 +5680,7 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                 result = self.app.write_network_protection(
                     user["username"], int(network_match.group(1)),
                     list(payload.get("changes", [])),
-                    int(payload.get("auth_level", -1)), str(payload.get("pass4", "")),
+                    payload.get("auth_level", -1), str(payload.get("pass4", "")),
                     payload.get("write_enabled", False),
                     block=int(network_match.group(2) or NETWORK_PROTECTION_BLOCK),
                 )

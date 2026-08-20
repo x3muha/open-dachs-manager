@@ -11,6 +11,7 @@ import sys
 import time
 
 from . import __version__
+from .auth import validate_auth_level
 from .mapping import PackRepository, WriteAllowlist, default_allowlist_path, is_reserved_key
 from .serial_worker import DEFAULT_SERIAL_WORKER_SOCKET, SerialWorkerSession
 from .service import DachsService, write_json_atomic
@@ -91,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     decoded.add_argument("--show-reserved", action="store_true")
 
     auth = commands.add_parser("auth", help="calculate PW4 and request an MSR2 auth level")
-    auth.add_argument("--level", type=int, required=True)
+    auth.add_argument("--level", type=int, required=True, help="supported MSR2 level 1..5")
     auth.add_argument("--pass4", default="")
     auth.add_argument("--show-secret", action="store_true", help="print PW4; avoid in shared logs")
 
@@ -111,7 +112,9 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--value", required=True, help="display value, or raw value with --raw")
         command.add_argument("--block", type=int, help="block containing the key (optional when key is unique)")
         command.add_argument("--raw", action="store_true", help="interpret numeric input as the stored raw value")
-        command.add_argument("--auth-level", type=int, default=-1)
+        command.add_argument(
+            "--auth-level", type=int, default=-1, help="supported MSR2 level 1..5"
+        )
         command.add_argument("--pass4", default="")
         command.add_argument("--write-enabled", action="store_true", help="permit the live write after auth and readback checks")
         command.add_argument("--allowlist", default=str(default_allowlist_path()))
@@ -127,7 +130,9 @@ def build_parser() -> argparse.ArgumentParser:
     tui = commands.add_parser("tui", help="interactive read/edit UI")
     tui.add_argument("--block", type=int, default=20)
     tui.add_argument("--all-blocks", action="store_true")
-    tui.add_argument("--auth-level", type=int, default=-1)
+    tui.add_argument(
+        "--auth-level", type=int, default=-1, help="supported MSR2 level 1..5"
+    )
     tui.add_argument("--pass4", default="")
     tui.add_argument("--write-enabled", action="store_true", help="permit hardware writes; still requires auth and readback")
     tui.add_argument("--dry-run", action="store_true", help="stage edits without writing; default unless --write-enabled is used")
@@ -322,8 +327,9 @@ def _run(args) -> int:
         return 0 if not failures else 3
 
     if args.command == "auth":
+        level = validate_auth_level(args.level, "--level")
         with service.session() as session:
-            result = service.authenticate(session, args.level, args.pass4 or None)
+            result = service.authenticate(session, level, args.pass4 or None)
         print(json.dumps(result.as_dict(args.show_secret), ensure_ascii=False, indent=2))
         return 0 if result.ok else 3
 
@@ -341,8 +347,10 @@ def _run(args) -> int:
     if args.command == "write":
         if args.write_command == "apply" and not args.write_enabled:
             raise ValueError("write apply requires --write-enabled")
-        if args.write_enabled and args.auth_level < 0:
-            raise ValueError("--write-enabled requires --auth-level")
+        if args.write_enabled:
+            args.auth_level = validate_auth_level(
+                args.auth_level, "--auth-level für Live-Schreiben"
+            )
         block_id, key, metadata = service.pack.resolve_key(args.key, args.block)
         dry_run = args.write_command == "plan" or not args.write_enabled
         validate_block(block_id, writable=not dry_run)

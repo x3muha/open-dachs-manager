@@ -6,15 +6,17 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlencode
 
 from open_dachs_manager import __version__
 from open_dachs_manager.mapping import PackRepository, WriteAllowlist
-from open_dachs_manager.auth import authenticate, calculate_pw4
+from open_dachs_manager.auth import AuthResult, authenticate, calculate_pw4
 from open_dachs_manager.service import (
     BACKUP_PAYLOAD_LENGTHS,
     BACKUP_TARGETS,
@@ -35,6 +37,7 @@ from open_dachs_manager.maintenance import (
 )
 from open_dachs_manager.web import (
     APIRequestConflictError,
+    DASHBOARD_OPERATING_HOURS_PER_START_KEY,
     DEFAULT_DASHBOARD_SERIES,
     DEFAULT_FAST_MONITOR_BLOCKS,
     DEFAULT_HISTORY_SAMPLE_INTERVAL,
@@ -118,7 +121,7 @@ class NoisySerial(FakeSerial):
 
 
 class SyntheticMaintenanceService(DachsService):
-    """Deterministic, hardware-free service for the 38-target maintenance flow."""
+    """Deterministic, hardware-free service for the 42-target maintenance flow."""
 
     def __init__(self, pack, *, failed=(), fuel_raw=8):
         super().__init__("synthetic", 19200, 0.9, pack)
@@ -518,11 +521,35 @@ class CoreTests(unittest.TestCase):
     def test_dashboard_cards_are_validated_and_persisted(self):
         with tempfile.TemporaryDirectory() as directory:
             app = DachsWebApp(data_dir=directory, interval=60)
-            defaults = app.dashboard_settings()["cards"]
+            settings = app.dashboard_settings()
+            defaults = settings["cards"]
             self.assertGreater(len(defaults), 10)
             self.assertIn({"block": 24, "key": "Hka_Mw1.Temp.sbMotor"}, defaults)
+            derived = {"block": 22, "key": DASHBOARD_OPERATING_HOURS_PER_START_KEY}
+            self.assertNotIn(derived, defaults)
+            self.assertEqual(settings["derived_fields"], [{
+                "source": "operating_hours_per_start",
+                "label": "Betriebsstunden je Start",
+                "block": 22,
+                "key": DASHBOARD_OPERATING_HOURS_PER_START_KEY,
+                "unit": "Bh/Start",
+                "derived": True,
+            }])
+            self.assertEqual(
+                app.schema()["dashboard"]["derived_fields"],
+                settings["derived_fields"],
+            )
+            self.assertFalse(any(
+                key == DASHBOARD_OPERATING_HOURS_PER_START_KEY
+                for _series_id, _title, _block, key, _unit, _color in DEFAULT_DASHBOARD_SERIES
+            ))
+            self.assertNotIn(
+                (22, DASHBOARD_OPERATING_HOURS_PER_START_KEY),
+                HISTORY_MEASUREMENT_KEYS,
+            )
 
             cards = [
+                derived,
                 {"block": 24, "key": "Hka_Mw1.sWirkleistung"},
                 {"block": 110, "key": next(iter(app._dashboard_available_keys(110)))},
             ]
@@ -536,6 +563,8 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(restarted.dashboard_settings()["cards"], cards)
             with self.assertRaises(KeyError):
                 app.set_dashboard_settings([{"block": 24, "key": "Gibt.Es.Nicht"}])
+            with self.assertRaises(KeyError):
+                app.set_dashboard_settings([{"block": 22, "key": "derived.gibt_es_nicht"}])
 
     def test_soot_filter_estimate_uses_requested_curve_and_colours(self):
         self.assertEqual(soot_filter_estimate(419)["percent"], 0)
@@ -1220,13 +1249,6 @@ class CoreTests(unittest.TestCase):
         block20_payload = bytearray(10)
         block20_payload[:10] = b"1234567890"
         block22_payload = bytearray((123456 * 3600).to_bytes(4, "little"))
-        response = Response(
-            b"",
-            None,
-            Frame("data", 4, encode_data(b"\xFE\x05", 4), payload=b"\xFE\x05"),
-            1.0,
-        )
-
         class AuthSession:
             def __init__(self):
                 self.calls = []
@@ -1243,12 +1265,44 @@ class CoreTests(unittest.TestCase):
                 self.calls.append((payload, packet))
                 return response
 
-        session = AuthSession()
-        result = authenticate(session, pack, 5)
-        self.assertEqual(result.granted_level, 5)
-        self.assertEqual(result.pw4, calculate_pw4("1234567890", 123456))
-        self.assertEqual(session.calls[0][0], bytes([0x7E]) + result.pw4.encode() + b"\x05")
-        self.assertEqual(session.calls[0][1], 4)
+        for level in (4, 5):
+            with self.subTest(level=level):
+                response_payload = bytes((0xFE, level))
+                response = Response(
+                    b"",
+                    None,
+                    Frame(
+                        "data",
+                        4,
+                        encode_data(response_payload, 4),
+                        payload=response_payload,
+                    ),
+                    1.0,
+                )
+                session = AuthSession()
+                result = authenticate(session, pack, level)
+                self.assertEqual(result.granted_level, level)
+                self.assertTrue(result.ok)
+                self.assertEqual(result.pw4, calculate_pw4("1234567890", 123456))
+                self.assertEqual(
+                    session.calls[0][0],
+                    bytes([0x7E]) + result.pw4.encode() + bytes([level]),
+                )
+                self.assertEqual(session.calls[0][1], 4)
+
+    def test_auth_rejects_out_of_range_or_coerced_levels_before_any_read(self):
+        class NoReadSession:
+            def read_block(self, *_args, **_kwargs):
+                raise AssertionError("invalid auth level reached the serial read")
+
+        for level in (0, 6, 255, 99999, True, "5", 5.0):
+            with self.subTest(level=level), self.assertRaises(ValueError):
+                authenticate(NoReadSession(), PackRepository(), level)
+
+    def test_auth_grant_must_match_requested_level_exactly(self):
+        self.assertFalse(AuthResult("test", 0, 2, 3, "0000", None).ok)
+        self.assertFalse(AuthResult("test", 0, 4, 3, "0000", None).ok)
+        self.assertTrue(AuthResult("test", 0, 3, 3, "0000", None).ok)
 
     def test_live_write_requires_stable_before_and_confirms_readback(self):
         service = DachsService("/dev/null", 19200, 0.1, PackRepository())
@@ -1763,6 +1817,56 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(rows["first"][0]["field_key"], "field.a")
             self.assertEqual(rows["second"][0]["field_key"], "field.b")
 
+    def test_history_batch_seeks_snapshot_buckets_once_and_fans_out_all_series(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = DachsStore(Path(directory) / "history.db")
+            start = datetime(2026, 8, 19, 10, 0, tzinfo=timezone.utc)
+            values_by_row = []
+            for row_index in range(4):
+                values = [
+                    [row_index * 100 + series_index, row_index + series_index / 10, 1.5]
+                    for series_index in range(len(HISTORY_SERIES))
+                ]
+                values_by_row.append((
+                    (start + timedelta(seconds=5 + row_index * 20)).isoformat(),
+                    json.dumps({"values": values}),
+                ))
+            with store.database() as db:
+                db.executemany(
+                    "INSERT INTO history_samples(recorded_at,sample_json) VALUES(?,?)",
+                    values_by_row,
+                )
+
+            statements = []
+            original_connect = store.connect
+
+            def traced_connect():
+                db = original_connect()
+                db.set_trace_callback(statements.append)
+                return db
+
+            store.connect = traced_connect
+            first = HISTORY_SERIES[0]
+            second = HISTORY_SERIES[1]
+            original_json_loads = json.loads
+            with patch("open_dachs_manager.web.json.loads", wraps=original_json_loads) as loads:
+                result = store.measurements_batch(
+                    [(first[0], first[2], first[3]), (second[0], second[2], second[3])],
+                    start,
+                    start + timedelta(seconds=80),
+                    4,
+                )
+
+            self.assertEqual([row["value"] for row in result[first[0]]], [0.0, 1.0, 2.0, 3.0])
+            self.assertEqual([row["value"] for row in result[second[0]]], [0.1, 1.1, 2.1, 3.1])
+            self.assertEqual(loads.call_count, 4)
+            snapshot_seeks = [
+                statement for statement in statements
+                if "FROM history_samples" in statement
+                and "ORDER BY recorded_at LIMIT 1" in statement
+            ]
+            self.assertEqual(len(snapshot_seeks), 4)
+
     def test_history_persists_selected_fast_blocks_as_one_snapshot_per_cycle(self):
         self.assertEqual(DEFAULT_FAST_MONITOR_BLOCKS, (22, 24))
         self.assertIn(20, DEFAULT_SLOW_MONITOR_BLOCKS)
@@ -1819,6 +1923,304 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(len(rows["hours"]), 2)
             self.assertEqual(rows["hours"][0]["field_key"], "Hka_Bd.ulBetriebssekunden")
             self.assertEqual(rows["power"][0]["field_key"], "Hka_Mw1.sWirkleistung")
+
+    def test_motor_status_history_records_transitions_and_sparse_heartbeats(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = DachsStore(Path(directory) / "history.db")
+            start = datetime(2026, 8, 20, 8, 0, tzinfo=timezone.utc)
+
+            def record(offset, status):
+                store.record_history_snapshot(
+                    (start + timedelta(seconds=offset)).isoformat(),
+                    [{
+                        "block": 24,
+                        "key": "Hka_Mw1.bMotorStatus",
+                        "label": "Motorstatus",
+                        "raw": status,
+                        "value": f"{status} (Status)",
+                        "unit": "",
+                        "rtt_ms": 1,
+                    }],
+                )
+
+            for second in range(32):
+                record(second, 16)
+            record(32, 20)
+            with store.database() as db:
+                points = db.execute(
+                    "SELECT recorded_at,status FROM motor_status_points ORDER BY recorded_at"
+                ).fetchall()
+            self.assertEqual([row["status"] for row in points], [16, 16, 20])
+            self.assertEqual(
+                [row["recorded_at"] for row in points],
+                [
+                    start.isoformat(),
+                    (start + timedelta(seconds=30)).isoformat(),
+                    (start + timedelta(seconds=32)).isoformat(),
+                ],
+            )
+            segments = store.motor_status_segments(start, start + timedelta(seconds=60))
+            self.assertEqual([segment["status"] for segment in segments], [16, 20])
+            self.assertEqual(segments[0]["to"], (start + timedelta(seconds=32)).isoformat())
+
+    def test_motor_status_observation_marks_short_recorder_outages_explicitly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = DachsStore(Path(directory) / "history.db")
+            start = datetime(2026, 8, 20, 8, 0, tzinfo=timezone.utc)
+            self.assertTrue(store.record_motor_status_observation(start.isoformat(), 35))
+            self.assertTrue(store.record_motor_status_observation(
+                (start + timedelta(seconds=10)).isoformat(),
+                35,
+            ))
+            with store.database() as db:
+                points = db.execute(
+                    "SELECT recorded_at,status FROM motor_status_points ORDER BY recorded_at"
+                ).fetchall()
+            self.assertEqual(
+                [(row["recorded_at"], row["status"]) for row in points],
+                [
+                    (start.isoformat(), 35),
+                    ((start + timedelta(seconds=5)).isoformat(), None),
+                    ((start + timedelta(seconds=10)).isoformat(), 35),
+                ],
+            )
+            segments = store.motor_status_segments(start, start + timedelta(seconds=20))
+            self.assertEqual(
+                [(item["from"], item["to"], item["status"]) for item in segments],
+                [
+                    (start.isoformat(), (start + timedelta(seconds=5)).isoformat(), 35),
+                    ((start + timedelta(seconds=10)).isoformat(), (start + timedelta(seconds=20)).isoformat(), 35),
+                ],
+            )
+
+    def test_motor_status_restart_recovers_the_last_real_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.db"
+            store = DachsStore(path)
+            start = datetime(2026, 8, 20, 8, 0, tzinfo=timezone.utc)
+
+            def snapshot(offset):
+                store.record_history_snapshot(
+                    (start + timedelta(seconds=offset)).isoformat(),
+                    [{
+                        "block": 24,
+                        "key": "Hka_Mw1.bMotorStatus",
+                        "label": "Motorstatus",
+                        "raw": 35,
+                        "value": "35 (KEINE Stellmotorbewegung)",
+                        "unit": "",
+                        "rtt_ms": 1,
+                    }],
+                )
+
+            for second in range(21):
+                snapshot(second)
+            store.record_history_snapshot(
+                (start + timedelta(seconds=20.75)).isoformat(),
+                [{
+                    "block": 22,
+                    "key": "Hka_Bd.ulBetriebssekunden",
+                    "label": "Betriebssekunden",
+                    "raw": 123,
+                    "value": 123,
+                    "unit": "s",
+                    "rtt_ms": 1,
+                }],
+            )
+            restarted = DachsStore(path)
+            self.assertFalse(restarted.record_motor_status_observation(
+                (start + timedelta(seconds=23)).isoformat(),
+                35,
+            ))
+            with restarted.database() as db:
+                points = db.execute(
+                    "SELECT recorded_at,status FROM motor_status_points ORDER BY recorded_at"
+                ).fetchall()
+            self.assertEqual(
+                [(row["recorded_at"], row["status"]) for row in points],
+                [(start.isoformat(), 35)],
+            )
+
+    def test_motor_status_current_outage_is_closed_without_waiting_for_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = DachsStore(Path(directory) / "history.db")
+            start = datetime(2026, 8, 20, 8, 0, tzinfo=timezone.utc)
+            self.assertTrue(store.record_motor_status_observation(start.isoformat(), 35))
+            self.assertFalse(store.record_motor_status_missing(
+                (start + timedelta(seconds=5)).isoformat()
+            ))
+            self.assertTrue(store.record_motor_status_missing(
+                (start + timedelta(seconds=6)).isoformat()
+            ))
+            self.assertFalse(store.record_motor_status_missing(
+                (start + timedelta(seconds=20)).isoformat()
+            ))
+            with store.database() as db:
+                points = db.execute(
+                    "SELECT recorded_at,status FROM motor_status_points ORDER BY recorded_at"
+                ).fetchall()
+            self.assertEqual(
+                [(row["recorded_at"], row["status"]) for row in points],
+                [
+                    (start.isoformat(), 35),
+                    ((start + timedelta(seconds=5)).isoformat(), None),
+                ],
+            )
+            self.assertEqual(
+                store.motor_status_segments(start, start + timedelta(seconds=20)),
+                [{
+                    "from": start.isoformat(),
+                    "to": (start + timedelta(seconds=5)).isoformat(),
+                    "status": 35,
+                }],
+            )
+
+    def test_motor_status_backfill_completion_is_bound_to_its_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_path = Path(directory) / "first.db"
+            first = DachsStore(first_path)
+            self.assertIsNone(first.history_migration("motor-status-v1"))
+            first.complete_history_migration("motor-status-v1", {"inserted": 12})
+            self.assertEqual(
+                DachsStore(first_path).history_migration("motor-status-v1")["details"],
+                {"inserted": 12},
+            )
+            second = DachsStore(Path(directory) / "restored.db")
+            self.assertIsNone(second.history_migration("motor-status-v1"))
+
+    def test_motor_status_segments_leave_recording_outages_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = DachsStore(Path(directory) / "history.db")
+            start = datetime(2026, 8, 20, 8, 0, tzinfo=timezone.utc)
+            with store.database() as db:
+                db.executemany(
+                    "INSERT INTO motor_status_points(recorded_at,status) VALUES(?,?)",
+                    [
+                        (start.isoformat(), 35),
+                        ((start + timedelta(seconds=30)).isoformat(), 35),
+                        ((start + timedelta(seconds=300)).isoformat(), 35),
+                    ],
+                )
+            segments = store.motor_status_segments(start, start + timedelta(seconds=330))
+            self.assertEqual([segment["status"] for segment in segments], [35, 35])
+            self.assertEqual(segments[0]["to"], (start + timedelta(seconds=60)).isoformat())
+            self.assertEqual(segments[1]["from"], (start + timedelta(seconds=300)).isoformat())
+
+    def test_motor_status_backfill_keeps_every_short_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = DachsStore(Path(directory) / "history.db")
+            start = datetime.now(timezone.utc) - timedelta(hours=1)
+            status_index = next(
+                index
+                for index, item in enumerate(HISTORY_SERIES)
+                if item[2:4] == (24, "Hka_Mw1.bMotorStatus")
+            )
+            snapshots = []
+            for offset, status in enumerate((16, 20, 21, 22, 35)):
+                values = [None] * len(HISTORY_SERIES)
+                values[status_index] = [status, f"{status} (Status)", 1]
+                snapshots.append((
+                    (start + timedelta(milliseconds=750 * offset)).isoformat(),
+                    json.dumps({"version": 1, "values": values}),
+                ))
+            with store.database() as db:
+                db.executemany(
+                    "INSERT INTO history_samples(recorded_at,sample_json) VALUES(?,?)",
+                    snapshots,
+                )
+
+            result = store.backfill_motor_status_points()
+
+            self.assertTrue(result["complete"])
+            self.assertEqual(result["scanned"], 5)
+            with store.database() as db:
+                statuses = [
+                    row["status"]
+                    for row in db.execute(
+                        "SELECT status FROM motor_status_points ORDER BY recorded_at"
+                    )
+                ]
+            self.assertEqual(statuses, [16, 20, 21, 22, 35])
+            self.assertFalse(store.record_motor_status_observation(
+                (start + timedelta(seconds=4)).isoformat(),
+                35,
+            ))
+
+    def test_motor_status_backfill_preserves_a_newer_in_memory_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = DachsStore(Path(directory) / "history.db")
+            start = datetime.now(timezone.utc) - timedelta(hours=1)
+            self.assertTrue(store.record_motor_status_observation(start.isoformat(), 35))
+            self.assertFalse(store.record_motor_status_observation(
+                (start + timedelta(seconds=3)).isoformat(),
+                35,
+            ))
+
+            result = store.backfill_motor_status_points()
+
+            self.assertTrue(result["complete"])
+            self.assertFalse(store.record_motor_status_observation(
+                (start + timedelta(seconds=7)).isoformat(),
+                35,
+            ))
+            with store.database() as db:
+                points = db.execute(
+                    "SELECT recorded_at,status FROM motor_status_points ORDER BY recorded_at"
+                ).fetchall()
+            self.assertEqual(
+                [(row["recorded_at"], row["status"]) for row in points],
+                [(start.isoformat(), 35)],
+            )
+
+    def test_motor_status_history_endpoint_is_authenticated_and_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            init_users(
+                directory,
+                admin_password="AdminPasswort123",
+                guest_password="GastPasswort123",
+            )
+            app = DachsWebApp(data_dir=directory, interval=60)
+            token = app.login("gast", "GastPasswort123")[0]
+            start = datetime.now(timezone.utc) - timedelta(minutes=5)
+            with app.store.database() as db:
+                db.executemany(
+                    "INSERT INTO motor_status_points(recorded_at,status) VALUES(?,?)",
+                    [
+                        (start.isoformat(), 20),
+                        ((start + timedelta(seconds=5)).isoformat(), 21),
+                        ((start + timedelta(seconds=10)).isoformat(), 22),
+                    ],
+                )
+            server = DachsHTTPServer(("127.0.0.1", 0), app)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            path = "/api/motor-status-history?" + urlencode({
+                "from": start.isoformat(),
+                "to": (start + timedelta(seconds=20)).isoformat(),
+            })
+
+            def request(cookie=None):
+                connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+                headers = {"Cookie": f"open_dachs_session={cookie}"} if cookie else {}
+                connection.request("GET", path, headers=headers)
+                response = connection.getresponse()
+                payload = json.loads(response.read().decode("utf-8"))
+                connection.close()
+                return response.status, payload
+
+            try:
+                self.assertEqual(request()[0], 401)
+                status, payload = request(token)
+                self.assertEqual(status, 200)
+                self.assertEqual(
+                    [segment["status"] for segment in payload["segments"]],
+                    [20, 21, 22],
+                )
+                self.assertFalse(payload["backfill_complete"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
 
     def test_adaptive_history_keeps_motor_window_and_rolls_idle_data(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1881,8 +2283,9 @@ class CoreTests(unittest.TestCase):
             principal = app.store.authenticate_api_token(created["token"])
             self.assertEqual(principal["name"], "EDOMI Heizung")
             self.assertFalse(app.api_settings()["write_enabled"])
-            enabled = app.set_api_settings({"write_enabled": True, "auth_level": 4})
+            enabled = app.set_api_settings({"write_enabled": True, "auth_level": 5})
             self.assertTrue(enabled["write_enabled"])
+            self.assertEqual(enabled["auth_level"], 5)
             app.store.update_api_token(created["id"], scopes=["read"], enabled=False)
             self.assertIsNone(app.store.authenticate_api_token(created["token"]))
             app.store.delete_api_token(created["id"])
@@ -2310,13 +2713,14 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(item["fuel_type"], "oil")
             self.assertEqual(item["protocol"]["fuel_type"], "oil")
             self.assertEqual(len(item["report"]["blocks"]), len(BACKUP_TARGETS))
-            self.assertEqual(len(item["snapshot"]["captured_targets"]), 38)
+            self.assertEqual(len(item["snapshot"]["captured_targets"]), 42)
             self.assertEqual(item["snapshot"]["failed_blocks"], [])
             self.assertTrue(item["snapshot"]["complete"])
             archive = item["backup_archive"]
             self.assertTrue(archive["ready"])
             self.assertTrue(archive["verified"])
-            self.assertEqual(archive["successful_targets"], 38)
+            self.assertEqual(archive["successful_targets"], 42)
+            self.assertEqual(archive["restorable_count"], 38)
             archive_path = Path(directory) / "backup-archive" / archive["filename"]
             self.assertEqual(archive_path.stat().st_mode & 0o777, 0o600)
 
@@ -2372,9 +2776,11 @@ class CoreTests(unittest.TestCase):
             protocol["checklist"]["geraeusch"] = "corrected"
             protocol["checklist"]["kabelbaum"] = "no"
             result = app.complete_maintenance(
-                "admin", report["id"], protocol, 4, "1234", MAINTENANCE_CONFIRMATION,
+                "admin", report["id"], protocol, 5, "1234", MAINTENANCE_CONFIRMATION,
             )
             self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["completion"]["auth_level_requested"], 5)
+            self.assertEqual(result["completion"]["auth_level_granted"], 5)
             self.assertEqual([item[0] for item in app.service.writes], [100, 104])
             self.assertEqual(app.service.reads.count((0, 100)), 2)
             self.assertEqual(app.service.reads.count((0, 104)), 2)
