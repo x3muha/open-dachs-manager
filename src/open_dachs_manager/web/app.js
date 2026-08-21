@@ -287,10 +287,16 @@ function seriesValue(id) {
 }
 
 const SENSOR_SERIES = new Set(["dachs_austritt", "dachs_eintritt", "vorlauf", "ruecklauf", "kuehlwasser", "regler", "abgas_motor", "kapsel", "abgas_hka"]);
+const NUMERIC_SENSOR_SERIES = new Set([...SENSOR_SERIES, "drehzahl", "wirkleistung"]);
 const INVALID_SENSOR_VALUES = new Set([-1, 0, 90, 127, 255]);
 
 function isInvalidSensor(seriesId, row) {
   if (!row) return false;
+  // Status, message and counter rows may deliberately contain human-readable
+  // choices, for example "35 (KEINE Stellmotorbewegung)" or
+  // "Kein aktiver Servicecode".  Only series with explicit sensor/range
+  // rules belong in this numeric validity filter.
+  if (!NUMERIC_SENSOR_SERIES.has(seriesId)) return false;
   const value = numeric(row.value);
   if (value === null) return true;
   if (SENSOR_SERIES.has(seriesId) && INVALID_SENSOR_VALUES.has(value)) return true;
@@ -447,20 +453,22 @@ function operatingHoursPerStartDetail() {
   return `<div class="detail-item detail-item-derived"><div class="detail-label">Betriebsstunden je Start</div><div class="detail-value">${escapeHtml(value)}</div></div>`;
 }
 
+function dashboardCardHtml(card) {
+  const field = dashboardField(card.block, card.key);
+  if (field?.derived === true && field?.source === "operating_hours_per_start") {
+    return operatingHoursPerStartCard();
+  }
+  const row = dashboardRow(card.block, card.key);
+  const knownSeries = (state.schema?.series || []).find((item) => Number(item.block) === Number(card.block) && item.key === card.key);
+  const invalid = knownSeries && isInvalidSensor(knownSeries.id, row);
+  const label = field?.label || card.key;
+  const value = row && !invalid ? formatValue(row.value, row.unit || field?.unit || "") : "—";
+  return `<article class="metric-card"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${value}</div><div class="metric-extra">Block ${escapeHtml(card.block)} · ${row && !invalid ? escapeHtml(row.recorded_at) : "wartet auf Messung"}</div></article>`;
+}
+
 function renderOverview() {
   const cards = dashboardCards();
-  const configuredCards = cards.map((card) => {
-    const field = dashboardField(card.block, card.key);
-    if (field?.derived === true && field?.source === "operating_hours_per_start") {
-      return operatingHoursPerStartCard();
-    }
-    const row = dashboardRow(card.block, card.key);
-    const knownSeries = (state.schema?.series || []).find((item) => Number(item.block) === Number(card.block) && item.key === card.key);
-    const invalid = knownSeries && isInvalidSensor(knownSeries.id, row);
-    const label = field?.label || card.key;
-    const value = row && !invalid ? formatValue(row.value, row.unit || field?.unit || "") : "—";
-    return `<article class="metric-card"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${value}</div><div class="metric-extra">Block ${escapeHtml(card.block)} · ${row && !invalid ? escapeHtml(row.recorded_at) : "wartet auf Messung"}</div></article>`;
-  }).join("");
+  const configuredCards = cards.map(dashboardCardHtml).join("");
   $("overviewCards").innerHTML = configuredCards || `<article class="metric-card metric-card-empty"><div class="metric-label">Keine Kacheln ausgewählt</div><div class="metric-extra">Als Admin über „Bearbeiten“ Werte hinzufügen.</div></article>`;
   const motor = ["motorstatus", "drehzahl", "wirkleistung", "betriebsstunden", "kuehlwasser", "regler"].map((id) => seriesValue(id)).filter((row, index) => row && !isInvalidSensor(["motorstatus", "drehzahl", "wirkleistung", "betriebsstunden", "kuehlwasser", "regler"][index], row));
   const motorCards = motor.map((row) => `<div class="detail-item"><div class="detail-label">${escapeHtml(row.label)}</div><div class="detail-value">${formatValue(row.value, row.unit)}</div></div>`);

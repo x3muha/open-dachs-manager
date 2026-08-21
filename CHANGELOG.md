@@ -1,5 +1,17 @@
 # Änderungsverlauf
 
+## V3 1.6.3 - 2026-08-21
+
+- Frei gewählte Kacheln für Motorstatus und aktuellen Fehlercode zeigen ihre
+  vorhandenen Klartexte jetzt zuverlässig an. Gültige Zustände wie
+  `35 (KEINE Stellmotorbewegung)` und `Kein aktiver Servicecode` werden nicht
+  länger fälschlich als ausstehende Messung dargestellt.
+- Die zahlenbasierte Plausibilitätsprüfung gilt nur noch für Messreihen mit
+  ausdrücklich hinterlegten Sensor- oder Bereichsgrenzen. Deren bisherige
+  Grenz- und Sentinelprüfung bleibt unverändert wirksam.
+- Die Korrektur betrifft ausschließlich die Darstellung vorhandener Werte. Sie
+  erzeugt keinen zusätzlichen seriellen Lesevorgang und keine Schreibaktion.
+
 ## V3 1.6.2 - 2026-08-20
 
 - Die Überwachung besitzt ein viertes, schmales Motorstatusdiagramm aus dem

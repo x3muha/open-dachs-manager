@@ -1,9 +1,9 @@
-# Open Dachs Manager · V3 1.6.2
+# Open Dachs Manager · V3 1.6.3
 
 Lokale Bedienung, Überwachung und Wartungsdokumentation für Dachs-Anlagen mit
 MSR2-Regler – über die optische serielle Schnittstelle und ohne Cloud-Zwang.
 
-> **Projektstatus: Version 1.6.2.** Lesen, Dekodieren, Wartungs-Testmodus und der
+> **Projektstatus: Version 1.6.3.** Lesen, Dekodieren, Wartungs-Testmodus und der
 > zentrale Serialworker sind an einer Anlage praktisch erprobt. Ein echter
 > Schreibvorgang erfordert immer die ausdrückliche Schreibfreigabe,
 > Authentifizierung, eine positive Antwort und die anschließende Rückleseprüfung.

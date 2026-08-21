@@ -23,7 +23,7 @@ class RepositoryLayoutTests(unittest.TestCase):
             project["tool"]["setuptools"]["dynamic"]["version"],
             {"attr": "open_dachs_manager.__version__"},
         )
-        self.assertEqual(__version__, "1.6.2")
+        self.assertEqual(__version__, "1.6.3")
         self.assertEqual(DachsRequestHandler.server_version, f"OpenDachsManager/{__version__}")
         scripts = project["project"]["scripts"]
         self.assertEqual(scripts["open-dachs"], "open_dachs_manager.cli:main")
@@ -239,11 +239,16 @@ class RepositoryLayoutTests(unittest.TestCase):
         self.assertIn("function operatingHoursPerStartCard()", ratio)
         self.assertIn("function operatingHoursPerStartDetail()", ratio)
 
+        card_start = app.index("function dashboardCardHtml(card)")
+        card_end = app.index("\nfunction renderOverview()", card_start)
+        card = app[card_start:card_end]
+        self.assertIn('field?.source === "operating_hours_per_start"', card)
+        self.assertIn("return operatingHoursPerStartCard();", card)
+
         overview_start = app.index("function renderOverview()")
         overview_end = app.index("\nfunction allDashboardFields()", overview_start)
         overview = app[overview_start:overview_end]
-        self.assertIn('field?.source === "operating_hours_per_start"', overview)
-        self.assertIn("return operatingHoursPerStartCard();", overview)
+        self.assertIn('cards.map(dashboardCardHtml).join("")', overview)
         self.assertIn("motorCards.push(operatingHoursPerStartDetail());", overview)
         self.assertNotIn("operatingHoursPerStartCard() + configuredCards", overview)
         self.assertIn("for (const field of dashboardDerivedFields()) add(field);", app)

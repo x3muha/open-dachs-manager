@@ -1,69 +1,175 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="560" viewBox="0 0 1280 560" role="img" aria-labelledby="title desc">
-  <title id="title">Architektur des Open Dachs Manager</title>
-  <desc id="desc">Weboberfläche, CLI und TUI teilen sich über eine FIFO-Warteschlange einen zentralen seriellen Worker. Messwerte und Wartungsberichte werden lokal gespeichert.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="780" viewBox="0 0 1200 780" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="title desc">
+  <title id="title">Open Dachs Manager – lokale Systemarchitektur</title>
+  <desc id="desc">Webbrowser und API-Clients greifen über den Webdienst zu. Webdienst, CLI und TUI senden ein lokales JSON-Protokoll über Unix-Socket und FIFO an den zentralen Serialworker. Nur dieser öffnet den optischen USB-Lesekopf zum Dachs MSR2. Historie, Audit, Berichte, Konfiguration und Backups bleiben lokal.</desc>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#eef5f3"/>
-      <stop offset="1" stop-color="#e6ecef"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
-      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#183632" flood-opacity=".13"/>
-    </filter>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#168a75"/>
+    <marker id="arrow-blue" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 1 11 6 1 11Z" fill="#2563eb"/>
     </marker>
+    <marker id="arrow-indigo" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 1 11 6 1 11Z" fill="#4f46e5"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 1 11 6 1 11Z" fill="#059669"/>
+    </marker>
+    <marker id="arrow-orange" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 1 11 6 1 11Z" fill="#c2410c"/>
+    </marker>
+    <style>
+      text {
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .page-title { fill: #0f172a; font-size: 30px; font-weight: 760; }
+      .page-copy { fill: #52627a; font-size: 16px; }
+      .badge-copy { fill: #1e3a8a; font-size: 12px; font-weight: 760; letter-spacing: 1.1px; }
+      .zone { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; }
+      .zone-host { fill: #f8faff; stroke: #a5b4fc; }
+      .zone-plant { fill: #fffdf5; stroke: #f6c453; }
+      .zone-title { fill: #334155; font-size: 13px; font-weight: 780; letter-spacing: 1.45px; }
+      .zone-copy { fill: #64748b; font-size: 13px; }
+      .node { stroke-width: 1.7; }
+      .input { fill: #eff6ff; stroke: #60a5fa; }
+      .process { fill: #eef2ff; stroke: #818cf8; }
+      .queue { fill: #0f766e; stroke: #115e59; }
+      .storage { fill: #ecfdf5; stroke: #34d399; }
+      .external { fill: #fff7ed; stroke: #fb923c; }
+      .controller { fill: #fffbeb; stroke: #f59e0b; }
+      .service-zone { fill: #ffffff; stroke: #a5b4fc; stroke-width: 1.5; stroke-dasharray: 7 6; }
+      .node-kicker { font-size: 11px; font-weight: 780; letter-spacing: 1.1px; }
+      .node-title { fill: #0f172a; font-size: 19px; font-weight: 760; }
+      .node-copy { fill: #52627a; font-size: 14px; }
+      .node-copy-light { fill: #d1fae5; font-size: 14px; }
+      .node-title-light { fill: #ffffff; font-size: 19px; font-weight: 760; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+      .edge { fill: none; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2.5; }
+      .edge-blue { stroke: #2563eb; marker-end: url(#arrow-blue); }
+      .edge-indigo { stroke: #4f46e5; marker-end: url(#arrow-indigo); }
+      .edge-green { stroke: #059669; marker-end: url(#arrow-green); stroke-dasharray: 6 5; }
+      .edge-orange { stroke: #c2410c; marker-end: url(#arrow-orange); }
+      .edge-label-bg { fill: #ffffff; stroke: #e2e8f0; stroke-width: 1; }
+      .edge-label { font-size: 11px; font-weight: 760; letter-spacing: .6px; }
+      .safety { fill: #fff7ed; stroke: #fdba74; stroke-width: 1.7; }
+      .safety-title { fill: #9a3412; font-size: 12px; font-weight: 800; letter-spacing: 1.25px; }
+      .safety-flow { fill: #431407; font-size: 16px; font-weight: 690; }
+      .safety-copy { fill: #9a3412; font-size: 13px; }
+      .footer { fill: #64748b; font-size: 12px; }
+    </style>
   </defs>
-  <rect width="1280" height="560" rx="26" fill="url(#bg)"/>
-  <text x="54" y="58" font-family="Inter,Arial,sans-serif" font-size="30" font-weight="700" fill="#19272b">Eine serielle Verbindung – mehrere Oberflächen</text>
-  <text x="54" y="88" font-family="Inter,Arial,sans-serif" font-size="16" fill="#687980">Alle Zugriffe laufen geordnet und vollständig nachvollziehbar durch denselben Worker.</text>
 
-  <g filter="url(#shadow)" font-family="Inter,Arial,sans-serif">
-    <rect x="54" y="130" width="205" height="74" rx="13" fill="#fff" stroke="#cbd8d6"/>
-    <circle cx="91" cy="167" r="18" fill="#d7f0e9"/>
-    <path d="M82 167h18M91 158v18" stroke="#168a75" stroke-width="3" stroke-linecap="round"/>
-    <text x="122" y="162" font-size="19" font-weight="700" fill="#19272b">Web</text>
-    <text x="122" y="184" font-size="13" fill="#687980">Dashboard &amp; Wartung</text>
+  <rect x="1" y="1" width="1198" height="778" rx="22" fill="#f8fafc" stroke="#e2e8f0" stroke-width="2"/>
+  <text class="page-title" x="36" y="49">Open Dachs Manager – lokale Systemarchitektur</text>
+  <text class="page-copy" x="36" y="79">Ein zentraler Serialworker ordnet alle Zugriffe. Kein Bedienclient öffnet den Adapter direkt.</text>
+  <rect x="936" y="31" width="228" height="42" rx="21" fill="#dbeafe" stroke="#93c5fd"/>
+  <text class="badge-copy" x="1050" y="57" text-anchor="middle">LOKAL · SERIELL · CLOUD-FREI</text>
 
-    <rect x="54" y="218" width="205" height="74" rx="13" fill="#fff" stroke="#cbd8d6"/>
-    <circle cx="91" cy="255" r="18" fill="#d7f0e9"/>
-    <text x="79" y="261" font-size="17" font-weight="700" fill="#168a75">&gt;_</text>
-    <text x="122" y="250" font-size="19" font-weight="700" fill="#19272b">CLI</text>
-    <text x="122" y="272" font-size="13" fill="#687980">Lesen &amp; Backups</text>
+  <!-- Trust zones. -->
+  <rect class="zone" x="24" y="120" width="220" height="480" rx="18"/>
+  <rect class="zone zone-host" x="264" y="120" width="690" height="480" rx="18"/>
+  <rect class="zone zone-plant" x="974" y="120" width="202" height="480" rx="18"/>
 
-    <rect x="54" y="306" width="205" height="74" rx="13" fill="#fff" stroke="#cbd8d6"/>
-    <circle cx="91" cy="343" r="18" fill="#d7f0e9"/>
-    <rect x="80" y="333" width="22" height="18" rx="2" fill="none" stroke="#168a75" stroke-width="2"/>
-    <text x="122" y="338" font-size="19" font-weight="700" fill="#19272b">TUI</text>
-    <text x="122" y="360" font-size="13" fill="#687980">Bedienung im Terminal</text>
+  <text class="zone-title" x="44" y="149">LOKALES NETZWERK</text>
+  <text class="zone-copy" x="44" y="172">Bedienung und Integrationen</text>
+  <text class="zone-title" x="288" y="149">LINUX-HOST / RASPBERRY PI · SYSTEMD</text>
+  <text class="zone-copy" x="288" y="172">Open Dachs Manager auf DachsCLI</text>
+  <text class="zone-title" x="994" y="149">DACHS-ANLAGE</text>
+  <text class="zone-copy" x="994" y="172">physischer Zugriff</text>
 
-    <rect x="345" y="190" width="225" height="130" rx="17" fill="#164f46"/>
-    <text x="458" y="226" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="2" fill="#8bd6c5">UNIX-SOCKET</text>
-    <text x="458" y="260" text-anchor="middle" font-size="24" font-weight="700" fill="#fff">FIFO-Warteschlange</text>
-    <text x="458" y="289" text-anchor="middle" font-size="14" fill="#d7f0e9">Jede Sitzung bleibt atomar</text>
+  <!-- Serial service boundary. -->
+  <rect class="service-zone" x="535" y="180" width="395" height="390" rx="16"/>
+  <text class="zone-title" x="557" y="209" fill="#4f46e5">OPEN-DACHS-MANAGER-SERIAL.SERVICE</text>
 
-    <rect x="655" y="190" width="225" height="130" rx="17" fill="#fff" stroke="#cbd8d6"/>
-    <text x="768" y="229" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="2" fill="#687980">EINZIGER ADAPTERZUGRIFF</text>
-    <text x="768" y="263" text-anchor="middle" font-size="24" font-weight="700" fill="#19272b">Serialworker</text>
-    <text x="768" y="291" text-anchor="middle" font-size="14" fill="#687980">CRC · ACK · Readback</text>
-
-    <rect x="965" y="190" width="260" height="130" rx="17" fill="#fff" stroke="#cbd8d6"/>
-    <text x="1095" y="229" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="2" fill="#687980">OPTISCH · RS232/USB</text>
-    <text x="1095" y="263" text-anchor="middle" font-size="24" font-weight="700" fill="#19272b">Dachs MSR2</text>
-    <text x="1095" y="291" text-anchor="middle" font-size="14" fill="#687980">Regler + Netzschutz-CPUs</text>
-
-    <rect x="345" y="414" width="535" height="92" rx="17" fill="#fff" stroke="#cbd8d6"/>
-    <text x="374" y="448" font-size="13" font-weight="700" letter-spacing="2" fill="#168a75">LOKAL AUF DEM PI</text>
-    <text x="374" y="478" font-size="21" font-weight="700" fill="#19272b">SQLite · Messwerte · Audit · Wartungsberichte</text>
-    <path d="M827 445h18v34h-18M799 452h20v27h-20M771 462h20v17h-20" fill="#d7f0e9" stroke="#168a75" stroke-width="2"/>
+  <!-- Connectors are intentionally drawn before nodes. -->
+  <g>
+    <path class="edge edge-blue" d="M224 247 H292"/>
+    <path class="edge edge-blue" d="M224 397 H252 V286 H292"/>
+    <path class="edge edge-indigo" d="M512 252 H557"/>
+    <path class="edge edge-indigo" d="M512 400 H528 V350 H557"/>
+    <path class="edge edge-indigo" d="M717 310 H744"/>
+    <path class="edge edge-green" d="M310 315 V330 H278 V522 H292"/>
+    <path class="edge edge-orange" d="M909 310 H994"/>
+    <path class="edge edge-orange" d="M1075 345 V415"/>
   </g>
 
-  <g fill="none" stroke="#168a75" stroke-width="4" marker-end="url(#arrow)">
-    <path d="M259 167 C305 167 306 221 345 221"/>
-    <path d="M259 255 H345"/>
-    <path d="M259 343 C305 343 306 289 345 289"/>
-    <path d="M570 255 H655"/>
-    <path d="M880 255 H965"/>
-    <path d="M768 320 V414"/>
-  </g>
-  <text x="925" y="244" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="700" fill="#168a75">SERIELL</text>
+  <!-- Connector labels. -->
+  <rect class="edge-label-bg" x="229" y="221" width="58" height="21" rx="10"/>
+  <text class="edge-label" x="258" y="236" text-anchor="middle" fill="#2563eb">HTTP :8084</text>
+  <rect class="edge-label-bg" x="230" y="309" width="58" height="21" rx="10"/>
+  <text class="edge-label" x="259" y="324" text-anchor="middle" fill="#2563eb">/API/V1</text>
+  <rect class="edge-label-bg" x="916" y="282" width="74" height="21" rx="10"/>
+  <text class="edge-label" x="953" y="297" text-anchor="middle" fill="#c2410c">EXKLUSIV</text>
+  <rect class="edge-label-bg" x="1043" y="371" width="64" height="21" rx="10"/>
+  <text class="edge-label" x="1075" y="386" text-anchor="middle" fill="#c2410c">OPTISCH</text>
+
+  <!-- Network clients. -->
+  <rect class="node input" x="44" y="195" width="180" height="105" rx="13"/>
+  <text class="node-kicker" x="64" y="222" fill="#2563eb">SESSION / ROLLE</text>
+  <text class="node-title" x="64" y="250">Webbrowser</text>
+  <text class="node-copy" x="64" y="276">Bedienung · Monitoring</text>
+
+  <rect class="node input" x="44" y="335" width="180" height="120" rx="13"/>
+  <text class="node-kicker" x="64" y="362" fill="#2563eb">BEARER-TOKEN</text>
+  <text class="node-title" x="64" y="390">EDOMI / API</text>
+  <text class="node-copy" x="64" y="416">Scopes: read · history</text>
+  <text class="node-copy" x="64" y="438">write nur mit Freigabe</text>
+
+  <!-- Web, terminal and local persistence. -->
+  <rect class="node process" x="292" y="190" width="220" height="125" rx="14"/>
+  <text class="node-kicker" x="316" y="218" fill="#4f46e5">WEB-SERVICE</text>
+  <text class="node-title" x="316" y="248">Weboberfläche / API</text>
+  <text class="node-copy" x="316" y="274">UI · REST · Monitorloop</text>
+  <text class="node-copy mono" x="316" y="297">0.0.0.0:8084</text>
+
+  <rect class="node process" x="292" y="350" width="220" height="100" rx="14"/>
+  <text class="node-kicker" x="316" y="377" fill="#4f46e5">TERMINAL</text>
+  <text class="node-title" x="316" y="405">CLI / TUI</text>
+  <text class="node-copy" x="316" y="430">Diagnose · Backup · Dry-Run</text>
+
+  <rect class="node storage" x="292" y="460" width="220" height="120" rx="14"/>
+  <text class="node-kicker" x="316" y="484" fill="#047857">LOKALE DATEN</text>
+  <text class="node-title" x="316" y="510">SQLite + Dateien</text>
+  <text class="node-copy" x="316" y="536">Historie · Audit · Berichte</text>
+  <text class="node-copy" x="316" y="553">Konfiguration · Backups</text>
+
+  <!-- One serial service: queue plus the only adapter owner. -->
+  <text class="edge-label" x="637" y="226" text-anchor="middle" fill="#4f46e5">LOKALES JSON-PROTOKOLL</text>
+  <rect class="node queue" x="557" y="235" width="160" height="150" rx="14"/>
+  <text class="node-kicker" x="637" y="263" text-anchor="middle" fill="#d1fae5">UNIX-SOCKET + FIFO</text>
+  <text class="node-title-light" x="637" y="294" text-anchor="middle">Warteschlange</text>
+  <text class="node-copy-light" x="637" y="322" text-anchor="middle">1 Verbindung =</text>
+  <text class="node-copy-light" x="637" y="344" text-anchor="middle">1 atomare Sitzung</text>
+  <text class="node-copy-light mono" x="637" y="369" text-anchor="middle">serial.sock</text>
+
+  <rect class="node process" x="744" y="235" width="165" height="150" rx="14"/>
+  <text class="node-kicker" x="826.5" y="263" text-anchor="middle" fill="#4f46e5">GERÄTEBESITZER</text>
+  <text class="node-title" x="826.5" y="294" text-anchor="middle">Serialworker</text>
+  <text class="node-copy" x="826.5" y="322" text-anchor="middle">öffnet allein den Adapter</text>
+  <text class="node-copy" x="826.5" y="346" text-anchor="middle">Frames · CRC</text>
+  <text class="node-copy mono" x="826.5" y="370" text-anchor="middle">19200 · 8N1</text>
+
+  <text class="zone-copy" x="557" y="438">FIFO verhindert überlappende Telegramme.</text>
+  <text class="zone-copy" x="557" y="463">Antworten laufen über dieselbe Sitzung zurück.</text>
+  <text class="zone-copy mono" x="557" y="506">/run/open-dachs-manager/serial.sock</text>
+  <text class="zone-copy" x="557" y="535">Nur der Worker öffnet das serielle Gerät.</text>
+
+  <!-- Physical serial path. -->
+  <rect class="node external" x="994" y="210" width="162" height="135" rx="14"/>
+  <text class="node-kicker" x="1075" y="238" text-anchor="middle" fill="#c2410c">USB / SERIELL</text>
+  <text class="node-title" x="1075" y="270" text-anchor="middle">Optischer</text>
+  <text class="node-title" x="1075" y="294" text-anchor="middle">Lesekopf</text>
+  <text class="node-copy mono" x="1075" y="322" text-anchor="middle">by-id → ttyUSB0</text>
+
+  <rect class="node controller" x="994" y="415" width="162" height="150" rx="14"/>
+  <text class="node-kicker" x="1075" y="444" text-anchor="middle" fill="#92400e">REGLER</text>
+  <text class="node-title" x="1075" y="478" text-anchor="middle">Dachs MSR2</text>
+  <text class="node-copy" x="1075" y="508" text-anchor="middle">CPU 0 · Netzschutz</text>
+  <text class="node-copy" x="1075" y="531" text-anchor="middle">CPU 1 / CPU 2</text>
+
+  <!-- Cross-cutting write safety, deliberately separate from the read path. -->
+  <rect class="safety" x="24" y="622" width="1152" height="112" rx="16"/>
+  <circle cx="58" cy="660" r="18" fill="#ffedd5" stroke="#fb923c"/>
+  <path d="M50 660 56 666 67 653" fill="none" stroke="#c2410c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="safety-title" x="91" y="649">GEPRÜFTER SCHREIBPFAD</text>
+  <text class="safety-flow" x="91" y="677">Lesen → Validieren / CAS → Freigabe → Auth / PW4 → <tspan fill="#b91c1c">Schreiben</tspan> → ACK → Readback → Audit</text>
+  <text class="safety-copy" x="91" y="708">Dry-Run für breite oder unbekannte Änderungen · Schreiben nur absichtlich freigeschaltet und berechtigt</text>
+
+  <text class="footer" x="36" y="762">Historie, Audit, Berichte, Konfiguration und SHA-256-geprüfte Backups bleiben lokal; HTTPS ist optional über einen Reverse Proxy möglich.</text>
 </svg>

@@ -171,6 +171,80 @@ process.stdout.write(JSON.stringify(result));
         self.assertEqual(result["baseHeights"], [320, 320])
 
     @unittest.skipUnless(shutil.which("node"), "Node.js ist für den JS-Regressionscheck nötig")
+    def test_dashboard_status_texts_are_not_treated_as_missing_measurements(self):
+        script = """
+const vm = require('vm');
+const code = require('fs').readFileSync(process.argv[1], 'utf8');
+const dummy = () => ({});
+const sandbox = {
+  console, URLSearchParams, Intl, Date, Number, Math, JSON, Set, Map, WeakMap,
+  setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
+  document: {
+    documentElement: {},
+    getElementById: dummy,
+    querySelector: () => ({content: ''}),
+    querySelectorAll: () => [],
+    addEventListener: () => {},
+  },
+  window: {devicePixelRatio: 1, matchMedia: () => ({matches: false}), addEventListener: () => {}},
+  getComputedStyle: () => ({getPropertyValue: () => ''}),
+};
+vm.createContext(sandbox);
+vm.runInContext(code, sandbox);
+const result = vm.runInContext(`(() => {
+  state.schema = {series:[
+    {id:'motorstatus',title:'Motorstatus',block:24,key:'Hka_Mw1.bMotorStatus'},
+    {id:'servicecode',title:'Aktueller Fehlercode',block:22,key:'Hka_Bd.bStoerung'},
+    {id:'kuehlwasser',title:'Kühlwasser',block:24,key:'Hka_Mw1.Temp.sbMotor'},
+  ]};
+  state.live = {values:[
+    {block:24,key:'Hka_Mw1.bMotorStatus',raw:35,value:'35 (KEINE Stellmotorbewegung)',recorded_at:'2026-08-21T14:19:29Z'},
+    {block:22,key:'Hka_Bd.bStoerung',raw:0,value:'Kein aktiver Servicecode',recorded_at:'2026-08-21T14:19:29Z'},
+    {block:24,key:'Hka_Mw1.Temp.sbMotor',raw:0,value:0,unit:'°C',recorded_at:'2026-08-21T14:19:29Z'},
+  ]};
+  const invalid = (block, key) => {
+    const row = dashboardRow(block, key);
+    const series = state.schema.series.find((item) => item.block === block && item.key === key);
+    return isInvalidSensor(series.id, row);
+  };
+  return {
+    motorInvalid:invalid(24, 'Hka_Mw1.bMotorStatus'),
+    serviceInvalid:invalid(22, 'Hka_Bd.bStoerung'),
+    serviceWithoutRawInvalid:isInvalidSensor('servicecode', {value:'Kein aktiver Servicecode'}),
+    sentinelInvalid:isInvalidSensor('kuehlwasser', {raw:0,value:'0'}),
+    validTemperatureInvalid:isInvalidSensor('kuehlwasser', {raw:790,value:'79 °C'}),
+    excessivePowerInvalid:isInvalidSensor('wirkleistung', {raw:7000,value:'7 kW'}),
+    motorCard:dashboardCardHtml({block:24,key:'Hka_Mw1.bMotorStatus'}),
+    serviceCard:dashboardCardHtml({block:22,key:'Hka_Bd.bStoerung'}),
+    sentinelCard:dashboardCardHtml({block:24,key:'Hka_Mw1.Temp.sbMotor'}),
+    missingCard:dashboardCardHtml({block:22,key:'Hka_Bd.bWarnung'}),
+  };
+})()`, sandbox);
+process.stdout.write(JSON.stringify(result));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script, str(WEB_ROOT / "app.js")],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertFalse(result["motorInvalid"])
+        self.assertFalse(result["serviceInvalid"])
+        self.assertFalse(result["serviceWithoutRawInvalid"])
+        self.assertTrue(result["sentinelInvalid"])
+        self.assertFalse(result["validTemperatureInvalid"])
+        self.assertTrue(result["excessivePowerInvalid"])
+        self.assertIn("35 (KEINE Stellmotorbewegung)", result["motorCard"])
+        self.assertIn("Kein aktiver Servicecode", result["serviceCard"])
+        self.assertIn("2026-08-21T14:19:29Z", result["motorCard"])
+        self.assertIn("2026-08-21T14:19:29Z", result["serviceCard"])
+        self.assertNotIn("wartet auf Messung", result["motorCard"])
+        self.assertNotIn("wartet auf Messung", result["serviceCard"])
+        self.assertIn("wartet auf Messung", result["sentinelCard"])
+        self.assertIn("wartet auf Messung", result["missingCard"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js ist für den JS-Regressionscheck nötig")
     def test_running_band_builder_keeps_gaps_and_transitions_deterministic(self):
         script = """
 const vm = require('vm');

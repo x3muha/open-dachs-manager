@@ -793,8 +793,12 @@
       </div>
       <div class="changelog-list">
         <article class="changelog-entry current">
-          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-08-20">20.08.2026</time><span>Aktuell</span></header>
-          <ul><li>Eine vierte, schmale Block-24-Zeitleiste zeigt Aus, Startvorbereitung, Start/Anlasser, Lauf und Abschaltroutine in eigenen Farben.</li><li>Jeder Statuswechsel wird unabhängig von der normalen Kurvenreduktion erhalten. Mouseover zeigt Nummer und Originaltext; echte Aufzeichnungslücken bleiben schraffiert.</li><li>Der gemeinsame Mauszoom gilt nun für alle vier Diagramme. Die Erweiterung liest keinen zusätzlichen Reglerblock und führt keine Schreibaktion aus.</li></ul>
+          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-08-21">21.08.2026</time><span>Aktuell</span></header>
+          <ul><li>Motorstatus und aktueller Fehlercode erscheinen in frei gewählten Kacheln wieder mit ihrem vorhandenen Klartext.</li><li>Textzustände werden nicht mehr fälschlich als ausstehende Messung behandelt; die Sensor- und Bereichsgrenzen bleiben unverändert wirksam.</li><li>Die Korrektur betrifft nur die Anzeige und erzeugt weder einen zusätzlichen seriellen Lesevorgang noch eine Schreibaktion.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.6.2</strong><time datetime="2026-08-20">20.08.2026</time></header>
+          <ul><li>Eine vierte, schmale Block-24-Zeitleiste zeigt Aus, Startvorbereitung, Start/Anlasser, Lauf und Abschaltroutine in eigenen Farben.</li><li>Jeder Statuswechsel wird unabhängig von der normalen Kurvenreduktion erhalten. Mouseover zeigt Nummer und Originaltext; echte Aufzeichnungslücken bleiben schraffiert.</li><li>Der gemeinsame Mauszoom gilt für alle vier Diagramme. Die Erweiterung liest keinen zusätzlichen Reglerblock und führt keine Schreibaktion aus.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.6.1</strong><time datetime="2026-08-19">19.08.2026</time></header>
@@ -889,6 +893,6 @@
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="static/app.js?v=42"></script>
+  <script src="static/app.js?v=43"></script>
 </body>
 </html>
