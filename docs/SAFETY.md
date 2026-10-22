@@ -47,8 +47,8 @@ still konvertiert.
 Ein vollständiges aktuelles Sicherungsabbild umfasst 42 Ziele: die 36
 adressierbaren Rohblöcke der Regler-CPU 0 sowie Block 16, 20 und 21 der
 Netzschutz-CPU 1 und der Netzschutz-CPU 2. Wiederherstellbar bleiben davon nur
-die 38 geprüften Konfigurationsziele, also CPU 0 sowie Block 16 beider
-Netzschutz-CPUs. Die Ziele werden immer als eindeutiges Paar aus CPU und
+die 36 geprüften Konfigurationsziele auf CPU 0; alle Netzschutzblöcke bleiben
+read/backup-only. Die Ziele werden immer als eindeutiges Paar aus CPU und
 Blocknummer behandelt. Vor
 dem Import werden Schema, Packrevision, Reglerkennung, eindeutige CPU-/Blockziele,
 Payloadlängen und SHA-256-Prüfsummen geprüft. Alte Abbilder ohne Prüfsummen sind
@@ -59,8 +59,9 @@ ausgewählten Zielblöcke. Bytegleiche Blöcke werden ohne Authentifizierung und
 ohne Schreibtelegramm übersprungen. Abweichende Blöcke erfordern eine
 ausdrückliche Hardwarefreigabe, den exakten Bestätigungstext, eine einmalige
 Authentifizierung der exklusiven Sitzung, eine erneute Stabilitätsprüfung,
-positive Bestätigung und vollständige bytegenaue Rückleseprüfung. Nach dem
-ersten Fehler werden keine weiteren Blöcke versucht.
+positive Bestätigung und vollständige bytegenaue Rückleseprüfung. Fehler werden
+je Ziel protokolliert; weitere ausgewählte Blöcke werden trotzdem versucht.
+Softwareversionsfelder der Zielplatine werden nicht aus dem Abbild übertragen.
 
 Vor der Authentifizierung eines abweichenden Live-Ablaufs wird der frisch
 gelesene Ausgangszustand als SHA-256-gebundenes JSON-Sicherheitsabbild atomar im
@@ -71,8 +72,11 @@ benötigen und erzeugen dieses lokale Sicherheitsabbild nicht.
 
 SHA-256 schützt hier die Inhaltsbindung und erkennt unbeabsichtigte Änderungen;
 es ist keine kryptografische Signatur und bestätigt nicht die Herkunft einer
-Datei. Fehlende Packdaten sperren deshalb ebenso wie ein Pack- oder
-Regleridentitätskonflikt jede echte Wiederherstellung.
+Datei. Fehlende oder unpassende Packdaten sperren jede echte
+Wiederherstellung. Die Seriennummer des Abbilds wird absichtlich nicht mit der
+Zielregelung verglichen, weil der Ablauf auch für den Austausch einer Regelung
+vorgesehen ist. Sie bleibt dennoch als hashgebundene Herkunftsinformation im
+Abbild erhalten.
 
 Der Ablauf ist nicht transaktional: Bereits erfolgreich wiederhergestellte
 Blöcke werden bei einem späteren Fehler nicht automatisch zurückgerollt.
@@ -104,7 +108,7 @@ Listen- und Download-API sind nur für Administratoren erreichbar. Es gibt
 bewusst keinen Archiv-Löschweg. Das Löschen eines Wartungsberichts lässt sein
 Sicherungsabbild bestehen. Vor der Übernahme in die Wiederherstellung werden
 Download, Abbildprüfsumme, Packrevision, Gerätebindung, 42/42 erfolgreiche
-Sicherungsziele und exakt 38 Restore-Ziele erneut geprüft. Geprüfte ältere
+Sicherungsziele und exakt 36 Restore-Ziele erneut geprüft. Geprüfte ältere
 38/38-Wartungsarchive bleiben unter ihrem unveränderten Altvertrag nutzbar.
 Danach bleibt die Zielauswahl leer und der schreibfreie Probelauf aktiv.
 
@@ -121,32 +125,39 @@ Blockräume. Die live bestätigten Blöcke 16, 20 und 21 von CPU 1 und CPU 2 sin
 wegen ihrer Netzschutzbedeutung rot markiert, damit sie nicht mit normalen
 Reglerwerten verwechselt werden.
 
-Legacy-Block 16 und Schutzkonfigurationsblock 20 sind über den globalen
-Admin-/Auth-/Schreib-Haken veränderbar. Je CPU sind das 18 plus 39 Felder,
-insgesamt also 114 eindeutig adressierte schreibbare Feldinstanzen. Für
-Block 20 belegt die originale Layout-4-Datenzuordnung den
-Vollblock-Schreibdienst 21. Dort gilt zwingend:
+Alle Netzschutzblöcke sind serverseitig read/backup-only. B16 wurde nach
+fachlicher Ablehnung `7F 11 01` und unveränderten Rücklesungen aus Editor, API
+und Restore entfernt. Block 20 bleibt nach der physischen Abnahme nur lesbar: Beide
+U-3.050-CPUs gewährten Auth 5 und quittierten den nominalen Dienst 21 positiv,
+ignorierten den minimalen Testwert aber in vier Rücklesungen.
 
 ```text
 Lesen → kodieren → authentifizieren → bytegenauer CAS
 → Dienst 21 → positives ACK → exakte Vollblock-Rückleseprüfung → Audit
 ```
 
-Nicht eindeutig umkehrbare profilabhängige Anzeigen werden bei einer normalen
-Eingabe abgewiesen. `raw:<Rohwert>` ist ein ausdrücklicher Expertenweg, der
-Skalierungs- und Auswahllogik umgeht. Feldbreite, Wertebereich,
-Authentifizierung, CAS, ACK und exakte Rückleseprüfung bleiben wirksam. Die
-Kodierung und schreibfreie Probeläufe sind geprüft; ein physischer Schreibtest
-von Block 20 an der Anlage steht noch aus. Das ist besonders relevant, weil
-dieser Block unmittelbar Netzschutzgrenzen und Abschaltzeiten enthält.
+Ein positiver ACK ohne passenden Readback gilt ausdrücklich als Fehler. B20
+enthält Netzschutzgrenzen und Abschaltzeiten und wird deshalb weder editiert
+noch restauriert oder durch einen vermeintlichen Erfolg stillschweigend
+bestätigt.
 
 Block 21 besitzt keinen Schreibdienst und bleibt als laufender Messwertblock
 serverseitig strikt nur lesbar. Das Öffnen oder Aktualisieren einer roten Seite
-schreibt weiterhin nichts. Block 20 und 21 werden im 42-Ziele-Abbild gelesen,
+schreibt weiterhin nichts. Block 16, 20 und 21 werden im 42-Ziele-Abbild gelesen,
 auf exakte Länge und Dekodierbarkeit geprüft und gehasht, bleiben aber außerhalb
-der 38 Restore-Ziele. Block 20 wartet auf eine physische Restore-Abnahme;
+der 36 Restore-Ziele. Block 20 ist nach der physischen Abnahme nicht bestätigt schreibbar;
 flüchtige Messwerte aus Block 21 dürfen niemals als Konfiguration
 zurückgeschrieben werden.
+
+## 250-h-Diagnose
+
+Die 250-h-Auswertung ist ein reiner Offline-Lesepfad über bereits gespeicherte
+SQLite-Snapshots. API, Browser und Hintergrundworker öffnen dafür keine
+serielle Sitzung und führen weder Authentifizierung noch Controllerwrites aus.
+Cachedatei und Fehlerzustand sind lokal und privat; eine fehlgeschlagene
+Neuberechnung ersetzt niemals das letzte gültige Ergebnis. Fehlende Daten und
+nicht belegbare Fehlstarts werden sichtbar als Einschränkung geführt und nicht
+zu vermeintlichen Messwerten ergänzt.
 
 ## Webzugriff
 
@@ -156,6 +167,35 @@ HTTPS-Reverse-Proxy. Den Standardport nicht direkt ins Internet weiterleiten.
 
 Anfangspasswörter sofort ändern und `/var/lib/open-dachs-manager` als
 vertrauliche Betriebsinformation schützen.
+
+### Optionaler lokaler Bedienplatz
+
+Der Login-Override wird niemals aus Quell-IP- oder Proxy-Headern abgeleitet.
+Er existiert ausschließlich als Eigenschaft einer zweiten HTTP-Serverinstanz,
+deren Socket hart an `127.0.0.1` gebunden ist. Der normale Listener kennt
+diesen Principal nicht und bleibt auch bei gefälschten `Forwarded`,
+`X-Forwarded-For` oder `X-Real-IP` loginpflichtig.
+
+HTTP-Cookies sind nicht portgebunden. Der lokale Listener erzeugt und
+akzeptiert deshalb keinen lokalen Admin-Cookie, sondern verwendet den
+cookie-losen Principal `localhost-override` mit der konfigurierten Rolle. Ein
+normaler Admin-Cookie kann eine lokale Gastrolle nicht hochstufen. Exakter
+`Host`, `Origin`, Same-Origin-Request-Marker, Fetch-Metadaten, CSP und
+Frame-Schutz sperren DNS-Rebinding, Cross-Site-Requests und normale
+Proxyweiterleitungen. `/api/v1/*` bleibt unabhängig davon ausschließlich mit
+passendem Bearer-Token zugänglich.
+
+Ein Reverse Proxy auf demselben Rechner muss ausschließlich den normalen
+Web-Port als Upstream verwenden. Würde er den Loopback-Port absichtlich
+weiterleiten und Host, Origin sowie Proxyspuren passend umschreiben, könnte der
+Webdienst diesen Proxy technisch nicht von einem lokalen Browser
+unterscheiden. Diese Upstream-Konfiguration ist daher ausdrücklich unzulässig.
+
+Der Override ersetzt nur die Webanmeldung. Ein lokaler Admin muss weiterhin
+alle getrennten Schutzstufen eines Reglerwrites erfüllen: explizite
+Schreibfreigabe, fachliche Validierung, MSR2-Authentifizierung/PW4, stabiler
+Ausgangszustand, positives ACK, Readback und Audit. Im Audit erscheint er als
+`localhost-override`, niemals als regulärer Passwortbenutzer `admin`.
 
 API-Tokens werden nur beim Erstellen vollständig angezeigt und danach nur als
 SHA-256-Hash gespeichert. Berechtigungen für Lesen, Historie und Schreiben
@@ -174,7 +214,7 @@ URLs, Browser-Lesezeichen oder öffentliche Fehlerberichte gelangen.
 
 ## Reifegrad
 
-Version 1.6.3 basiert auf dem ersten stabilen öffentlichen Stand und wird ohne
+Version 1.8.0 basiert auf dem ersten stabilen öffentlichen Stand und wird ohne
 Garantie bereitgestellt. Gerätevarianten und Packstände können abweichen.
 Leseergebnisse und Feldlagen am tatsächlichen Zielgerät verifizieren, bevor
 Schreibvorgänge freigegeben werden.

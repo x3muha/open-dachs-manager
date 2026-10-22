@@ -48,6 +48,7 @@ class HardeningService(DachsService):
         self.device_payloads = {
             24: bytes(70),
             50: bytes(70),
+            (1, 16): bytes(18),
             (1, 20): SYNTHETIC_NETWORK_CONFIG_PAYLOAD,
         }
         self.failure_modes = {}
@@ -176,16 +177,10 @@ class WriteHardeningHTTPTests(unittest.TestCase):
         self.assertEqual(self.app.store.audits(), [])
 
     def test_live_noops_skip_controller_auth_and_wire_and_api_reports_ok(self):
-        session_requests = (
-            (
-                "/api/block/50",
-                {"key": "Hka_Ew.usAufstellhoehe", "value": 0},
-            ),
-            (
-                "/api/network-protection/1/20",
-                {"key": "NetzKonfig1.ubSchutzart", "value": 1},
-            ),
-        )
+        session_requests = ((
+            "/api/block/50",
+            {"key": "Hka_Ew.usAufstellhoehe", "value": 0},
+        ),)
         for path, change in session_requests:
             with self.subTest(path=path):
                 status, result = self.request(
@@ -226,7 +221,7 @@ class WriteHardeningHTTPTests(unittest.TestCase):
         self.assertTrue(result["audit"]["readback_ok"])
         self.assertEqual(self.service.auth_calls, [])
         self.assertEqual(self.service.wire_targets, [])
-        self.assertEqual(len(self.app.store.audits()), 3)
+        self.assertEqual(len(self.app.store.audits()), 2)
 
     def test_overview_power_ignores_browser_auth_fields_and_uses_fresh_pw4(self):
         status, result = self.request(
@@ -313,24 +308,22 @@ class WriteHardeningHTTPTests(unittest.TestCase):
         self.assertEqual(mismatch["prewrite_scope"], "stable-fields")
         self.assertIn("readback mismatch", mismatch["error"])
 
-    def test_negative_ack_and_readback_mismatch_are_audited_http_failures(self):
-        self.service.failure_modes[(1, 20)] = "negative-ack"
+    def test_network_is_blocked_and_regulator_mismatch_is_audited(self):
+        self.service.failure_modes[(1, 16)] = "negative-ack"
         status, negative = self.request(
-            "/api/network-protection/1/20",
+            "/api/network-protection/1/16",
             {
                 "changes": [
-                    {"key": "NetzKonfig1.ubSchutzart", "value": 2}
+                    {"key": "UC1.SA1.ubLaendercode", "value": 12}
                 ],
                 "auth_level": 4,
                 "write_enabled": True,
             },
         )
-        self.assertEqual(status, 502)
-        self.assertFalse(negative["written"])
-        self.assertTrue(negative["write_attempted"])
-        self.assertFalse(negative["ack_positive"])
-        self.assertFalse(negative["readback_ok"])
-        self.assertIn("positive ACK", negative["error"])
+        self.assertEqual(status, 403)
+        self.assertIn("nur lesbar", negative["error"])
+        self.assertEqual(self.service.session_entries, 0)
+        self.assertEqual(self.service.wire_targets, [])
 
         self.service.failure_modes[50] = "readback-mismatch"
         status, mismatch = self.request(
@@ -351,11 +344,9 @@ class WriteHardeningHTTPTests(unittest.TestCase):
         self.assertIn("readback mismatch", mismatch["error"])
 
         audits = self.app.store.audits()
-        self.assertEqual(len(audits), 2)
-        self.assertEqual(
-            {item["block"]: item["audit"]["error"] for item in audits},
-            {20: negative["error"], 50: mismatch["error"]},
-        )
+        self.assertEqual(len(audits), 1)
+        self.assertEqual(audits[0]["block"], 50)
+        self.assertEqual(audits[0]["audit"]["error"], mismatch["error"])
 
     def test_failed_api_write_is_502_idempotent_and_keeps_its_audit(self):
         api_access = self.app.store.create_api_token(

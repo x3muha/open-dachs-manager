@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="open-dachs-base-path" content="__OPEN_DACHS_BASE_PATH__">
   <title>Open Dachs Manager</title>
-  <link rel="stylesheet" href="static/style.css?v=33">
+  <link rel="stylesheet" href="static/style.css?v=37">
 </head>
 <body>
   <div id="loginView" class="login-shell">
@@ -31,7 +31,9 @@
         </div>
         <nav class="main-tabs" aria-label="Bereiche">
           <button class="tab-button active" data-view="overviewView">Übersicht</button>
+          <button class="tab-button" data-view="operatorView">Bedienplatz</button>
           <button class="tab-button" data-view="monitorView">Überwachung</button>
+          <button class="tab-button diagnosis-tab-button" data-view="diagnosis250View">250-h-Diagnose <span id="diagnosis250Badge" class="diagnosis-tab-badge" hidden></span></button>
           <button class="tab-button" data-view="settingsView">Einstellung</button>
           <button class="tab-button" data-view="backupView">Backup</button>
           <button class="tab-button" data-view="auditView">Audit</button>
@@ -83,7 +85,8 @@
           </div>
           <div id="overviewCards" class="metric-grid"></div>
         </section>
-        <section class="panel plant-board-panel">
+        <div id="overviewPlantMount"></div>
+        <section id="plantBoardPanel" class="panel plant-board-panel">
           <div class="section-head hmi-section-head">
             <div><p class="eyebrow">ANLAGENÜBERSICHT</p><h3>Dachs-Prozessbild</h3><p class="muted">Ruhige HMI-Darstellung · deutliche Medienwege · Farbe warnt nur bei Abweichungen</p></div>
             <div class="schematic-toolbar"><span class="status-pill ok">LIVE · SERIELL</span><div class="schematic-switch" role="group" aria-label="Darstellung wählen"><button type="button" class="active" data-schematic-mode="overview">Anlage</button><button type="button" data-schematic-mode="technical">Technisch</button></div></div>
@@ -601,6 +604,22 @@
         </div>
       </section>
 
+      <section id="operatorView" class="app-view operator-view" hidden>
+        <header class="operator-toolbar">
+          <div><p class="eyebrow">LOKALER BEDIENPLATZ</p><h2>Technische Anlagenübersicht</h2></div>
+          <div class="operator-toolbar-actions"><span class="status-pill ok">LIVE · SERIELL</span><button type="button" data-view-target="overviewView">Vollständige Oberfläche</button></div>
+        </header>
+        <div id="operatorPlantMount"></div>
+        <section class="panel operator-chart-panel">
+          <div class="operator-chart-head">
+            <div><strong>Drehzahl · Wirkleistung · Motorabgas</strong><small id="operatorChartStatus">Lade letzte 2 Stunden …</small></div>
+            <button type="button" data-view-target="monitorView">Überwachung öffnen</button>
+          </div>
+          <canvas id="operatorChart" class="chart operator-chart" height="126" aria-label="Gemeinsamer Verlauf von Drehzahl, Wirkleistung und Motorabgastemperatur"></canvas>
+          <div class="operator-chart-legend" aria-hidden="true"><span class="speed">Drehzahl · 0–3000 1/min</span><span class="power">Wirkleistung · 0–6 kW</span><span class="exhaust">Motorabgas · 0–600 °C</span></div>
+        </section>
+      </section>
+
       <section id="monitorView" class="app-view" hidden>
         <header class="page-head"><div><p class="eyebrow">ZEITREIHEN</p><h2>Schnellüberwachung</h2><p class="muted">Lesender Poller über den gemeinsamen Serialworker, Speicherung in SQLite.</p></div><div class="page-head-actions"><span id="monitorStatus" class="status-pill neutral">—</span><button id="monitorToggle" data-action="toggle-monitor">Überwachung stoppen</button><button id="serialToggle" class="danger" data-action="toggle-serial">Web-Serialzugriff pausieren</button></div></header>
         <div id="monitorStats" class="metric-grid compact"></div>
@@ -619,6 +638,31 @@
         <section class="panel"><div class="section-head"><div><p class="eyebrow">MOTOR / GENERATOR</p><h3>Wirkleistung und Umdrehungen</h3><p class="chart-help muted">Drehzahl links bis 3000 1/min · Leistung rechts bis 6 kW · Farbe anklicken blendet Kurve aus</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="motor" hidden>Zoom zurücksetzen</button></div></div><canvas id="motorChart" class="chart" height="280"></canvas><div id="motorLegend" class="chart-legend"></div></section>
         <section class="panel motor-status-history"><div class="section-head"><div><p class="eyebrow">MOTORSTATUS · BLOCK 24</p><h3>Start-, Lauf- und Abschaltphasen</h3><p class="chart-help muted">Jeder Statuswechsel bleibt erhalten · Maus zeigt Nummer und Bedeutung · Bereich ziehen zoomt alle vier Diagramme gemeinsam · Datenlücken sind schraffiert</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="motorStatus" hidden>Zoom zurücksetzen</button></div></div><canvas id="motorStatusChart" class="chart motor-status-chart" height="112" tabindex="0" aria-label="Motorstatus aus Block 24 als Zeitband; Pfeiltasten wechseln zwischen Statusereignissen" aria-describedby="motorStatusHoverText"></canvas><div id="motorStatusLegend" class="motor-status-legend" aria-label="Farben der Motorzustände"><span class="off">Aus · 15/16</span><span class="preparation">Startvorbereitung · 20</span><span class="start">Start/Anlasser · 21–24</span><span class="running">Läuft/Regelung · 30–35</span><span class="shutdown">Abschaltroutine · 11–13</span><span class="fault">Störabschaltung · 10/14</span><span class="ok">OK · 0</span><span class="unknown">Unbekannt</span><span class="gap">Keine Messdaten</span></div><output id="motorStatusHoverText" class="sr-only" aria-live="polite"></output></section>
         <section class="panel"><div class="section-head"><div><p class="eyebrow">ABGAS</p><h3>Motorabgas und Dachsabgas</h3><p class="chart-help muted">Motorabgas links bis 600 °C · Dachsabgas rechts bis 200 °C · Farbe anklicken blendet Kurve aus</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="exhaust" hidden>Zoom zurücksetzen</button></div></div><canvas id="exhaustChart" class="chart" height="280"></canvas><div id="exhaustLegend" class="chart-legend"></div></section>
+      </section>
+
+      <section id="diagnosis250View" class="app-view diagnosis-250-view" hidden>
+        <header class="page-head">
+          <div><p class="eyebrow">LOKALE SQLITE-HISTORIE · 250 BETRIEBSSTUNDEN</p><h2>250-h-Diagnose</h2><p class="muted">Aus bereits gespeicherten ODM-Snapshots rekonstruiert. Keine MSR2-Diagnoseblöcke, keine zusätzlichen Blockreads und kein Schreibzugriff.</p></div>
+          <div class="page-head-actions"><span id="diagnosis250Status" class="status-pill neutral">Noch nicht geladen</span><button id="diagnosis250Refresh" type="button">Neu berechnen</button></div>
+        </header>
+        <section id="diagnosis250Quality" class="panel diagnosis-quality-panel"><p class="muted">Historienabdeckung wird geprüft …</p></section>
+        <section class="panel diagnosis-notice-panel">
+          <div class="section-head"><div><p class="eyebrow">AKTUELLER KONTEXT</p><h3>Hinweise, Warnungen und Schutzereignisse</h3><p class="muted">Herstellerhinweise sind Entscheidungshilfen, keine automatische Defektdiagnose. Datenmängel und echte Meldungs-/Schutzkontexte bleiben getrennt.</p></div></div>
+          <div id="diagnosis250Notices" class="diagnosis-notice-groups"><p class="muted">Noch keine Auswertung geladen.</p></div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><div><p class="eyebrow">250-BH-MITTELWERTE</p><h3>Verläufe aus interner Historie</h3><p class="muted">Abgeschlossene Intervalle und der laufende Teilbereich werden getrennt. Trendgrenzen beziehen sich auf 1000 Betriebsstunden.</p></div></div>
+          <div id="diagnosis250Metrics" class="diagnosis-metric-grid"></div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><div><p class="eyebrow">INTERVALLNACHWEIS</p><h3>Abdeckung, Starts und dynamischer Leistungssollwert</h3><p class="muted">Generatorleistung wird in jedem Sollwertsegment gegen den im selben Zeitraum gespeicherten Sollwert ±150 W bewertet.</p></div></div>
+          <div class="table-wrap"><table class="data-table diagnosis-interval-table"><thead><tr><th>Bereich</th><th>Daten</th><th>Bh/Start</th><th>Fehlstarts</th><th>Leistung im Band</th><th>Sollwertsegmente</th></tr></thead><tbody id="diagnosis250Rows"><tr><td colspan="6" class="muted">Noch keine Intervalle geladen.</td></tr></tbody></table></div>
+        </section>
+        <section class="panel diagnosis-reference-panel">
+          <div><p class="eyebrow">HERSTELLERHINWEISE · NICHT SCHUTZGRENZEN</p><h3>Dokumentierte Orientierungswerte</h3></div>
+          <dl><div><dt>Bh/Start</dt><dd>&gt;1; höher ist günstiger</dd></div><div><dt>Fehlstarts</dt><dd>&lt;4 %</dd></div><div><dt>Motorabgas HR</dt><dd>420–490 °C; Trend +20 K/1000 Bh</dd></div><div><dt>Dachs-Abgas</dt><dd>&lt;170 °C; Trend +15 K/1000 Bh</dd></div><div><dt>Kühlwasser</dt><dd>72–85 °C; Trend +10 K/1000 Bh</dd></div><div><dt>Dachs-Eintritt</dt><dd>60–65 °C dokumentierte Grauzone</dd></div><div><dt>Regler</dt><dd>&lt;40 °C</dd></div><div><dt>Generator</dt><dd>dynamischer Sollwert ±150 W</dd></div></dl>
+          <p class="source-note">Die unmittelbaren Schutzschwellen des Reglers sind davon verschieden. Kondenser-Abgas wird nicht angezeigt, weil keine eindeutig reale, separat belegte ODM-Serie vorliegt. Der bestehende Rußfilter-Füllstand bleibt eine unabhängige Anzeige und wird durch diese Diagnose weder berechnet noch verändert.</p>
+        </section>
       </section>
 
       <section id="maintenanceView" class="app-view" hidden>
@@ -655,13 +699,13 @@
 
       <section id="backupView" class="app-view" hidden>
         <header class="page-head">
-          <div><p class="eyebrow">MSR2 SICHERUNGSABBILD</p><h2>Backup &amp; Wiederherstellung</h2><p class="muted">Alle 36 Reglerblöcke auf CPU 0 sowie Block 16, 20 und 21 auf CPU 1 und CPU 2 sichern – insgesamt 42 Ziele. Wiederherstellbar bleiben ausschließlich die 36 Reglerblöcke und die beiden geprüften Block-16-Ziele.</p></div>
+          <div><p class="eyebrow">MSR2 SICHERUNGSABBILD</p><h2>Backup &amp; Wiederherstellung</h2><p class="muted">Alle 36 Reglerblöcke auf CPU 0 sowie Block 16, 20 und 21 auf CPU 1 und CPU 2 sichern – insgesamt 42 Ziele. Wiederherstellbar bleiben ausschließlich die 36 Reglerblöcke; alle sechs Netzschutz-Ziele sind read/backup-only.</p></div>
           <span class="status-pill neutral">CPU 0 / 1 / 2 · Blockweise</span>
         </header>
 
         <section id="backupArchivePanel" class="panel backup-archive-panel backup-admin" hidden>
           <div class="section-head backup-section-head">
-            <div><p class="eyebrow">WARTUNGSBACKUPS · ADMIN</p><h3>Geschütztes Backup-Archiv</h3><p class="muted">Bei jedem Wartungsstart entsteht automatisch ein vollständiges 42-Ziele-Abbild mit 38 Restore-Zielen. Ältere geprüfte 38er-Abbilder bleiben weiterhin lesbar und nutzbar.</p></div>
+            <div><p class="eyebrow">WARTUNGSBACKUPS · ADMIN</p><h3>Geschütztes Backup-Archiv</h3><p class="muted">Bei jedem Wartungsstart entsteht automatisch ein vollständiges 42-Ziele-Abbild mit 36 Restore-Zielen. Ältere geprüfte 38er-Abbilder bleiben weiterhin lesbar und nutzbar.</p></div>
             <button id="backupArchiveRefresh" type="button">Archiv aktualisieren</button>
           </div>
           <div id="backupArchiveStatus" class="backup-status backup-status-neutral">Archiv wurde noch nicht geladen.</div>
@@ -712,9 +756,9 @@
       </section>
 
       <section id="settingsView" class="app-view" hidden>
-        <header class="page-head"><div><p class="eyebrow">MSR2 REGISTER</p><h2>Einstellungen und Register</h2><p class="muted">Regler-CPU und beide Netzüberwachungs-CPUs besitzen getrennte Blockräume. Auf CPU 1 und CPU 2 sind Block 16 und der durch Originaldienst 21 belegte Block 20 geschützt schreibbar; Block 21 bleibt strikt nur lesbar. Jede freigegebene Änderung bleibt an Admin-Login, Auth-Level und den expliziten Hardware-Schalter gebunden.</p></div><span id="settingsRoleHint" class="status-pill neutral"></span></header>
+        <header class="page-head"><div><p class="eyebrow">MSR2 REGISTER</p><h2>Einstellungen und Register</h2><p class="muted">Regler-CPU und beide Netzüberwachungs-CPUs besitzen getrennte Blockräume. Block 16, 20 und 21 auf CPU 1 und CPU 2 werden nach den realen Hardwarebefunden ausschließlich gelesen und gesichert; Schreiben und Restore sind serverseitig gesperrt.</p></div><span id="settingsRoleHint" class="status-pill neutral"></span></header>
         <section id="writeControls" class="panel write-controls" hidden>
-          <div class="write-intro"><p class="eyebrow">SCHREIBSCHUTZ</p><h3>Admin-Schreibfreigabe</h3><p class="muted">Ohne Haken bleibt der Vorgang ein Dry-Run. Beim echten Schreiben folgen Lesen, Kodierung, Authentifizierung, bytegenauer Ausgangszustandsvergleich, Schreibdienst, positives ACK und Rückleseprüfung; Block 20 verwendet Dienst 21 und verlangt einen exakten Vollblockvergleich.</p></div>
+          <div class="write-intro"><p class="eyebrow">SCHREIBSCHUTZ</p><h3>Admin-Schreibfreigabe</h3><p class="muted">Ohne Haken bleibt der Vorgang ein Dry-Run. Beim echten Schreiben folgen Lesen, Kodierung, Authentifizierung, bytegenauer Ausgangszustandsvergleich, Schreibdienst, positives ACK und Rückleseprüfung. Für die Netzschutz-CPUs sind B16, B20 und B21 unabhängig von dieser Freigabe strikt nur lesbar.</p></div>
           <label>Auth-Level<select id="authLevel"><option value="1">1 · Betreiber erweitert</option><option value="2">2 · Service</option><option value="3">3 · Werksservice</option><option value="4" selected>4 · Administrator</option><option value="5">5 · Legacy/V2</option></select></label>
           <label>PW4 / Passwort-Override<input id="pass4" type="password" autocomplete="off" placeholder="leer = berechnete PW4 verwenden"></label>
           <label class="check-label"><input id="writeEnabled" type="checkbox"> Hardware-Schreiben aktivieren</label>
@@ -744,6 +788,16 @@
           <button type="button" role="tab" class="active" data-system-tab="users">Benutzer &amp; Berechtigungen</button>
           <button type="button" role="tab" data-system-tab="tokens">API &amp; Tokens</button>
           <button type="button" role="tab" data-system-tab="maintenance">Wartungsabschluss</button>
+          <button type="button" role="tab" data-system-tab="firmware">Firmware</button>
+        </div>
+
+        <div id="systemFirmwareTab" data-system-panel="firmware" hidden>
+          <section class="panel firmware-panel">
+            <div class="section-head"><div><p class="eyebrow">FIRMWARE-CENTER · OFFLINE-PRÜFUNG</p><h3>Senertec-MUC prüfen</h3><p class="muted">Die Datei wird im Arbeitsspeicher auf Header, Längen, SHA-256 und alle acht Modulabbilder geprüft. Sie wird nicht gespeichert und es wird kein serieller Zugriff ausgeführt.</p></div><label class="backup-file-picker">.muc auswählen<input id="firmwareFile" type="file" accept=".muc,application/octet-stream"></label></div>
+            <div id="firmwareStatus" class="write-guard-status neutral">Noch keine Firmwaredatei geprüft.</div>
+            <div id="firmwareResult" class="restore-results"></div>
+            <div class="restore-warning"><strong>Live-Flash absichtlich gesperrt</strong><span>Der erfolgreiche Windows-Lauf ist vollständig aufgezeichnet und die Nutzdaten sind zugeordnet. Framegrenzen, Loader-Kommandos, Baudwechsel, ACK-Regeln und der sichere Abschluss sind für einen nativen Flasher aber noch nicht vollständig verifiziert. Bis dahin bleibt der Hersteller-Updater über die kontrollierte COM3/RFC2217-Brücke der einzige freigegebene Flashweg.</span></div>
+          </section>
         </div>
 
         <div id="systemMaintenanceTab" data-system-panel="maintenance" hidden>
@@ -755,7 +809,8 @@
         </div>
 
         <div id="systemUsersTab" data-system-panel="users">
-          <section class="panel account-controls"><div><p class="eyebrow">EIGENES KONTO</p><h3>Eigenes Passwort ändern</h3><p class="muted">Mindestens 12 Zeichen. Danach werden deine offenen Sitzungen beendet.</p></div><form id="passwordForm" class="password-form"><label>Bisheriges Passwort<input id="currentWebPassword" type="password" autocomplete="current-password" required></label><label>Neues Passwort<input id="newWebPassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Passwort ändern</button></form></section>
+          <section class="panel system-create-panel local-access-panel"><div><p class="eyebrow">LOKALER BENUTZER</p><h3>Bedienplatz ohne Web-Login</h3><p class="muted">Öffnet einen zweiten HTTP-Listener ausschließlich auf <code>127.0.0.1</code>. Der normale Web-Port und der Reverse Proxy bleiben immer loginpflichtig. Dachs-Schreibvorgänge behalten Freigabe, MSR2-Authentifizierung, ACK und Readback.</p></div><form id="localAccessForm" class="system-create-form local-access-form"><label class="check-label"><input id="localAccessEnabled" type="checkbox"> Lokalen Benutzer aktivieren</label><label>Port<input id="localAccessPort" type="number" min="1" max="65535" step="1" value="80" inputmode="numeric" required></label><label>Rechte<select id="localAccessRole"><option value="admin" selected>Admin · lesen und schreiben</option><option value="guest">Gast · nur lesen</option></select></label><button class="primary" type="submit">Speichern</button><div id="localAccessStatus" class="write-guard-status ok">Deaktiviert · normaler Login bleibt aktiv.</div><a id="localAccessUrl" class="local-access-url" target="_blank" rel="noopener noreferrer" hidden></a></form></section>
+          <section id="accountControls" class="panel account-controls"><div><p class="eyebrow">EIGENES KONTO</p><h3>Eigenes Passwort ändern</h3><p class="muted">Mindestens 12 Zeichen. Danach werden deine offenen Sitzungen beendet.</p></div><form id="passwordForm" class="password-form"><label>Bisheriges Passwort<input id="currentWebPassword" type="password" autocomplete="current-password" required></label><label>Neues Passwort<input id="newWebPassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Passwort ändern</button></form></section>
           <section class="panel system-create-panel"><div><p class="eyebrow">NEUER BENUTZER</p><h3>Konto anlegen</h3><p class="muted">Gäste dürfen lesen. Admins dürfen zusätzlich Systemeinstellungen und kontrollierte Dachs-Schreibvorgänge bedienen.</p></div><form id="userCreateForm" class="system-create-form"><label>Benutzername<input id="userCreateName" minlength="3" maxlength="32" pattern="[A-Za-z0-9._-]+" autocomplete="off" required></label><label>Rolle<select id="userCreateRole"><option value="guest">Gast · lesen</option><option value="admin">Admin · lesen und schreiben</option></select></label><label>Startpasswort<input id="userCreatePassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Benutzer anlegen</button></form></section>
           <section class="panel"><div class="section-head"><div><p class="eyebrow">BENUTZERVERWALTUNG</p><h3>Konten und Berechtigungen</h3></div><button id="usersRefresh" type="button">Aktualisieren</button></div><div class="table-wrap"><table class="data-table system-table"><thead><tr><th>Benutzer</th><th>Rolle</th><th>Status</th><th>Neues Passwort</th><th>Aktionen</th></tr></thead><tbody id="userRows"><tr><td colspan="5" class="muted">Benutzer werden geladen …</td></tr></tbody></table></div></section>
         </div>
@@ -793,7 +848,15 @@
       </div>
       <div class="changelog-list">
         <article class="changelog-entry current">
-          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-08-21">21.08.2026</time><span>Aktuell</span></header>
+          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-10-22">22.10.2026</time><span>Aktuell</span></header>
+          <ul><li>Die neue 250-h-Diagnose wertet ausschließlich die lokale SQLite-Historie aus und hält API und Oberfläche über einen persistenten Hintergrundcache responsiv.</li><li>B16, B20 und B21 beider Netzschutz-CPUs sind nach den abgeschlossenen Livebefunden strikt read/backup-only; nur 36 Reglerblöcke bleiben restaurierbar.</li><li>Das Offline-Firmware-Center begrenzt die Dekompressionsausgabe bereits während der Verarbeitung, räumt Timeout-/Fehlerprozesse sauber auf und lässt den nativen Flash weiter gesperrt.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.7.0</strong><time datetime="2026-08-24">24.08.2026</time></header>
+          <ul><li>Ein optionaler lokaler Benutzer kann auf einem frei wählbaren Port ausschließlich für <code>127.0.0.1</code> aktiviert werden; Adminrechte sind vorausgewählt.</li><li>Der lokale Bedienplatz arbeitet ohne übertragbaren Login-Cookie. Der normale Web-Port und Reverse Proxy bleiben loginpflichtig, die Maschinen-API bleibt Bearer-Token-pflichtig.</li><li>Portwechsel sind transaktional; Host-, Origin-, Request-, CSP- und Frame-Prüfungen schützen den zweiten Listener. Die vollständige MSR2-Schreibsicherheitskette bleibt unverändert.</li></ul>
+        </article>
+        <article class="changelog-entry">
+          <header><strong>V3 1.6.3</strong><time datetime="2026-08-21">21.08.2026</time></header>
           <ul><li>Motorstatus und aktueller Fehlercode erscheinen in frei gewählten Kacheln wieder mit ihrem vorhandenen Klartext.</li><li>Textzustände werden nicht mehr fälschlich als ausstehende Messung behandelt; die Sensor- und Bereichsgrenzen bleiben unverändert wirksam.</li><li>Die Korrektur betrifft nur die Anzeige und erzeugt weder einen zusätzlichen seriellen Lesevorgang noch eine Schreibaktion.</li></ul>
         </article>
         <article class="changelog-entry">
@@ -826,15 +889,15 @@
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.4.0</strong><time datetime="2026-08-17">17.08.2026</time></header>
-          <ul><li>Block 16 mit 18 Feldern und Block 20 mit 39 Feldern sind auf beiden Netzüberwachungs-CPUs schreibbar; das sind insgesamt 114 eindeutig adressierte Feldinstanzen.</li><li>Die originale Layout-4-Datenzuordnung belegt für Block 20 den Vollblock-Schreibdienst 21. Lesen, Kodierung, Authentifizierung, bytegenauer Ausgangszustandsvergleich, positive Bestätigung und exakte Vollblock-Rückleseprüfung bleiben zwingend.</li><li>Mehrdeutige Anzeigen werden nicht geraten und können nur ausdrücklich als <code>raw:&lt;Wert&gt;</code> eingegeben werden. Die Kodierung wurde schreibfrei geprüft; ein physischer Block-20-Schreibvorgang an der Anlage steht noch aus.</li><li>Block 21 bleibt ohne Schreibdienst strikt nur lesbar. Block 20 bleibt bis zur realen Abnahme außerhalb von Sicherung und Wiederherstellung; deren Umfang bleibt bei 38 Zielen.</li><li>Weitere Standardblöcke sind in den geprüften Definitionen nicht enthalten. Die zusätzlich gelesenen Diagnosedienste 17 und 18 bleiben mangels belegter Feldstruktur reine Rohdaten.</li></ul>
+          <ul><li>Historischer Stand: Block 16 und Block 20 besaßen quellenseitig Schreibpfade; seit 1.8.0 sind beide nach den negativen Livebefunden read/backup-only.</li><li>Die originale Layout-4-Datenzuordnung belegt für Block 20 den Vollblock-Schreibdienst 21. Lesen, Kodierung, Authentifizierung, bytegenauer Ausgangszustandsvergleich, positive Bestätigung und exakte Vollblock-Rückleseprüfung bleiben zwingend.</li><li>Mehrdeutige Anzeigen werden nicht geraten und können nur ausdrücklich als <code>raw:&lt;Wert&gt;</code> eingegeben werden. Die Kodierung wurde schreibfrei geprüft; ein physischer Block-20-Schreibvorgang an der Anlage steht noch aus.</li><li>Block 21 bleibt ohne Schreibdienst strikt nur lesbar. Block 20 bleibt bis zur realen Abnahme außerhalb von Sicherung und Wiederherstellung; deren Umfang bleibt bei 38 Zielen.</li><li>Weitere Standardblöcke sind in den geprüften Definitionen nicht enthalten. Die zusätzlich gelesenen Diagnosedienste 17 und 18 bleiben mangels belegter Feldstruktur reine Rohdaten.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.3.0</strong><time datetime="2026-08-17">17.08.2026</time></header>
-          <ul><li>Beide Netzüberwachungs-CPUs zeigen jetzt getrennt Block 16 (Legacy-Schutz), Block 20 (39 Schutzparameter) und Block 21 (28 dreiphasige Live- und Diagnosewerte).</li><li>Die 59- beziehungsweise 56-Byte-Layouts werden einschließlich Little Endian, vorzeichenbehafteter Werte und profilabhängiger Abschaltzeiten quellentreu dekodiert.</li><li>Block 20 und 21 sind bewusst nur lesbar und werden vor serieller Sitzung oder Authentifizierung gegen Änderungen gesperrt; der bestehende Block-16-Schreibablauf bleibt unverändert.</li><li>Backup und Wiederherstellung behalten ihre 38 geprüften Ziele und behandeln die neuen Anzeige- und Liveblöcke nicht als restaurierbare Konfiguration.</li></ul>
+          <ul><li>Beide Netzüberwachungs-CPUs zeigen jetzt getrennt Block 16 (Legacy-Schutz), Block 20 (39 Schutzparameter) und Block 21 (28 dreiphasige Live- und Diagnosewerte).</li><li>Die 59- beziehungsweise 56-Byte-Layouts werden einschließlich Little Endian, vorzeichenbehafteter Werte und profilabhängiger Abschaltzeiten quellentreu dekodiert.</li><li>Block 16, 20 und 21 sind bewusst nur lesbar und werden vor serieller Sitzung oder Authentifizierung gegen Änderungen gesperrt.</li><li>Backup und Wiederherstellung behalten ihre 38 geprüften Ziele und behandeln die neuen Anzeige- und Liveblöcke nicht als restaurierbare Konfiguration.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.2.1</strong><time datetime="2026-08-16">16.08.2026</time></header>
-          <ul><li>Backup und Wiederherstellung umfassen neben den 36 Reglerblöcken auch Block 16 beider Netzschutz-CPUs als eindeutig adressierte CPU-/Block-Ziele.</li><li>Abbilder binden Ziel, Payload und relevante Metadaten per SHA-256; vorhandene CPU-0-Abbilder aus 1.2.0 bleiben kompatibel.</li><li>Live-Wiederherstellung bleibt an Pack- und Reglerprüfung, Sicherheitsabbild, Authentifizierung, positives ACK und vollständige Rückleseprüfung gebunden.</li></ul>
+          <ul><li>Backups umfassen neben den 36 Reglerblöcken auch Block 16 beider Netzschutz-CPUs als eindeutig adressierte CPU-/Block-Ziele; seit 1.8.0 bleiben diese Netzschutz-Ziele vom Restore ausgeschlossen.</li><li>Abbilder binden Ziel, Payload und relevante Metadaten per SHA-256; vorhandene CPU-0-Abbilder aus 1.2.0 bleiben kompatibel.</li><li>Live-Wiederherstellung bleibt an Pack- und Reglerprüfung, Sicherheitsabbild, Authentifizierung, positives ACK und vollständige Rückleseprüfung gebunden.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.1.1</strong><time datetime="2026-08-13">13.08.2026</time></header>
@@ -893,6 +956,6 @@
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="static/app.js?v=43"></script>
+  <script src="static/app.js?v=48"></script>
 </body>
 </html>

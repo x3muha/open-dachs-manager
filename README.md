@@ -1,9 +1,9 @@
-# Open Dachs Manager · V3 1.6.3
+# Open Dachs Manager · V3 1.8.0
 
 Lokale Bedienung, Überwachung und Wartungsdokumentation für Dachs-Anlagen mit
 MSR2-Regler – über die optische serielle Schnittstelle und ohne Cloud-Zwang.
 
-> **Projektstatus: Version 1.6.3.** Lesen, Dekodieren, Wartungs-Testmodus und der
+> **Projektstatus: Version 1.8.0.** Lesen, Dekodieren, Wartungs-Testmodus und der
 > zentrale Serialworker sind an einer Anlage praktisch erprobt. Ein echter
 > Schreibvorgang erfordert immer die ausdrückliche Schreibfreigabe,
 > Authentifizierung, eine positive Antwort und die anschließende Rückleseprüfung.
@@ -17,11 +17,12 @@ Open Dachs Manager ist ein unabhängiges Open-Source-Community-Projekt.
 | Bereich | Funktionen |
 |---|---|
 | **Übersicht** | Wirkleistung Ist/Soll mit automatisch berechnetem PW4, Betriebsstunden je Start im Motorstatus und optional als auswählbare Kachel, Wartungsrestzeit, frei auswählbare Live-Kacheln und technisches Anlagenbild mit Rußfilterschätzung |
+| **Bedienplatz** | Auf 1366 × 768 optimierte Touch-Ansicht mit derselben technischen Anlagenübersicht und gemeinsamem 2-Stunden-Verlauf für Drehzahl, Wirkleistung und Motorabgas |
 | **Überwachung** | Live-Werte und Historien mit Stunden-/Datumsauswahl, gemeinsamer Zeitachse und Zoom, Laufzustandsbändern sowie ereignistreuer Block-24-Motorstatusleiste |
 | **Wartung** | Vollständiges 42-Ziele-Pflichtbackup, schreibfreier Gesamtsnapshot, digitale Checkliste, PW4-Leseknopf, Vorher-/Nachher-Werte und PDF/HTML/JSON |
-| **Backup** | Geschütztes Wartungsarchiv, 36 Reglerblöcke sowie Block 16/20/21 beider Netzschutz-CPUs sichern; die 38 geprüften Konfigurationsziele lassen sich im Dry-Run oder kontrolliert wiederherstellen |
+| **Backup** | Geschütztes Wartungsarchiv, 36 Reglerblöcke sowie Block 16/20/21 beider Netzschutz-CPUs sichern; ausschließlich die 36 Reglerblöcke lassen sich im Dry-Run oder kontrolliert wiederherstellen |
 | **Einstellung** | Vollständig dekodierte Register, kontrollierte Schreibvorgänge sowie je Netzschutz-CPU Legacy-Schutz, zusätzliche Schutzparameter und Live-Netzwerte |
-| **System** | Mehrere Benutzer, Rollen, Passwortverwaltung, API-Freigabe und Token-Manager |
+| **System** | Mehrere Benutzer, optionaler lokaler Bedienplatz, Rollen, Passwortverwaltung, API-Freigabe, Token-Manager und offline prüfendes Firmware-Center |
 | **Werkzeuge** | Weboberfläche, CLI, TUI, JSON-Backups, Audit-Protokoll und systemd-Dienste |
 
 Weitere Merkmale:
@@ -39,8 +40,8 @@ Weitere Merkmale:
 - ein gemeinsamer FIFO-Serialworker für Web, CLI und TUI
 - atomare Abläufe für Wartungssnapshots und `Auth → Write → ACK → Readback`
 - geschütztes Backup-Archiv: Jeder Wartungsstart verlangt ein vollständiges,
-  SHA-256-geprüftes Abbild aller 42 Sicherungsziele; 38 geprüfte
-  Konfigurationsziele bleiben wiederherstellbar
+  SHA-256-geprüftes Abbild aller 42 Sicherungsziele; ausschließlich 36
+  Reglerblöcke bleiben wiederherstellbar
 - umschaltbarer Testmodus: Wartung vollständig durchspielen und lokal
   abschließen, ohne den Regler zu verändern; nur ein Admin kann den
   kontrollierten Echtabschluss freischalten
@@ -76,6 +77,22 @@ Block 24 liefert außerdem die Zustände 33/34/35 und die Signale
 Bewegungsrichtung (`zu`/`aus`/`auf`), **keine absolute Stellmotorposition**;
 eine Winkel- oder Weg-Rückmeldung ist im gemappten MSR2-Bestand nicht vorhanden.
 
+### 250-h-Diagnose
+
+Der Reiter `250-h-Diagnose` rekonstruiert 250-Betriebsstunden-Intervalle und
+Trends ausschließlich aus der bereits vorhandenen lokalen SQLite-Historie. Er
+liest keine MSR2-Diagnoseblöcke, authentifiziert nicht und schreibt nicht. Ein
+eigener Hintergrundworker aktualisiert einen atomar gespeicherten privaten
+Cache bei Dienststart, lokaler Mitternacht, erkanntem Motorstopp und manueller
+Aktualisierung; API und Oberfläche liefern währenddessen sofort den letzten
+gültigen oder einen klar markierten Pending-/Stale-Zustand.
+
+Die Auswertung trennt Datenlücken, Normalbänder und Trendhinweise. Fehlstarts
+bleiben ausdrücklich nicht verfügbar, solange keine dafür belegte interne
+Zeitreihe existiert; Motorstatus 14 wird nicht als Fehlstart oder bestätigter
+Stopp umgedeutet. Die Rußfilteranzeige und ihre lokale Kennlinie bleiben davon
+unabhängig.
+
 ### Geführte Wartung
 
 Beim Start liest eine einzige gemeinsame serielle Sitzung alle 42
@@ -98,7 +115,7 @@ oder gelöscht werden; `Zielzustand unklar` verlangt eine fachliche Prüfung.
 
 Der Bericht fasst Anlagenstand, Prüfpunkte, Vorher-/Nachher-Messwerte und das
 Ergebnis kompakt zusammen. Backup-ID, Erstellzeit, 42/42-Sicherungsergebnis,
-die 38 Restore-Ziele und Abbild-SHA-256 sind Teil der Herkunftsinformation. Ein technischer
+die 36 Restore-Ziele und Abbild-SHA-256 sind Teil der Herkunftsinformation. Ein technischer
 Anlagenanhang kann zusätzlich ausgegeben werden.
 
 <p align="center">
@@ -113,25 +130,31 @@ getrennt sichtbar: Block 16 mit dem 18-Byte-Legacy-Schutzlayout, Block 20 mit
 39 Schutzparametern aus 59 Byte und Block 21 mit 28 dreiphasigen Live- und
 Diagnosewerten aus 56 Byte.
 
-Block 16 mit 18 Feldern und Block 20 mit 39 Feldern sind auf beiden CPUs über
-den geschützten Editor schreibbar. Das sind insgesamt 114 eindeutig einer CPU
-und einem Block zugeordnete Feldinstanzen. Für Block 20 belegt die originale
-Layout-4-Datenzuordnung den Vollblock-Schreibdienst 21. Der Ablauf lautet
-`Read → encode → Auth → CAS → Service 21 → ACK → exakter
-Vollblock-Readback`; mehrdeutige Profilwerte können nur ausdrücklich als
-`raw:<Wert>` eingegeben werden. Kodierung und Dry-Run sind geprüft, ein
-physischer Block-20-Schreibvorgang am Gerät wurde noch nicht ausgeführt.
+Legacy-Block 16 ist nach den neueren Livebefunden ebenfalls nur lesbar: Beide
+U-3.050-CPUs lehnten sogar die unveränderte Vollblock-Rücksicherung fachlich
+mit `7F 11 01` ab; vier Rücklesungen blieben bytegleich. Block 20 ist trotz des aus der Layout-4-Datenzuordnung abgeleiteten Dienstes 21
+nur lesbar: Ein minimaler physischer Test auf beiden U-3.050-CPUs gewährte
+Auth 5 und lieferte einen positiven ACK, der Wert blieb aber nach vier
+Readbacks unverändert. Open Dachs Manager wertet einen ACK deshalb nicht als
+Schreiberfolg und bietet B20 nicht mehr zur Bearbeitung an.
 
 Block 21 besitzt keinen Schreibdienst und bleibt als laufender Messwertblock
 strikt nur lesbar. Backups erfassen Block 20 und 21 beider Netzschutz-CPUs
 zusätzlich schreibfrei, damit Schutzkonfiguration und Diagnosezustand im
-Abbild vollständig nachvollziehbar sind. Wiederherstellbar bleiben weiterhin
-nur die 36 Reglerblöcke plus Block 16 beider Netzschutz-CPUs, also 38 Ziele;
-Block 20 wartet noch auf die physische Restore-Abnahme und Block 21 darf als
-flüchtiger Messwertblock niemals zurückgeschrieben werden. Die
+Abbild vollständig nachvollziehbar sind. Wiederherstellbar bleiben ausschließlich die 36 Reglerblöcke. Block 16, 20
+und 21 beider Netzschutz-CPUs sind read/backup-only und werden vor jeder
+seriellen Sitzung, Authentifizierung oder Restoreauswahl abgewiesen. Die
 geprüften Standarddefinitionen enthalten keine weiteren Netz-CPU-Datenblöcke.
 Die zusätzlich live gelesenen Diagnosedienste 17 und 18 werden mangels belegter
 Feldstruktur nur als Rohbefund geführt, nicht als dekodierte Felder angeboten.
+
+Unter `System → Firmware` prüft das Firmware-Center eine `.muc` vollständig
+offline auf Header, Längen, SHA-256 und die acht eingebetteten Modulabbilder.
+Die Datei wird nicht gespeichert und die serielle Schnittstelle nicht berührt.
+Der native Live-Flash bleibt gesperrt, bis Loader-Kommandos, Baudwechsel,
+Frame-/ACK-Regeln und Abschlussprüfung des Golden Trace vollständig verifiziert
+sind; bis dahin bleibt der originale Updater über die kontrollierte
+COM3/RFC2217-Brücke der freigegebene Flashweg.
 
 ![Rot gekennzeichnete Netzschutzfelder](docs/assets/screenshots/netzschutz.png)
 
@@ -142,6 +165,13 @@ Benutzer, Rollen, Passwörter, API-Schreibfreigabe und Tokens verwaltet; die
 Dachs/MSR2-Register bleiben davon vollständig getrennt. Tokens besitzen
 unabhängige Rechte für `read`, `history` und `write` und werden nur einmal im
 Klartext angezeigt.
+
+Für einen direkt am Server betriebenen Touch-Bedienplatz kann dort zusätzlich
+ein lokaler Benutzer aktiviert werden. Er lauscht auf einem frei wählbaren
+Port ausschließlich an `127.0.0.1`; Standard sind Port 80 und die Rolle
+`admin`, die Funktion selbst ist standardmäßig deaktiviert. Der normale
+Web-Port und jeder Reverse Proxy bleiben loginpflichtig. Der lokale Principal
+ist cookie-los, und `/api/v1/*` verlangt weiterhin einen Bearer-Token.
 
 EDOMI sendet beim Schreiben ausschließlich einen technischen Key und den
 logischen Zielwert. Blockkodierung, PW4, Authentifizierung, positives ACK,

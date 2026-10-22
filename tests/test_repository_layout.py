@@ -23,7 +23,7 @@ class RepositoryLayoutTests(unittest.TestCase):
             project["tool"]["setuptools"]["dynamic"]["version"],
             {"attr": "open_dachs_manager.__version__"},
         )
-        self.assertEqual(__version__, "1.6.3")
+        self.assertEqual(__version__, "1.8.0")
         self.assertEqual(DachsRequestHandler.server_version, f"OpenDachsManager/{__version__}")
         scripts = project["project"]["scripts"]
         self.assertEqual(scripts["open-dachs"], "open_dachs_manager.cli:main")
@@ -45,6 +45,20 @@ class RepositoryLayoutTests(unittest.TestCase):
         self.assertIn(f"Version V3 {__version__}", manual)
         self.assertIn(f"V3 {__version__} wird standardmäßig", manual)
         self.assertIn(f"Version {__version__} basiert", safety)
+
+    def test_touch_operator_view_reuses_process_image_and_has_direct_route(self):
+        html = (ROOT / "src/open_dachs_manager/web/index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "src/open_dachs_manager/web/app.js").read_text(encoding="utf-8")
+        stylesheet = (ROOT / "src/open_dachs_manager/web/style.css").read_text(encoding="utf-8")
+
+        self.assertEqual(html.count('id="plantBoardPanel"'), 1)
+        self.assertIn('data-view="operatorView">Bedienplatz</button>', html)
+        self.assertIn('id="operatorPlantMount"', html)
+        self.assertIn('id="operatorChart"', html)
+        self.assertIn('["drehzahl", "wirkleistung", "abgas_motor"]', javascript)
+        self.assertIn('window.location.hash === "#bedienplatz"', javascript)
+        self.assertIn('target.append(panel)', javascript)
+        self.assertIn('.operator-view .hmi-diagram', stylesheet)
 
     def test_installation_assets_are_present_and_executable(self):
         for relative in (
@@ -77,6 +91,11 @@ class RepositoryLayoutTests(unittest.TestCase):
             self.assertNotIn("/root/senertec", text)
             self.assertNotIn("dachs-v3", text)
             self.assertIn("User=open-dachs", text)
+        web_service = (ROOT / "systemd/open-dachs-manager-web.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CapabilityBoundingSet=CAP_NET_BIND_SERVICE", web_service)
+        self.assertIn("AmbientCapabilities=CAP_NET_BIND_SERVICE", web_service)
 
     def test_foreign_logo_and_runtime_secrets_are_not_bundled(self):
         self.assertFalse((ROOT / "src/open_dachs_manager/web/logo_small.png").exists())

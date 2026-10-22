@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from dataclasses import asdict
@@ -27,12 +28,15 @@ import re
 import secrets
 import sqlite3
 import stat
+import tempfile
 import threading
 import time
 from urllib.parse import parse_qs, urlparse
 import zlib
 
 from . import __version__
+from .diagnosis_250h import Diagnosis250hCache, build_250h_diagnosis
+from .firmware import MUC_MAX_FILE_BYTES, inspect_muc
 from .auth import (
     auth_inputs_from_payloads,
     calculate_pw4,
@@ -101,14 +105,34 @@ MOTOR_SPEED_BLOCK = 24
 MOTOR_SPEED_KEY = "Hka_Mw1.usDrehzahl"
 API_TOKEN_SCOPES = frozenset({"read", "history", "write"})
 API_DEFAULT_AUTH_LEVEL = 4
+LOCAL_ACCESS_BIND_HOST = "127.0.0.1"
+LOCAL_ACCESS_DEFAULT_PORT = 80
+LOCAL_ACCESS_MIN_PORT = 1
+LOCAL_ACCESS_PRINCIPAL = "localhost-override"
+LOCAL_ACCESS_ROLES = frozenset({"guest", "admin"})
+LOCAL_ACCESS_MUTATION_HEADER = "X-Open-Dachs-Request"
+LOCAL_ACCESS_FORWARDED_HEADERS = (
+    "Forwarded",
+    "X-Forwarded-For",
+    "X-Forwarded-Host",
+    "X-Forwarded-Proto",
+    "X-Forwarded-Port",
+    "X-Real-IP",
+    "Via",
+)
 BACKUP_RESTORE_CONFIRMATION = "SICHERUNG WIEDERHERSTELLEN"
+BACKUP_RESTORE_PRESERVED_PREFIXES = (
+    "Hka_Bd_Stat.bSoftwareVersion",
+    "Rvc_SwVersion",
+)
 BACKUP_ARCHIVE_MAX_BYTES = 2 * 1024 * 1024
 BACKUP_ARCHIVE_FILENAME = re.compile(
     r"maintenance-[0-9]{8}T[0-9]{6}\.[0-9]{6}Z-[0-9a-f]{16}\.json"
 )
 # The browser accepts a 1 MiB image. Leave bounded room for the surrounding
 # JSON request object and restore selection without rejecting that image.
-MAX_JSON_BODY_BYTES = (1024 + 64) * 1024
+# A base64-encoded 1 MiB MUC needs about 1.34 MiB plus its JSON envelope.
+MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 POWER_TARGET_BLOCK = 50
 POWER_TARGET_KEY = "Hka_Ew.usSollGenerator"
 POWER_TARGET_AUTH_LEVEL = 4
@@ -153,6 +177,15 @@ DASHBOARD_TEMPERATURE_KEYS = (
 
 class APIRequestConflictError(RuntimeError):
     """An API request id is already bound to another or unfinished action."""
+
+
+class LocalAccessConflictError(RuntimeError):
+    """The configured loopback listener cannot be activated transactionally."""
+
+
+def _local_access_origin(port: int) -> str:
+    authority = LOCAL_ACCESS_BIND_HOST if int(port) == 80 else f"{LOCAL_ACCESS_BIND_HOST}:{int(port)}"
+    return f"http://{authority}"
 
 
 class PowerTargetRangeError(ValueError):
@@ -479,6 +512,8 @@ def _validate_username(value: object) -> str:
     username = str(value or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9._-]{3,32}", username):
         raise ValueError("Benutzername benötigt 3–32 Zeichen aus Buchstaben, Ziffern, Punkt, _ oder -")
+    if username.casefold() == LOCAL_ACCESS_PRINCIPAL.casefold():
+        raise ValueError("Benutzername ist für den lokalen Bedienplatz reserviert")
     return username
 
 
@@ -1002,6 +1037,139 @@ class DachsStore:
         # reads. WAL permits two of them while the monitor commits samples.
         with ThreadPoolExecutor(max_workers=min(2, len(requests))) as pool:
             return dict(pool.map(load_legacy, requests))
+
+    def diagnosis_250h(self) -> dict:
+        """Build 250-Bh intervals from the retained compact SQLite history."""
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=HISTORY_RETENTION_DAYS)
+        ).isoformat()
+        indexes = {
+            series_id: index
+            for index, (series_id, *_rest) in enumerate(HISTORY_SERIES)
+        }
+        wanted = {
+            "operating_seconds": (indexes["betriebsstunden_gesamt"], "raw"),
+            "starts": (indexes["starts"], "raw"),
+            "motor_exhaust": (indexes["abgas_motor"], "value"),
+            "dachs_exhaust": (indexes["abgas_hka"], "value"),
+            "coolant": (indexes["kuehlwasser"], "value"),
+            "inlet": (indexes["dachs_eintritt"], "value"),
+            "controller": (indexes["regler"], "value"),
+            "power": (indexes["wirkleistung"], "value"),
+            "warning_code": (indexes["warncode"], "raw"),
+            "service_code": (indexes["servicecode"], "raw"),
+        }
+
+        def decoded(rows: list[sqlite3.Row]) -> dict | None:
+            sample: dict | None = None
+            for row in rows:
+                try:
+                    values = json.loads(row["sample_json"])["values"]
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                candidate = {"recorded_at": str(row["recorded_at"])}
+                for name, (index, source) in wanted.items():
+                    try:
+                        stored = values[index]
+                        value = stored[0 if source == "raw" else 1] if stored else None
+                    except (IndexError, TypeError):
+                        value = None
+                    if value is not None:
+                        candidate[name] = value
+                if sample is None and {
+                    "operating_seconds", "starts"
+                }.issubset(candidate):
+                    sample = candidate
+                elif sample is not None:
+                    for name, value in candidate.items():
+                        if name not in sample or sample[name] is None:
+                            sample[name] = value
+                if sample is not None:
+                    break
+            return sample
+
+        db = self.connect()
+        try:
+            bounds = db.execute(
+                "SELECT MIN(recorded_at) AS oldest,MAX(recorded_at) AS newest "
+                "FROM history_samples WHERE recorded_at>=?",
+                (cutoff,),
+            ).fetchone()
+            if not bounds or not bounds["oldest"] or not bounds["newest"]:
+                return build_250h_diagnosis([])
+            oldest = _history_datetime(str(bounds["oldest"]), "älteste Messung")
+            newest = _history_datetime(str(bounds["newest"]), "neueste Messung")
+            bucket_seconds = 15 * 60
+            cursor = oldest.replace(second=0, microsecond=0)
+            cursor -= timedelta(minutes=cursor.minute % 15)
+            samples: list[dict] = []
+            while cursor <= newest:
+                upper = cursor + timedelta(seconds=bucket_seconds)
+                rows = db.execute(
+                    "SELECT recorded_at,sample_json FROM history_samples "
+                    "WHERE recorded_at>=? AND recorded_at<? ORDER BY recorded_at LIMIT 24",
+                    (cursor.isoformat(), upper.isoformat()),
+                ).fetchall()
+                sample = decoded(rows)
+                if sample is not None:
+                    samples.append(sample)
+                cursor = upper
+            latest_rows = db.execute(
+                "SELECT recorded_at,sample_json FROM history_samples "
+                "WHERE recorded_at>=? ORDER BY recorded_at DESC LIMIT 24",
+                ((newest - timedelta(minutes=2)).isoformat(),),
+            ).fetchall()
+            latest_sample = decoded(list(reversed(latest_rows)))
+            if latest_sample is not None and (
+                not samples or latest_sample["recorded_at"] > samples[-1]["recorded_at"]
+            ):
+                samples.append(latest_sample)
+            event_rows = db.execute(
+                "SELECT recorded_at,status FROM motor_status_points "
+                "WHERE recorded_at>=? AND recorded_at<=? ORDER BY recorded_at",
+                (str(bounds["oldest"]), str(bounds["newest"])),
+            ).fetchall()
+        finally:
+            db.close()
+        # Block 50 is deliberately absent from the old compact chart snapshot.
+        # Its locally persisted adaptive-history series supplies the dynamic
+        # target without causing any new controller read.
+        target_points = self.adaptive_history_between(
+            POWER_TARGET_BLOCK,
+            POWER_TARGET_KEY,
+            oldest,
+            newest,
+            HISTORY_MAX_POINTS,
+        )
+        target_times: list[datetime] = []
+        target_values: list[object] = []
+        for point in target_points:
+            at = _history_datetime(str(point["recorded_at"]), "Sollwertmessung")
+            first = point.get("first") if point.get("kind") == "rollup" else point.get("value")
+            last = point.get("last") if point.get("kind") == "rollup" else point.get("value")
+            if first is not None:
+                target_times.append(at)
+                target_values.append(first)
+            if point.get("kind") == "rollup" and last is not None and last != first:
+                target_times.append(at + timedelta(seconds=int(point.get("bucket_seconds") or 0)))
+                target_values.append(last)
+        ordered_targets = sorted(zip(target_times, target_values), key=lambda item: item[0])
+        target_times = [item[0] for item in ordered_targets]
+        target_values = [item[1] for item in ordered_targets]
+        for sample in samples:
+            sample_time = _history_datetime(sample["recorded_at"], "Messung")
+            position = bisect_right(target_times, sample_time) - 1
+            if position < 0 and target_values:
+                position = 0
+            if position >= 0:
+                sample["power_target"] = target_values[position]
+
+        migration_complete = self.history_migration(MOTOR_STATUS_MIGRATION) is not None
+        return build_250h_diagnosis(
+            samples,
+            status_events=[dict(row) for row in event_rows],
+            history_complete=migration_complete,
+        )
 
     def record(self, recorded_at: str, rows: list[dict]) -> None:
         if not rows:
@@ -2456,6 +2624,10 @@ class DachsWebApp:
             port, baud, timeout, self.pack, serial_socket=serial_socket
         )
         self.store = DachsStore(self.data_dir / "dachs-web.db")
+        self.diagnosis_250h_cache = Diagnosis250hCache(
+            self.data_dir / "diagnosis_250h_cache.json",
+            self.store.diagnosis_250h,
+        )
         self.backup_archive_dir = self.data_dir / "backup-archive"
         self.backup_archive_errors: list[str] = []
         archive_fd = self._open_backup_archive_directory()
@@ -2467,6 +2639,7 @@ class DachsWebApp:
         self.dashboard_settings_path = self.data_dir / "dashboard_settings.json"
         self.soot_filter_settings_path = self.data_dir / "soot_filter_settings.json"
         self.api_settings_path = self.data_dir / "api_settings.json"
+        self.local_access_settings_path = self.data_dir / "local_access_settings.json"
         # The environment value is only the initial default. Once an admin
         # changes the test mode in the web UI, the local setting survives
         # service restarts and later package updates.
@@ -2476,6 +2649,14 @@ class DachsWebApp:
         self.dashboard_cards = self._load_dashboard_cards()
         self.soot_filter_config = self._load_soot_filter_settings()
         self.api_config = self._load_api_settings()
+        self.local_access_config = self._load_local_access_settings()
+        self.local_access_runtime = {
+            "active": False,
+            "last_error": None,
+            "restart_required": bool(self.local_access_config["enabled"]),
+            "url": None,
+        }
+        self.local_access_manager: LocalAccessManager | None = None
         self.slow_monitor_interval = DEFAULT_SLOW_MONITOR_INTERVAL
         self._last_slow_poll = 0.0
         self._last_history_sample = float("-inf")
@@ -3010,6 +3191,111 @@ class DachsWebApp:
         return self.api_settings()
 
     @staticmethod
+    def _normalize_local_access_settings(payload: object) -> dict:
+        if not isinstance(payload, dict):
+            raise ValueError("Lokaler-Zugang-Einstellungen müssen ein Objekt sein")
+        enabled = payload.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled muss true oder false sein")
+        port = payload.get("port", LOCAL_ACCESS_DEFAULT_PORT)
+        if type(port) is not int:
+            raise ValueError("Port muss eine ganze Zahl sein")
+        if not LOCAL_ACCESS_MIN_PORT <= port <= 65535:
+            raise ValueError(
+                f"Port muss zwischen {LOCAL_ACCESS_MIN_PORT} und 65535 liegen"
+            )
+        role = payload.get("role", "admin")
+        if not isinstance(role, str) or role not in LOCAL_ACCESS_ROLES:
+            raise ValueError("Rechte müssen admin oder guest sein")
+        return {"enabled": enabled, "port": port, "role": role}
+
+    def _load_local_access_settings(self) -> dict:
+        try:
+            return self._normalize_local_access_settings(
+                json.loads(self.local_access_settings_path.read_text(encoding="utf-8"))
+            )
+        except (OSError, ValueError, TypeError):
+            return {
+                "enabled": False,
+                "port": LOCAL_ACCESS_DEFAULT_PORT,
+                "role": "admin",
+            }
+
+    def _save_local_access_settings(self, settings: dict) -> None:
+        destination = self.local_access_settings_path
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            dir=destination.parent,
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {"version": 1, **settings},
+                        ensure_ascii=False,
+                        indent=2,
+                    ) + "\n"
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            # This replace is the transaction's commit point. Before it, an
+            # exception leaves the old file and listener untouched. After it,
+            # runtime must adopt the new listener even if the best-effort
+            # directory fsync is unavailable; rolling back after replacement
+            # would itself have an ambiguous failure window.
+            os.replace(temporary, destination)
+            with suppress(OSError):
+                directory_fd = os.open(
+                    destination.parent,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                )
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _commit_local_access_settings(self, settings: dict) -> None:
+        self._save_local_access_settings(settings)
+        with self.state_lock:
+            self.local_access_config = dict(settings)
+
+    def _set_local_access_runtime(self, **changes: object) -> None:
+        with self.state_lock:
+            self.local_access_runtime.update(changes)
+
+    def local_access_settings(self) -> dict:
+        with self.state_lock:
+            settings = dict(self.local_access_config)
+            runtime = dict(self.local_access_runtime)
+        return {
+            **settings,
+            "bind_host": LOCAL_ACCESS_BIND_HOST,
+            **runtime,
+        }
+
+    def set_local_access_manager(self, manager: LocalAccessManager) -> None:
+        self.local_access_manager = manager
+
+    def set_local_access_settings(self, payload: object) -> dict:
+        settings = self._normalize_local_access_settings(payload)
+        manager = self.local_access_manager
+        if manager is not None:
+            return manager.reconfigure(settings)
+        self._commit_local_access_settings(settings)
+        self._set_local_access_runtime(
+            active=False,
+            last_error=None,
+            restart_required=bool(settings["enabled"]),
+            url=None,
+        )
+        return self.local_access_settings()
+
+    @staticmethod
     def _default_dashboard_cards() -> list[dict]:
         wanted = set(DEFAULT_OVERVIEW_SERIES_IDS)
         return [
@@ -3138,6 +3424,7 @@ class DachsWebApp:
             print(f"  admin / {self.initial_credentials['admin']}", flush=True)
             print(f"  gast  / {self.initial_credentials['gast']}", flush=True)
         self.monitor_thread.start()
+        self.diagnosis_250h_cache.start()
         # A large SQLite history can make either cleanup query take minutes on
         # the Pi's SD card.  Keep the HTTP listener responsive and run the
         # maintenance work in the background after startup.
@@ -3145,6 +3432,7 @@ class DachsWebApp:
 
     def stop(self) -> None:
         self.stop_event.set()
+        self.diagnosis_250h_cache.stop()
         self.monitor_thread.join(timeout=2)
 
     def _load_users(self) -> list[dict]:
@@ -3304,6 +3592,8 @@ class DachsWebApp:
             print(f"Open Dachs Manager: Motorstatus-Backfill fehlgeschlagen: {exc}", flush=True)
 
     def login(self, username: str, password: str) -> tuple[str, str] | None:
+        if str(username).strip().casefold() == LOCAL_ACCESS_PRINCIPAL.casefold():
+            return None
         for user in self._load_users():
             if (
                 user.get("username") == username
@@ -3392,6 +3682,7 @@ class DachsWebApp:
             recorded_at = _now()
             rows: list[dict] = []
             motor_status_observation: object | None = None
+            motor_speed_observation: object | None = None
             ok_blocks = failed_blocks = 0
             error_text = None
             dashboard_fields = set(dashboard_cards)
@@ -3426,6 +3717,11 @@ class DachsWebApp:
                                         and field.key == MOTOR_STATUS_KEY
                                     ):
                                         motor_status_observation = field.raw
+                                    if (
+                                        block == MOTOR_SPEED_BLOCK
+                                        and field.key == MOTOR_SPEED_KEY
+                                    ):
+                                        motor_speed_observation = field.raw
                                     dashboard_selected = (block, field.key) in dashboard_fields
                                     default_visible = (
                                         block in DEFAULT_MONITOR_BLOCKS
@@ -3509,6 +3805,15 @@ class DachsWebApp:
                     self.store.record_motor_status_observation(
                         recorded_at,
                         motor_status_observation,
+                    )
+                if (
+                    motor_status_observation is not None
+                    and motor_speed_observation is not None
+                ):
+                    self.diagnosis_250h_cache.observe_motor(
+                        recorded_at,
+                        status=motor_status_observation,
+                        rpm=motor_speed_observation,
                     )
                 with self.state_lock:
                     adaptive_rows = [
@@ -4101,6 +4406,41 @@ class DachsWebApp:
             "blocks": int(inspection.get("successful_blocks") or 0),
         }
 
+    def _restore_target_preserving_device_fields(
+        self,
+        cpu: int,
+        block: int,
+        before: bytes,
+        target: bytes,
+    ) -> tuple[bytes, list[str]]:
+        """Keep firmware/version identity bytes owned by the destination PCB.
+
+        Senertec's original ``Platinentausch`` workflow copies matching data-map
+        values but explicitly skips ``Hka_Bd_Stat.bSoftwareVersion*`` and
+        ``Rvc_SwVersion*``.  Raw backup images still retain those bytes as
+        diagnostic source metadata; restore must not transfer them to another
+        controller and thereby misreport its actual firmware generation.
+        """
+        current = bytes(before)
+        restored = bytearray(target)
+        if cpu != 0 or len(current) != len(restored):
+            return bytes(restored), []
+        preserved: set[str] = set()
+        for key, metadata in self.pack.field_map(block).items():
+            base_key = str(metadata.get("base_key") or key)
+            if not base_key.startswith(BACKUP_RESTORE_PRESERVED_PREFIXES):
+                continue
+            offset = int(metadata["offset"])
+            size = int(metadata["size"])
+            if offset < 0 or size < 1 or offset + size > len(restored):
+                raise ValueError(
+                    f"Restore-Schutzfeld {key!r} liegt außerhalb von Block {block}"
+                )
+            if restored[offset:offset + size] != current[offset:offset + size]:
+                preserved.add(base_key)
+            restored[offset:offset + size] = current[offset:offset + size]
+        return bytes(restored), sorted(preserved)
+
     def restore_backup(
         self,
         username: str,
@@ -4115,9 +4455,10 @@ class DachsWebApp:
         """Plan or execute an exact multi-block restore in one worker lease.
 
         Every selected block is read and length-checked before authentication.
-        Live restore authenticates once, skips identical payloads without a
-        wire write and stops after the first failed write/readback. Successful
-        earlier blocks are deliberately not rolled back.
+        Live restore authenticates once, preserves destination-owned firmware
+        version fields, skips identical payloads without a wire write and
+        attempts every selected target.  Per-target failures are collected;
+        successful blocks are deliberately not rolled back.
         """
         if not isinstance(write_enabled, bool):
             raise ValueError("write_enabled muss true oder false sein")
@@ -4152,10 +4493,10 @@ class DachsWebApp:
 
         preflight: dict[tuple[int, int], bytes] = {}
         targets: dict[tuple[int, int], bytes] = {}
+        preserved_fields: dict[tuple[int, int], list[str]] = {}
         auth = None
         preimage_metadata = None
         results: list[dict] = []
-        stopped_at: tuple[int, int] | None = None
         with self.serial_lock:
             with self.state_lock:
                 if not self.serial_enabled:
@@ -4184,7 +4525,11 @@ class DachsWebApp:
                                 f"Restore-Vorprüfung: Netzschutz CPU {cpu}, Block {block} ist ungültig: {exc}"
                             ) from exc
                     preflight[target_key] = before
+                    target, preserved = self._restore_target_preserving_device_fields(
+                        cpu, block, before, target
+                    )
                     targets[target_key] = target
+                    preserved_fields[target_key] = preserved
 
                 differing = [
                     target for target in selected
@@ -4200,8 +4545,10 @@ class DachsWebApp:
                     ):
                         raise ValueError("Das Sicherungsabbild wurde nach der Prüfung verändert")
                     controller = dict(raw_inspection.get("controller") or {})
-                    image_serial = str(controller.get("serial_number") or "").strip()
-                    if controller.get("available") is not True or not image_serial:
+                    if (
+                        controller.get("available") is not True
+                        or not str(controller.get("serial_number") or "").strip()
+                    ):
                         raise ValueError(
                             "Live-Wiederherstellung benötigt ein neues Abbild mit Gerätekennung"
                         )
@@ -4240,6 +4587,13 @@ class DachsWebApp:
                                 f"im Abbild aber {len(targets[target_key])} Byte"
                             )
                         preflight[target_key] = before
+                        target, preserved = self._restore_target_preserving_device_fields(
+                            cpu, block, before, targets[target_key]
+                        )
+                        targets[target_key] = target
+                        preserved_fields[target_key] = sorted(
+                            set(preserved_fields[target_key]) | set(preserved)
+                        )
                     differing = [
                         target for target in selected
                         if preflight[target] != targets[target]
@@ -4248,29 +4602,17 @@ class DachsWebApp:
                         preimage_metadata = self._persist_restore_preimage(preimage)
 
                     current_controller = dict(preimage_inspection.get("controller") or {})
-                    current_serial = str(current_controller.get("serial_number") or "").strip()
-                    if current_controller.get("available") is not True or not current_serial:
+                    if (
+                        current_controller.get("available") is not True
+                        or not str(current_controller.get("serial_number") or "").strip()
+                    ):
                         raise RuntimeError(
                             "Restore-Vorprüfung: aktuelle Reglerkennung konnte nicht gelesen werden"
-                        )
-                    if not hmac.compare_digest(
-                        image_serial,
-                        current_serial,
-                    ):
-                        raise PermissionError(
-                            "Das Sicherungsabbild gehört zu einer anderen Regler-Seriennummer"
                         )
                     if differing:
                         auth = self.service.authenticate(session, int(auth_level), pass4 or None)
                         if not auth.ok:
                             raise PermissionError(f"Auth-Level {auth_level} wurde nicht gewährt")
-                        authenticated_serial = str(
-                            getattr(auth, "serial_number", current_serial) or ""
-                        ).strip()
-                        if not hmac.compare_digest(image_serial, authenticated_serial):
-                            raise PermissionError(
-                                "Die Regler-Seriennummer hat sich während der Wiederherstellung geändert"
-                            )
 
                 # Blocks 20 and 22 provide the current device inputs for PW4.
                 # Keep them until the end so a multi-block restore cannot
@@ -4291,28 +4633,6 @@ class DachsWebApp:
                             preflight[target_key], targets[target_key]
                         )
                     )
-                    if stopped_at is not None:
-                        results.append({
-                            "cpu": cpu,
-                            "block": block,
-                            "target_key": f"{cpu}:{block}",
-                            "name": self._backup_target_name(cpu, block),
-                            "critical": bool(cpu),
-                            "status": "not-attempted",
-                            "changed": changed,
-                            "changed_bytes": changed_bytes,
-                            "dry_run": not write_enabled,
-                            "written": False,
-                            "write_attempted": False,
-                            "ack_positive": None,
-                            "readback_ok": None,
-                            "readback_scope": None,
-                            "error": (
-                                f"Nach Fehler in CPU {stopped_at[0]}, "
-                                f"Block {stopped_at[1]} nicht mehr ausgeführt"
-                            ),
-                        })
-                        continue
                     restore_arguments = (
                         session,
                         block,
@@ -4341,6 +4661,7 @@ class DachsWebApp:
                         "block_name": self._backup_target_name(cpu, block),
                         "critical": bool(cpu),
                         "changed_bytes": changed_bytes,
+                        "preserved_fields": preserved_fields[target_key],
                         "auth_level_requested": int(auth_level),
                         "auth_level_granted": getattr(auth, "granted_level", None),
                         "preimage": preimage_metadata,
@@ -4348,8 +4669,6 @@ class DachsWebApp:
                     self.store.audit(_now(), username, block, audit_payload)
                     if audit_payload.get("error"):
                         status = "failed"
-                        if write_enabled:
-                            stopped_at = target_key
                     elif not changed:
                         status = "unchanged"
                     elif not write_enabled:
@@ -4365,6 +4684,7 @@ class DachsWebApp:
                         "status": status,
                         "changed": changed,
                         "changed_bytes": changed_bytes,
+                        "preserved_fields": preserved_fields[target_key],
                         "dry_run": bool(audit_payload.get("dry_run")),
                         "written": bool(audit_payload.get("written")),
                         "write_attempted": bool(audit_payload.get("write_attempted")),
@@ -4391,7 +4711,7 @@ class DachsWebApp:
         }
         return {
             "schema": "open-dachs-manager-restore-result/v1",
-            "ok": failed == 0 and stopped_at is None,
+            "ok": failed == 0,
             "mode": "live" if write_enabled else "dry-run",
             "dry_run": not write_enabled,
             "image_sha256": calculated_hash,
@@ -4409,10 +4729,8 @@ class DachsWebApp:
             "failed_blocks": failed,
             "auth_level_requested": int(auth_level),
             "auth_level_granted": getattr(auth, "granted_level", None),
-            "stopped_at_block": stopped_at[1] if stopped_at is not None else None,
-            "stopped_at_target": (
-                self._backup_target_object(stopped_at) if stopped_at is not None else None
-            ),
+            "stopped_at_block": None,
+            "stopped_at_target": None,
             "preimage": preimage_metadata,
             "results": results,
             "summary": summary,
@@ -5058,7 +5376,7 @@ class DachsWebApp:
         *,
         block: int = NETWORK_PROTECTION_BLOCK,
     ) -> dict:
-        """Apply CPU1/2 block-16/20 changes through the explicit write gate."""
+        """Reject writes unless a reviewed network block is explicitly writable."""
         if not isinstance(write_enabled, bool):
             raise ValueError("write_enabled muss true oder false sein")
         if write_enabled:
@@ -5179,6 +5497,15 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
     def cookie_path(self) -> str:
         return f"{self.base_path}/" if self.base_path else "/"
 
+    @property
+    def local_access(self) -> bool:
+        return bool(getattr(self.server, "local_access", False))
+
+    @property
+    def local_origin(self) -> str:
+        port = int(self.server.server_address[1])  # type: ignore[attr-defined]
+        return _local_access_origin(port)
+
     def _route_path(self, path: str) -> str | None:
         if not self.base_path:
             return path
@@ -5198,7 +5525,70 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
         return None
 
     def _user(self) -> dict | None:
+        if self.local_access:
+            return {
+                "username": LOCAL_ACCESS_PRINCIPAL,
+                "role": getattr(self.server, "local_role", "guest"),
+                "auth_source": LOCAL_ACCESS_PRINCIPAL,
+                "local_access": True,
+            }
         return self.app.session_user(self._token())
+
+    def _validate_local_request(self, *, mutating: bool = False) -> bool:
+        if not self.local_access:
+            return True
+        if self.client_address[0] != LOCAL_ACCESS_BIND_HOST:
+            self._error(403, "local access requires a loopback peer")
+            return False
+        expected_authority = self.local_origin.removeprefix("http://")
+        if self.headers.get_all("Host", []) != [expected_authority]:
+            self._error(421, "local access requires the canonical 127.0.0.1 host")
+            return False
+        forwarded = [
+            name
+            for name in self.headers.keys()
+            if name.lower().startswith("x-forwarded-")
+            or name.lower() in {item.lower() for item in LOCAL_ACCESS_FORWARDED_HEADERS}
+        ]
+        if forwarded:
+            self._error(403, "forwarded requests are not accepted on local access")
+            return False
+        origins = self.headers.get_all("Origin", [])
+        if len(origins) > 1:
+            self._error(403, "multiple origins are not accepted on local access")
+            return False
+        origin = origins[0] if origins else None
+        if origin is not None and origin != self.local_origin:
+            self._error(403, "foreign origin is not accepted on local access")
+            return False
+        fetch_site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
+        if fetch_site and fetch_site not in {"same-origin", "none"}:
+            # The settings UI exposes the effective loopback URL as a link.
+            # Chromium labels a click from the primary port (or the public
+            # proxy origin) as same-site/cross-site even though it is a safe
+            # top-level navigation. Allow only that visible, user-activated
+            # GET; scripts, frames, subresources and all mutations stay denied.
+            user_navigation = (
+                not mutating
+                and self.command == "GET"
+                and origin is None
+                and self.headers.get("Sec-Fetch-Mode", "").strip().lower()
+                == "navigate"
+                and self.headers.get("Sec-Fetch-Dest", "").strip().lower()
+                == "document"
+                and self.headers.get("Sec-Fetch-User", "").strip() == "?1"
+            )
+            if not user_navigation:
+                self._error(403, "cross-site requests are not accepted on local access")
+                return False
+        if mutating:
+            if origin != self.local_origin:
+                self._error(403, "local changes require the exact local origin")
+                return False
+            if self.headers.get_all(LOCAL_ACCESS_MUTATION_HEADER, []) != ["1"]:
+                self._error(403, "local changes require the request guard")
+                return False
+        return True
 
     def _api_principal(self) -> dict | None:
         scheme, _, secret = self.headers.get("Authorization", "").strip().partition(" ")
@@ -5214,6 +5604,13 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data:; style-src 'self'; "
+            "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+            "base-uri 'none'; form-action 'self'",
+        )
         if cookies:
             for cookie in cookies:
                 self.send_header("Set-Cookie", cookie)
@@ -5265,6 +5662,8 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
         return payload
 
     def do_GET(self):
+        if not self._validate_local_request():
+            return
         parsed = urlparse(self.path)
         if self.base_path and parsed.path == self.base_path:
             return self._send(
@@ -5370,6 +5769,10 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     if user.get("role") != "admin":
                         return self._error(403, "admin role required")
                     return self._json(self.app.api_settings())
+                if path == "/api/settings/local-access":
+                    if user.get("role") != "admin":
+                        return self._error(403, "admin role required")
+                    return self._json(self.app.local_access_settings())
                 if path == "/api/users":
                     if user.get("role") != "admin":
                         return self._error(403, "admin role required")
@@ -5471,6 +5874,12 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                             MOTOR_STATUS_MIGRATION
                         ) is not None,
                     })
+                if path == "/api/diagnosis/250h":
+                    query = parse_qs(parsed.query)
+                    refresh = query.get("refresh", ["0"])[0] == "1"
+                    return self._json(
+                        self.app.diagnosis_250h_cache.get(refresh=refresh)
+                    )
                 if path == "/api/audit":
                     if user.get("role") != "admin":
                         return self._error(403, "admin role required")
@@ -5511,6 +5920,9 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = self._route_path(parsed.path)
+        bearer_api = bool(path and path.startswith("/api/v1/"))
+        if not self._validate_local_request(mutating=not bearer_api):
+            return
         if path is None:
             return self._error(404, "not found")
         try:
@@ -5529,6 +5941,19 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                 if self._require() is None:
                     return
                 return self._json(self.app.inspect_backup(payload.get("image")))
+            if path == "/api/firmware/inspect":
+                if self._require(admin=True) is None:
+                    return
+                encoded = payload.get("content_b64")
+                if not isinstance(encoded, str) or not encoded:
+                    raise ValueError("Firmwaredatei fehlt")
+                if len(encoded) > ((MUC_MAX_FILE_BYTES + 2) // 3) * 4:
+                    raise ValueError("Firmwaredatei ist zu groß")
+                try:
+                    raw = base64.b64decode(encoded, validate=True)
+                except (ValueError, TypeError) as exc:
+                    raise ValueError("Firmwaredatei ist nicht gültig base64-kodiert") from exc
+                return self._json(inspect_muc(raw, payload.get("filename")))
             if path == "/api/backup/restore":
                 user = self._require(admin=True)
                 if user is None:
@@ -5544,6 +5969,8 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     str(payload.get("confirmation", "")),
                 ))
             if path == "/api/login":
+                if self.local_access:
+                    return self._error(403, "local access does not use password login")
                 result = self.app.login(str(payload.get("username", "")), str(payload.get("password", "")))
                 if result is None:
                     return self._error(401, "Benutzername oder Passwort falsch")
@@ -5551,9 +5978,13 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                 cookie = self._session_cookie(token, 43200)
                 return self._json({"ok": True, "role": role}, cookies=[cookie])
             if path == "/api/logout":
+                if self.local_access:
+                    return self._json({"ok": True, "local_access": True})
                 self.app.logout(self._token())
                 return self._json({"ok": True}, cookies=[self._session_cookie("", 0)])
             if path == "/api/password":
+                if self.local_access:
+                    return self._error(403, "local access has no password")
                 user = self._require()
                 if user is None:
                     return
@@ -5589,6 +6020,10 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                 if self._require(admin=True) is None:
                     return
                 return self._json(self.app.set_api_settings(payload))
+            if path == "/api/settings/local-access":
+                if self._require(admin=True) is None:
+                    return
+                return self._json(self.app.set_local_access_settings(payload))
             if path == "/api/users":
                 if self._require(admin=True) is None:
                     return
@@ -5686,7 +6121,7 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                 )
                 return self._json(result, status=502 if result.get("error") else 200)
             return self._error(404, "unknown API path")
-        except APIRequestConflictError as exc:
+        except (APIRequestConflictError, LocalAccessConflictError) as exc:
             self._error(409, str(exc))
         except (ValueError, KeyError) as exc:
             self._error(400, str(exc))
@@ -5698,6 +6133,8 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
             self._error(500, str(exc))
 
     def do_DELETE(self):
+        if not self._validate_local_request(mutating=True):
+            return
         path = self._route_path(urlparse(self.path).path)
         if path is None:
             return self._error(404, "not found")
@@ -5750,10 +6187,174 @@ class DachsHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, app: DachsWebApp, base_path: str = ""):
+    def __init__(
+        self,
+        address,
+        app: DachsWebApp,
+        base_path: str = "",
+        *,
+        local_access: bool = False,
+        local_role: str = "admin",
+    ):
+        if local_role not in LOCAL_ACCESS_ROLES:
+            raise ValueError("local_role must be guest or admin")
+        if local_access and str(address[0]) != LOCAL_ACCESS_BIND_HOST:
+            raise ValueError("local access must bind exactly to 127.0.0.1")
         self.dachs_app = app
         self.base_path = normalize_base_path(base_path)
+        self.local_access = bool(local_access)
+        self.local_role = local_role
         super().__init__(address, DachsRequestHandler)
+
+
+class LocalAccessManager:
+    """Own one optional cookie-less HTTP listener bound only to loopback."""
+
+    def __init__(
+        self,
+        app: DachsWebApp,
+        *,
+        base_path: str,
+        primary_port: int,
+    ):
+        self.app = app
+        self.base_path = normalize_base_path(base_path)
+        self.primary_port = int(primary_port)
+        self.lock = threading.RLock()
+        self.server: DachsHTTPServer | None = None
+        self.thread: threading.Thread | None = None
+        app.set_local_access_manager(self)
+
+    def _url(self, port: int) -> str:
+        suffix = f"{self.base_path}/" if self.base_path else "/"
+        return f"{_local_access_origin(port)}{suffix}"
+
+    @staticmethod
+    def _stop_pair(
+        server: DachsHTTPServer | None,
+        thread: threading.Thread | None,
+    ) -> None:
+        if server is None:
+            return
+        server.shutdown()
+        server.server_close()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2)
+
+    def _new_pair(self, settings: dict) -> tuple[DachsHTTPServer, threading.Thread]:
+        port = int(settings["port"])
+        try:
+            server = DachsHTTPServer(
+                (LOCAL_ACCESS_BIND_HOST, port),
+                self.app,
+                base_path=self.base_path,
+                local_access=True,
+                local_role=str(settings["role"]),
+            )
+        except OSError as exc:
+            detail = exc.strerror or str(exc)
+            raise LocalAccessConflictError(
+                f"Lokaler Port {port} kann auf 127.0.0.1 nicht geöffnet werden: {detail}"
+            ) from exc
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name=f"dachs-local-access-{port}",
+            daemon=True,
+        )
+        return server, thread
+
+    def _apply(self, settings: dict, *, persist: bool) -> dict:
+        old_server = old_thread = None
+        with self.lock:
+            if int(settings["port"]) == self.primary_port:
+                raise LocalAccessConflictError(
+                    "Lokaler Port muss sich vom normalen Web-Port unterscheiden"
+                )
+            current_server = self.server
+            current_thread = self.thread
+            same_port = bool(
+                settings["enabled"]
+                and current_server is not None
+                and int(current_server.server_address[1]) == int(settings["port"])
+            )
+            if same_port:
+                if persist:
+                    self.app._commit_local_access_settings(settings)
+                current_server.local_role = str(settings["role"])
+                self.app._set_local_access_runtime(
+                    active=True,
+                    last_error=None,
+                    restart_required=False,
+                    url=self._url(int(settings["port"])),
+                )
+                return self.app.local_access_settings()
+
+            new_server = new_thread = None
+            if settings["enabled"]:
+                new_server, new_thread = self._new_pair(settings)
+                try:
+                    new_thread.start()
+                except Exception:
+                    new_server.server_close()
+                    raise
+            try:
+                if persist:
+                    self.app._commit_local_access_settings(settings)
+            except Exception:
+                self._stop_pair(new_server, new_thread)
+                raise
+
+            old_server, old_thread = current_server, current_thread
+            self.server, self.thread = new_server, new_thread
+            self.app._set_local_access_runtime(
+                active=bool(new_server),
+                last_error=None,
+                restart_required=False,
+                url=self._url(int(settings["port"])) if new_server else None,
+            )
+
+        self._stop_pair(old_server, old_thread)
+        return self.app.local_access_settings()
+
+    def start(self) -> dict:
+        settings = self.app._normalize_local_access_settings(
+            self.app.local_access_config
+        )
+        if not settings["enabled"]:
+            self.app._set_local_access_runtime(
+                active=False,
+                last_error=None,
+                restart_required=False,
+                url=None,
+            )
+            return self.app.local_access_settings()
+        try:
+            result = self._apply(settings, persist=False)
+        except Exception as exc:
+            self.app._set_local_access_runtime(
+                active=False,
+                last_error=str(exc),
+                restart_required=False,
+                url=self._url(int(settings["port"])),
+            )
+            print(f"Open Dachs Manager: lokaler Zugang inaktiv: {exc}", flush=True)
+            return self.app.local_access_settings()
+        print(f"Open Dachs Manager lokaler Zugang: {result['url']}", flush=True)
+        return result
+
+    def reconfigure(self, settings: dict) -> dict:
+        return self._apply(settings, persist=True)
+
+    def stop(self) -> None:
+        with self.lock:
+            server, thread = self.server, self.thread
+            self.server = None
+            self.thread = None
+        self._stop_pair(server, thread)
+        self.app._set_local_access_runtime(
+            active=False,
+            restart_required=False,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -5808,13 +6409,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     base_path = normalize_base_path(args.base_path)
     server = DachsHTTPServer((args.host, args.web_port), app, base_path=base_path)
+    local_access = LocalAccessManager(
+        app,
+        base_path=base_path,
+        primary_port=args.web_port,
+    )
     app.start()
+    local_access.start()
     print(f"Open Dachs Manager: http://{args.host}:{args.web_port}{base_path or '/'}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        local_access.stop()
         app.stop()
         server.server_close()
     return 0

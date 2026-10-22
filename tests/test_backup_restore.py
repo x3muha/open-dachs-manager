@@ -221,7 +221,7 @@ class BackupRestoreTests(unittest.TestCase):
         inspection = self.service.inspect_backup(image)
         self.assertTrue(inspection["digest_verified"])
         self.assertEqual(inspection["requested_targets"], targets)
-        self.assertEqual(inspection["restorable_targets"], targets)
+        self.assertEqual(inspection["restorable_targets"], [])
         self.assertNotIn("restorable_block_ids", inspection)
 
         cpu_tamper = copy.deepcopy(image)
@@ -294,7 +294,7 @@ class BackupRestoreTests(unittest.TestCase):
                 )
                 self.assertFalse(audit.write_attempted)
                 self.assertFalse(audit.written)
-                self.assertIn("exactly 18 bytes", audit.error)
+                self.assertIn("nur lesbar", audit.error)
                 self.assertEqual(untouched.calls, [])
 
     def test_invalid_network_payload_is_a_visible_failed_partial_backup(self):
@@ -319,11 +319,8 @@ class BackupRestoreTests(unittest.TestCase):
         self.assertEqual(failed["payload_len"], 17)
         self.assertIn("Netzschutz CPU 1", failed["error"])
         self.assertFalse(inspection["records"][0]["restorable"])
-        self.assertTrue(inspection["records"][1]["restorable"])
-        self.assertEqual(
-            inspection["restorable_targets"],
-            [{"cpu": 2, "block": 16}],
-        )
+        self.assertFalse(inspection["records"][1]["restorable"])
+        self.assertEqual(inspection["restorable_targets"], [])
 
     def test_identity_failure_is_recorded_without_losing_the_backup(self):
         session = BackupSession({20: b"\x01\x02"})
@@ -563,7 +560,8 @@ class BackupRestoreTests(unittest.TestCase):
         )
         self.assertEqual(network_no_op.cpu, 1)
         self.assertFalse(network_no_op.write_attempted)
-        self.assertTrue(network_no_op.readback_ok)
+        self.assertIsNone(network_no_op.readback_ok)
+        self.assertIn("nur lesbar", network_no_op.error)
 
         network_dry_run = self.service.restore_payload(
             session,
@@ -576,6 +574,7 @@ class BackupRestoreTests(unittest.TestCase):
         self.assertEqual(network_dry_run.cpu, 2)
         self.assertFalse(network_dry_run.write_attempted)
         self.assertIsNone(network_dry_run.readback_ok)
+        self.assertIn("nur lesbar", network_dry_run.error)
 
     def test_live_restore_requires_stability_positive_ack_and_exact_readback(self):
         before = b"\x01\x02\x03\x04"
@@ -600,58 +599,20 @@ class BackupRestoreTests(unittest.TestCase):
             result.changed_keys, ("backup.restore.block[20].full_payload",)
         )
 
-    def test_network_live_restore_uses_addressed_cpu_ack_and_exact_readback(self):
+    def test_network_live_restore_is_rejected_before_session_use(self):
         before = bytes(range(18))
         target = bytes(reversed(range(18)))
-        session = RestoreSession([before, target])
+        session = RestoreSession([])
 
         result = self.service.restore_payload(
-            session,
-            16,
-            before,
-            target,
-            dry_run=False,
-            cpu=1,
+            session, 16, before, target, dry_run=False, cpu=1
         )
 
-        self.assertTrue(result.written)
-        self.assertTrue(result.write_attempted)
-        self.assertTrue(result.ack_positive)
-        self.assertTrue(result.readback_ok)
-        self.assertEqual(result.cpu, 1)
-        self.assertEqual(result.readback_scope, "block")
-        self.assertEqual(
-            result.changed_keys,
-            ("backup.restore.cpu[1].block[16].full_payload",),
-        )
-        self.assertEqual(
-            session.calls,
-            [
-                ("read", 1, 16),
-                ("write", 1, 16, target),
-                ("read", 1, 16),
-            ],
-        )
-
-        mismatch = target[:-1] + bytes([target[-1] ^ 0xFF])
-        mismatching_session = RestoreSession(
-            [before, mismatch, mismatch, mismatch]
-        )
-        failed = self.service.restore_payload(
-            mismatching_session,
-            16,
-            before,
-            target,
-            dry_run=False,
-            cpu=2,
-        )
-        self.assertTrue(failed.write_attempted)
-        self.assertTrue(failed.ack_positive)
-        self.assertFalse(failed.written)
-        self.assertFalse(failed.readback_ok)
-        self.assertEqual(failed.cpu, 2)
-        self.assertEqual(failed.readback_attempts, 3)
-        self.assertIn("full-block readback mismatch", failed.error)
+        self.assertFalse(result.written)
+        self.assertFalse(result.write_attempted)
+        self.assertIsNone(result.readback_ok)
+        self.assertIn("nur lesbar", result.error)
+        self.assertEqual(session.calls, [])
 
     def test_live_restore_records_negative_ack_as_an_attempted_write(self):
         before = b"\x01\x02"

@@ -1,6 +1,6 @@
 # Open Dachs Manager – Bedienungsanleitung
 
-Stand: 21.08.2026 · Version V3 1.6.3
+Stand: 22.10.2026 · Version V3 1.8.0
 
 Diese Anleitung beschreibt den täglichen Betrieb der Weboberfläche, CLI und
 TUI. Installation und Migration stehen ausführlich in
@@ -52,11 +52,12 @@ Queue nicht. Sie dürfen nur bei gestopptem Worker auf den Adapter zugreifen.
 - `admin`: zusätzlich Einstellungen vorbereiten, Wartungsdaten pflegen und
   ausdrücklich freigegebene Schreibabläufe starten
 
-Die Anmeldung läuft lokal. Sitzungen enden nach zwölf Stunden oder beim
-Abmelden. Passwörter werden gesalzen und gehasht in der lokalen Benutzerdatei
-gespeichert.
+Die normale Anmeldung läuft lokal. Sitzungen enden nach zwölf Stunden oder
+beim Abmelden. Passwörter werden gesalzen und gehasht in der lokalen
+Benutzerdatei gespeichert. Der weiter unten beschriebene optionale
+Loopback-Bedienplatz besitzt absichtlich weder Passwort noch Sitzungscookie.
 
-Die Hauptleiste ist fest geordnet als `Übersicht → Überwachung → Einstellung
+Die Hauptleiste ist fest geordnet als `Übersicht → Bedienplatz → Überwachung → Einstellung
 → Backup → Audit → System → Wartung → Fehlerkatalog`. `System` wird nur für
 Admins eingeblendet; die Reihenfolge der übrigen Bereiche bleibt gleich.
 
@@ -90,6 +91,21 @@ Darunter steht ein ausdrücklich als Schätzung gekennzeichneter Füllstand. Die
 Standardkennlinie setzt 420 °C auf 0 % und 520 °C auf 100 %; dazwischen wird
 linear interpoliert. Unter `Einstellung → Geschätzter Füllstand` kann der
 Admin beide Temperaturen lokal ändern. Die Anzeige schreibt nie in den Regler.
+
+### Bedienplatz
+
+Der Reiter `Bedienplatz` ist für die lokale Touch-Bedienung bei 1366 × 768
+Pixeln verdichtet. Er verwendet direkt dasselbe technische Prozessbild wie die
+normale Übersicht; Werte, Meldungen und Rußfilterschätzung werden deshalb nicht
+in einer zweiten Darstellung dupliziert. Beim Verlassen kehrt das Prozessbild
+in die Übersicht und zu der dort zuvor gewählten Ansicht zurück.
+
+Unter dem Prozessbild liegt ein automatisch aktualisierter Verlauf der letzten
+zwei Stunden für Drehzahl, Wirkleistung und Motorabgastemperatur. Die drei
+Kurven besitzen getrennte, fest beschriftete Skalen. `Überwachung öffnen`
+wechselt zu den vollständigen Diagrammen und Zeitbereichen. Der direkte lokale
+Aufruf lautet `http://127.0.0.1/#bedienplatz`; auch dieser Darstellungsweg
+erzeugt keinen zusätzlichen seriellen Blockread.
 
 ### Überwachung
 
@@ -135,6 +151,21 @@ voller Auflösung erhalten. Übrige Stillstandszeiten werden danach in
 15-Minuten-Fenster mit Anfang, Ende, Minimum, Maximum, Mittelwert, Anzahl und
 Änderungszahl verdichtet.
 
+### 250-h-Diagnose
+
+Die Registerkarte `250-h-Diagnose` berechnet abgeschlossene und laufende
+250-Betriebsstunden-Intervalle aus der lokalen SQLite-Historie. Sie erzeugt
+keine zusätzlichen Blockreads, keine Authentifizierung und keinen Write. Ein
+Hintergrundworker aktualisiert den privaten Cache bei Dienststart, lokaler
+Mitternacht, erkanntem Motorstopp oder über `Aktualisieren`. Während eines
+Laufs bleibt die Seite responsiv und kennzeichnet Pending-, veraltete oder
+fehlgeschlagene Cachezustände.
+
+Datenlücken werden getrennt von fachlichen Hinweisen angezeigt. Fehlstarts sind
+mangels belegter interner Reihe nicht verfügbar; Status 14 gilt weder als
+Fehlstart noch als bestätigter Motorstopp. Die Diagnose verändert die
+Rußfilteranzeige und deren lokale Kennlinie nicht.
+
 ### Wartung
 
 `Wartung starten & Pflichtbackup erstellen` liest alle 42 Sicherungsziele genau
@@ -150,7 +181,7 @@ Der daraus erzeugte Entwurf wird lokal gespeichert. Checkliste, zusätzliche
 lokale Arbeitsliste, Monteur, Messwerte und Bemerkungen lassen sich fortlaufend
 ergänzen. HTML-, dreiseitiger PDF-Bericht und JSON-Export stehen zur Verfügung.
 
-V3 1.6.3 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
+V3 1.8.0 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
 die Oberfläche die exakte Eingabe `DEMO ABSCHLIESSEN`. Danach wird der Bericht
 lokal validiert, unveränderlich archiviert und deutlich als Demo gekennzeichnet.
 Der Abschluss öffnet keine Serialworker-Sitzung, schreibt weder Block 100 noch
@@ -208,11 +239,11 @@ und speichert ein JSON-Abbild. Einzelne Lesefehler bleiben darin sichtbar.
 Administratoren sehen darüber das geschützte Wartungsbackup-Archiv. Jede Karte
 nennt Backup-ID, Zeitpunkt und Ersteller, Herkunft, verknüpften
 Wartungsbericht, Zustand, Integrität, Größe, Packrevision, das Ergebnis 42/42,
-die 38 Restore-Ziele sowie Abbild- und Datei-SHA-256. Es gibt bewusst weder Löschen noch einen Knopf
+die 36 Restore-Ziele sowie Abbild- und Datei-SHA-256. Es gibt bewusst weder Löschen noch einen Knopf
 für manuelle Autoarchivierung. `JSON herunterladen` liefert die archivierte
 V3-Datei unverändert. `Für Wiederherstellung laden` lädt dieselbe Datei und
 prüft sie erneut über die bestehende Abbildprüfung. Neue Archive benötigen
-42/42 erfolgreiche Sicherungsziele mit exakt 38 Restore-Zielen. Geprüfte alte
+42/42 erfolgreiche Sicherungsziele mit exakt 36 Restore-Zielen. Geprüfte alte
 38/38-Wartungsarchive bleiben kompatibel. Prüfsummen, passende Packrevision
 und Gerätebindung sind in beiden Fällen zwingend; die Zielauswahl bleibt leer
 und der Dry-Run aktiv.
@@ -228,6 +259,10 @@ Die Wiederherstellung ist nur für Administratoren sichtbar. Zuerst wird das
 JSON-Abbild eingelesen und serverseitig auf Schema, Prüfsummen, Packstand,
 Reglerkennung, Blocknummern und Payloadlängen geprüft. Erst danach erscheinen
 die gültigen Blöcke; aus Sicherheitsgründen ist zunächst keiner ausgewählt.
+Die Seriennummer bleibt als Herkunftsinformation im hashgebundenen Abbild
+erhalten, wird aber bewusst nicht mit der Zielregelung verglichen. Damit kann
+das Abbild auch auf eine Austauschregelung mit anderer Seriennummer übertragen
+werden.
 
 `Auswahl als Dry-Run prüfen` liest die aktuellen Zielblöcke und zeigt
 `unverändert` oder `würde geschrieben`, sendet aber weder Authentifizierung noch
@@ -247,9 +282,12 @@ bytegleicher Live-Vergleich legt kein solches Abbild an, weil dabei kein
 Schreibtelegramm folgen kann. Die Prüfsumme bindet den Inhalt, stellt aber keine
 kryptografische Signatur oder Herkunftsbestätigung dar.
 
-Eine Mehrblock-Wiederherstellung ist nicht transaktional. Bei einem Fehler
-stoppt der Ablauf; zuvor erfolgreich zurückgelesene Blöcke bleiben
-wiederhergestellt. Laufzustände, Zähler oder Zeitwerte im Abbild können älter
+Eine Mehrblock-Wiederherstellung ist nicht transaktional. Ein Fehler wird am
+betroffenen Block angezeigt; die übrigen ausgewählten Blöcke werden trotzdem
+versucht. Erfolgreich zurückgelesene Blöcke bleiben wiederhergestellt.
+Softwareversionsfelder gehören zur Zielplatine und werden nach dem Vorbild des
+originalen Senertec-Platinentauschs grundsätzlich aus dem aktuellen Zielzustand
+beibehalten. Laufzustände, Zähler oder Zeitwerte im Abbild können älter
 sein und werden bei Auswahl des jeweiligen Rohblocks ebenfalls übernommen. Hat
 der Dienst bereits ein Schreibtelegramm gesendet, aber keine eindeutige
 Bestätigung oder Rückleseprüfung erhalten, wird der Block ausdrücklich als
@@ -295,33 +333,29 @@ Netzschutz-CPU ist also nicht Block 20 der Regler-CPU.
 
 - `B16 · Netzschutz (Legacy)` zeigt das bekannte 18-Byte-Layout mit
   Ländercode, Schutzart, festen und variablen Spannungs-/Frequenzgrenzen,
-  Abschaltzeiten und Impedanzschutz. Dieser bereits ausdrücklich freigegebene
-  Block bleibt über den normalen Admin-/Auth-/ACK-/Readback-Ablauf schreibbar.
+  Abschaltzeiten und Impedanzschutz. Nach der fachlich abgelehnten
+  Vollblock-Rücksicherung bleibt auch dieser Block strikt nur lesbar.
 - `B20 · Schutzparameter` zeigt 39 Werte aus 59 Byte: Schutzprofil,
   zweistufige Grenzen und profilabhängige Abschaltzeiten, 10-Minuten-Spannung,
   Frequenzreduktion sowie Impedanz-/LOM-Status. Die originale
-  Layout-4-Datenzuordnung belegt dafür den Vollblock-Schreibdienst 21; alle
-  39 Felder sind über denselben geschützten Ablauf wie Block 16 editierbar.
+  Layout-4-Datenzuordnung leitet dafür nominal Dienst 21 ab. Beide U-3.050-CPUs
+  bestätigten einen Testwrite, übernahmen ihn aber nicht; die 39 Felder bleiben
+  deshalb strikt nur lesbar.
 - `B21 · Live-Netzwerte` zeigt 28 Werte aus 56 Byte: Spannung, Strom und
   Frequenz je Phase, Impedanzen, Wirkleistung, Phasenlage, Cosinus Phi und
   Kalibrierfaktoren. Dieser laufende Messwertblock besitzt keinen Schreibdienst
   und bleibt strikt nur lesbar.
 
-Block 16 und Block 20 ergeben auf CPU 1 und CPU 2 zusammen 114 schreibbare
-Feldinstanzen: je CPU 18 Legacy- und 39 Layout-4-Felder. Bei Block 20 lautet
-der Ablauf `Lesen → kodieren → Authentifizierung → CAS-Prüfung → Dienst 21
-→ positives ACK → exakte Vollblock-Rückleseprüfung`. Nicht eindeutig
-umkehrbare Anzeigen werden nicht geraten. Eine bewusste Experteneingabe ist
-als `raw:<Rohwert>` möglich; dadurch werden Skalierung und Auswahlprüfung
-absichtlich umgangen, nicht aber Datentyp, Feldbreite, Authentifizierung,
-Ausgangszustandsvergleich oder Rückleseprüfung.
-
-Die Kodierung und der schreibfreie Dry-Run für Block 20 sind geprüft. Ein
-physischer Schreibvorgang auf Block 20 wurde am Gerät noch nicht ausgeführt.
-Block 20 und 21 werden deshalb im 42-Ziele-Backup nur gelesen, geprüft und
-gesichert. Wiederherstellbar bleiben die 38 geprüften Ziele: 36 Reglerblöcke
-plus Block 16 beider Netzschutz-CPUs. Block 20 wartet auf eine physische
-Restore-Abnahme; Block 21 darf als flüchtiger Messwertblock niemals als
+Auch die 18 Legacy-Felder von Block 16 je CPU bleiben nur lesbar: Beide CPUs
+lehnten selbst eine unveränderte Vollblock-Rücksicherung fachlich mit
+`7F 11 01` ab; vier Rücklesungen blieben bytegleich. Der physische B20-Test
+ist abgeschlossen: Auth 5 und ACK waren positiv, der einzelne
+Testwert blieb auf beiden CPUs nach vier Rücklesungen unverändert. B20 wird
+daher nicht als editierbar oder erfolgreich restaurierbar angeboten.
+Block 16, 20 und 21 werden deshalb im 42-Ziele-Backup nur gelesen, geprüft und
+gesichert. Wiederherstellbar bleiben ausschließlich die 36 Reglerblöcke. Für
+B16 und B20 fehlt nach den abgeschlossenen, negativen Livebefunden ein sicherer
+Write-/Recovery-Vertrag; Block 21 darf als flüchtiger Messwertblock niemals als
 Konfiguration zurückgeschrieben werden. Das reine Öffnen oder
 Neuladen einer Netzschutzkarte sendet weiterhin nur ein Lesetelegramm.
 
@@ -345,6 +379,30 @@ den Dachs-Einstellungen getrennt. Unter `Benutzer & Berechtigungen` lassen
 sich mehrere Gast- und Admin-Konten verwalten. Mindestens ein aktiver Admin
 bleibt erzwungen; das aktuell verwendete Admin-Konto kann sich nicht selbst
 deaktivieren oder löschen.
+
+Im selben Bereich kann `Lokaler Benutzer` für einen unmittelbar am Server
+angeschlossenen Touch-Bedienplatz aktiviert werden. Einstellbar sind:
+
+- `Aktiv`
+- Port als ganze Zahl von 1 bis 65535; Standard 80
+- Rechte `Admin` oder `Gast`; Standard Admin
+
+Die Funktion selbst ist standardmäßig deaktiviert. Nach dem Speichern bindet
+der Dienst den gewählten Port ausschließlich an `127.0.0.1`; ein Portwechsel
+wird sofort wirksam. Die angezeigte Adresse lautet beispielsweise
+`http://127.0.0.1/` beziehungsweise mit Base Path
+`http://127.0.0.1/dachs/`. Ein belegter Port oder der normale Web-Port
+wird abgewiesen, ohne den bisherigen Listener oder die gespeicherte Einstellung
+zu ersetzen.
+
+Der lokale Benutzer wird intern eindeutig als `localhost-override` geführt
+und verwendet keinen Cookie. Ein auf `Gast` gesetzter lokaler Listener bleibt
+deshalb auch dann Gast, wenn der Browser einen normalen Admin-Cookie mitsendet.
+Der normale Port und der Reverse Proxy verlangen weiterhin einen regulären
+Login; `/api/v1/*` bleibt auf beiden Ports Bearer-Token-pflichtig. Der lokale
+Admin darf dieselben Webfunktionen wie ein normaler Admin bedienen, umgeht aber
+nicht die gesonderte Schreibfreigabe, MSR2-Authentifizierung/PW4, ACK,
+Rückleseprüfung oder das Audit.
 
 Unter `API & Tokens` wird die lokale EDOMI-API verwaltet. Ein Token erhält
 getrennte Rechte:

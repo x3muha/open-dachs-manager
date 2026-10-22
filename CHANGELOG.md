@@ -1,5 +1,101 @@
 # Änderungsverlauf
 
+## V3 1.8.0 - 2026-10-22
+
+- Die neue 250-h-Diagnose bildet abgeschlossene und laufende
+  Betriebsstundenintervalle ausschließlich aus der lokalen SQLite-Historie.
+  Ein dedizierter Hintergrundworker aktualisiert einen atomaren, privaten Cache
+  bei Dienststart, lokaler Mitternacht, erkanntem Motorstopp und manueller
+  Anforderung; API und Browser bleiben auch bei großen Historien responsiv.
+  Datenlücken und nicht belegbare Fehlstarts werden ausdrücklich ausgewiesen.
+- Netzschutzblock 16 ist nach den neueren Livebefunden wie B20 und B21 strikt
+  read/backup-only. Beide U-3.050-CPUs lehnten selbst eine unveränderte
+  B16-Vollblock-Rücksicherung fachlich mit `7F 11 01` ab. Schema, UI, Web- und
+  Maschinen-API, Low-Level-Schreibpfad und Restorevertrag sperren alle drei
+  Blöcke vor serieller Sitzung oder Authentifizierung; 42 Ziele werden
+  weiterhin gesichert, nur die 36 Reglerblöcke sind restaurierbar.
+- Das offline arbeitende Firmware-Center begrenzt nun auch die tatsächliche
+  Dekompressionsausgabe während des Entpackens. Übergröße, Timeout und
+  Dekompressorfehler führen zu sofortigem, sauberem Prozessabbruch; der native
+  Flash bleibt unverändert gesperrt.
+- Die seit 1.7.4 ergänzten Bedien- und Betriebshärtungen umfassen den
+  konfigurierbaren Web-Base-Path, atomare lokale Zugriffseinstellungen,
+  strengere Request-/Origin-Grenzen sowie das fortgesetzte, fehlerisolierte
+  Mehrblock-Restore mit geschützten Zielversionsfeldern.
+
+## V3 1.7.4 - 2026-08-27
+
+- Die reale B20-Abnahme ist abgeschlossen. Beide U-3.050-CPUs gewährten Auth 5
+  und bestätigten Dienst 21 positiv, übernahmen den minimalen Testwert aber
+  nach vier Rücklesungen nicht. B20 bleibt deshalb in UI und API nur lesbar und
+  wird weiterhin ausschließlich gesichert, nicht restauriert.
+- Das neue Firmware-Center unter `System → Firmware` prüft `.muc`-Dateien
+  offline auf Containerlängen, SHA-256 und alle acht Modulabbilder. Es speichert
+  die Datei nicht und öffnet keine serielle Sitzung.
+- Ein nativer Live-Flash bleibt sicher gesperrt, bis der aufgezeichnete
+  Bootloader-Ablauf einschließlich Frames, Baudwechseln, ACKs und Abschluss
+  vollständig verifiziert ist.
+
+## V3 1.7.3 - 2026-08-27
+
+- Die Mehrblock-Wiederherstellung versucht nach einem Bestätigungs- oder Rücklesefehler auch
+  alle übrigen ausgewählten Ziele und zeigt die Fehler weiterhin einzeln und
+  auditiert an; erfolgreiche Blöcke werden nicht zurückgerollt.
+- Softwareversionsfelder der Zielplatine werden nach dem belegten Verhalten des
+  originalen Senertec-Platinentauschs nicht mehr aus einem Backup übertragen.
+  Das Abbild behält sie weiterhin als Diagnoseinformation der Quelle.
+
+## V3 1.7.2 - 2026-08-27
+
+- Eine Live-Wiederherstellung darf jetzt ausdrücklich auf einer
+  Austauschregelung mit abweichender Seriennummer ausgeführt werden. Die im
+  Sicherungsabbild gespeicherte Seriennummer wird weiterhin als Bestandteil
+  des hashgebundenen Abbilds geprüft und angezeigt, aber nicht mehr mit der
+  Zielregelung oder der Authentifizierung verglichen.
+- Abbild- und Packprüfung, vollständige Lesevorprüfung, Vorzustandsabbild,
+  Hardwarefreigabe, Authentifizierung, positives ACK, bytegenaue Rücklesung
+  und Prüfprotokoll bleiben unverändert zwingend.
+
+## V3 1.7.1 - 2026-08-24
+
+- Der neue Reiter `Bedienplatz` verwendet dieselbe technische
+  Anlagenübersicht wie der normale Übersichtsbereich und ist für den lokalen
+  1366-x-768-Touch-PC verdichtet. Es gibt keine zweite Kopie des Prozessbilds.
+- Darunter zeigt ein gemeinsamer, automatisch aktualisierter Zwei-Stunden-
+  Verlauf Drehzahl, Wirkleistung und Motorabgastemperatur mit jeweils eigener
+  nachvollziehbarer Skala. Ein Tastendruck öffnet die vollständige
+  Überwachung.
+- Der Bedienplatz lässt sich direkt mit `#bedienplatz` aufrufen. Beim Verlassen
+  kehrt das Prozessbild mitsamt der zuvor gewählten Darstellung in die normale
+  Übersicht zurück. Die Änderung erzeugt keine zusätzlichen seriellen Reads
+  und verändert weder Authentifizierung noch Regler-Schreibpfade.
+- `Motbel250[*].bQuotientBh_Start` aus Block 38 und den weiteren
+  250-Betriebsstunden-Datensätzen verwendet wieder die originale
+  Zehntel-Skalierung. Ein Regler-Rohwert `38` erscheint damit als
+  `3,8 Bh/Start`; die Rückumrechnung beim Bearbeiten bleibt symmetrisch.
+
+## V3 1.7.0 - 2026-08-24
+
+- Unter `System → Benutzer & Berechtigungen` kann ein optionaler lokaler
+  Bedienplatz aktiviert werden. Port und Rechte sind frei wählbar; Standard
+  sind Port 80 und Adminrechte, die Funktion selbst bleibt zunächst aus.
+- Der lokale Zugang verwendet einen eigenen, ausschließlich an `127.0.0.1`
+  gebundenen Listener und einen cookie-losen, eindeutig als
+  `localhost-override` protokollierten Principal. Der normale Web-Port und der
+  Reverse Proxy bleiben unverändert loginpflichtig; Forwarding-Header verleihen
+  keine Rechte.
+- Exakter Host und Origin, ein Same-Origin-Request-Marker, CSP und Frame-Schutz
+  härten den lokalen Listener gegen DNS-Rebinding, fremde Webseiten und normale
+  Proxyweiterleitungen. Die Maschinen-API `/api/v1/*` bleibt auch lokal
+  ausschließlich Bearer-Token-pflichtig.
+- Portwechsel werden zuerst auf Loopback gebunden und erst danach atomar
+  gespeichert. Ein belegter oder mit dem Hauptlistener kollidierender Port
+  lässt den bisherigen Zustand unverändert; ein fehlerhafter lokaler Start
+  legt den normalen Webdienst nicht lahm.
+- Der Login-Override ersetzt nur die Webanmeldung. Schreibfreigabe,
+  MSR2-Authentifizierung/PW4, Stabilitätsprüfung, positives ACK,
+  Rückleseprüfung und Prüfprotokoll bleiben unverändert zwingend.
+
 ## V3 1.6.3 - 2026-08-21
 
 - Frei gewählte Kacheln für Motorstatus und aktuellen Fehlercode zeigen ihre

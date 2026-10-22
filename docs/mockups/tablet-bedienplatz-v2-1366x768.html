@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Open Dachs Manager · Bedienplatz V2</title>
+  <link rel="stylesheet" href="../../src/open_dachs_manager/web/style.css">
+  <style>
+    :root { --tablet-green:#087f70; --tablet-ink:#18262a; --tablet-line:#cbd6d8; --tablet-muted:#63747a; }
+    * { box-sizing:border-box; }
+    html,body { width:1366px; height:768px; margin:0; overflow:hidden; background:#edf2f3; color:var(--tablet-ink); font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    body { display:grid; grid-template-rows:48px 58px 1fr; }
+    .tablet-header { display:flex; align-items:center; gap:20px; padding:0 16px; background:#fff; border-bottom:1px solid var(--tablet-line); }
+    .tablet-brand { display:flex; align-items:center; gap:9px; min-width:225px; }
+    .tablet-logo { display:grid; place-items:center; width:30px; height:30px; border-radius:6px; background:var(--tablet-green); color:#fff; font-weight:900; }
+    .tablet-brand strong { display:block; font-size:15px; }
+    .tablet-brand small { display:block; color:var(--tablet-muted); font-size:8px; letter-spacing:.14em; }
+    .tablet-nav { display:flex; align-self:stretch; gap:2px; }
+    .tablet-nav span { display:grid; place-items:center; padding:0 12px; border-bottom:3px solid transparent; color:#536469; font-size:11px; font-weight:800; }
+    .tablet-nav .active { color:var(--tablet-green); background:#f4f8f8; border-bottom-color:var(--tablet-green); }
+    .tablet-session { display:flex; align-items:center; gap:7px; margin-left:auto; }
+    .tablet-pill { padding:6px 9px; border:1px solid #a6d4ca; border-radius:16px; background:#e5f5f1; color:#086f62; font-size:9px; font-weight:850; }
+    .tablet-pill.local { border-color:#d1d9db; background:#f7f9f9; color:#58686d; }
+    .tablet-status { display:grid; grid-template-columns:1fr 1fr 1.05fr; gap:8px; padding:7px 14px; }
+    .tablet-status article { display:flex; align-items:center; min-width:0; padding:6px 11px; border:1px solid var(--tablet-line); border-left:4px solid #7b8d8b; border-radius:5px; background:#fff; }
+    .status-mark { display:grid; place-items:center; flex:0 0 29px; height:29px; margin-right:9px; border:2px solid #657777; border-radius:3px; color:#087f70; font-weight:900; }
+    .tablet-status small { display:block; color:#65767b; font-size:7px; font-weight:850; letter-spacing:.12em; }
+    .tablet-status strong { display:block; overflow:hidden; margin-top:1px; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+    .tablet-status em { display:block; color:#718187; font-size:7px; font-style:normal; }
+    .tablet-main { display:grid; grid-template-rows:minmax(0,1fr) 148px; gap:7px; min-height:0; padding:0 14px 10px; }
+    .tablet-panel { min-height:0; overflow:hidden; border:1px solid #aab8bb; border-radius:7px; background:#fff; box-shadow:0 2px 8px rgba(34,54,59,.06); }
+    .tablet-schematic { position:relative; background:#e8edee; }
+    .tablet-schematic-head { position:absolute; z-index:2; top:8px; right:9px; display:flex; align-items:center; gap:7px; }
+    .tablet-schematic-head span { padding:5px 8px; border:1px solid #9dd5c8; border-radius:15px; background:#e7f6f2; color:#087568; font-size:8px; font-weight:900; }
+    .tablet-schematic-head button { padding:5px 9px; border:1px solid #bac6c8; border-radius:4px; background:#fff; color:#526367; font:800 8px inherit; }
+    #technicalMount { width:100%; height:100%; }
+    #technicalMount .hmi-technical-view { display:block !important; width:100%; height:100%; }
+    #technicalMount .hmi-technical-diagram { display:block; width:100%; height:100%; max-width:none; }
+    .tablet-chart { display:grid; grid-template-rows:31px 1fr; }
+    .chart-head { display:flex; align-items:center; padding:0 11px; border-bottom:1px solid var(--tablet-line); }
+    .chart-head strong { font-size:11px; }
+    .chart-head small { margin-left:8px; color:var(--tablet-muted); font-size:8px; }
+    .chart-head .chart-range { margin-left:auto; padding:4px 8px; border:1px solid var(--tablet-line); border-radius:4px; color:#536469; font-size:8px; font-weight:800; }
+    .chart-body { display:grid; grid-template-columns:62px 1fr 62px; min-height:0; padding:4px 8px 5px; }
+    .chart-axis { display:flex; flex-direction:column; justify-content:space-between; padding:7px 2px 13px; color:#65767b; font-size:7px; }
+    .chart-axis.right { text-align:right; }
+    .chart-axis b { font-size:7px; letter-spacing:.05em; }
+    .plot { position:relative; min-width:0; }
+    .plot svg { display:block; width:100%; height:100%; }
+    .chart-legend { position:absolute; top:3px; right:7px; display:flex; gap:11px; padding:3px 6px; border-radius:4px; background:rgba(255,255,255,.88); color:#536469; font-size:7px; font-weight:800; }
+    .chart-legend i { display:inline-block; width:11px; height:3px; margin-right:3px; vertical-align:middle; background:var(--key); }
+  </style>
+</head>
+<body>
+  <header class="tablet-header">
+    <div class="tablet-brand"><span class="tablet-logo">D</span><div><strong>Open Dachs Manager</strong><small>MSR2 · BEDIENPLATZ</small></div></div>
+    <nav class="tablet-nav"><span>Übersicht</span><span class="active">Bedienplatz</span><span>Überwachung</span><span>Einstellung</span><span>Wartung</span><span>System</span></nav>
+    <div class="tablet-session"><span class="tablet-pill">● LIVE · SERIELL</span><span class="tablet-pill local">Lokal · Admin</span></div>
+  </header>
+  <section class="tablet-status">
+    <article><span class="status-mark">✓</span><div><small>AKTUELLE STÖRUNG</small><strong>Kein aktiver Servicecode</strong><em>SC —</em></div></article>
+    <article><span class="status-mark">✓</span><div><small>AKTUELLE WARNUNG</small><strong>Keine aktive Warnung</strong><em>WARN —</em></div></article>
+    <article><span class="status-mark">Σ</span><div><small>MELDUNGSZÄHLER</small><strong>0 entstört · 0 Warnungen</strong><em>Letzte Aktualisierung vor 1 s</em></div></article>
+  </section>
+  <main class="tablet-main">
+    <section class="tablet-panel tablet-schematic">
+      <div class="tablet-schematic-head"><span>TECHNISCHE ANLAGENÜBERSICHT</span><button>Vollständige Oberfläche</button></div>
+      <div id="technicalMount" aria-label="Technische Anlagenübersicht"></div>
+    </section>
+    <section class="tablet-panel tablet-chart">
+      <div class="chart-head"><strong>Drehzahl · Wirkleistung · Abgastemperatur</strong><small>gemeinsamer Verlauf · Antippen öffnet Überwachung</small><span class="chart-range">Letzte 2 Stunden ▾</span></div>
+      <div class="chart-body">
+        <div class="chart-axis"><b>DREHZAHL</b><span>3.000</span><span>1.500</span><span>0 1/min</span></div>
+        <div class="plot">
+          <div class="chart-legend"><span><i style="--key:#d7931c"></i>Drehzahl</span><span><i style="--key:#087f70"></i>Leistung</span><span><i style="--key:#c4474e"></i>Motorabgas</span></div>
+          <svg viewBox="0 0 1100 110" preserveAspectRatio="none" aria-label="Kombiniertes Zeitdiagramm">
+            <g stroke="#dfe6e7" stroke-width="1"><path d="M0 16H1100M0 43H1100M0 70H1100M0 97H1100"></path><path d="M0 0V97M220 0V97M440 0V97M660 0V97M880 0V97M1100 0V97"></path></g>
+            <path d="M0 91L80 90L110 83L130 42L158 31L220 28L265 31L312 30L340 55L372 32L445 29L510 31L590 27L645 29L705 26L760 28L810 24L850 27L910 25L970 26L1030 23L1100 25" fill="none" stroke="#d7931c" stroke-width="3"></path>
+            <path d="M0 94L80 94L110 88L132 48L160 38L220 35L265 37L312 35L340 62L374 37L445 34L510 36L590 32L645 34L705 31L760 33L810 29L850 32L910 30L970 31L1030 28L1100 30" fill="none" stroke="#087f70" stroke-width="3"></path>
+            <path d="M0 86L80 84L112 79L135 68L165 56L220 49L265 47L312 46L340 52L378 45L445 42L510 40L590 37L645 36L705 35L760 34L810 33L850 33L910 31L970 31L1030 29L1100 30" fill="none" stroke="#c4474e" stroke-width="2.5"></path>
+            <g fill="#697a7f" font-size="8"><text x="0" y="108">10:48</text><text x="535" y="108">11:48</text><text x="1070" y="108">12:48</text></g>
+          </svg>
+        </div>
+        <div class="chart-axis right"><b>LEISTUNG / ABGAS</b><span>6 kW · 600 °C</span><span>3 kW · 300 °C</span><span>0</span></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    fetch("../../src/open_dachs_manager/web/index.html")
+      .then((response) => response.text())
+      .then((html) => {
+        const source = new DOMParser().parseFromString(html, "text/html");
+        const view = source.querySelector('[data-schematic-view="technical"]');
+        if (!view) throw new Error("Technisches Schema nicht gefunden");
+        view.hidden = false;
+        const image = view.querySelector("image");
+        if (image) image.setAttribute("href", "../../src/open_dachs_manager/web/dachs-generator-motor.png");
+        const values = {
+          "v95-tech-dachs-austritt":"43 °C", "v95-tech-dachs-eintritt":"41 °C", "v95-tech-state-code":"OK",
+          "v95-tech-wirkleistung":"0 kW", "v95-tech-wirkleistung-soll":"4.5 kW", "v95-tech-drehzahl":"0 U/min",
+          "v95-tech-kuehlwasser":"40 °C", "v95-tech-eintritt-inside":"41 °C", "v95-tech-motorstatus":"16 (Dachs → 4 Minuten AUS)",
+          "v95-tech-kapsel":"37 °C", "v95-tech-regler":"29 °C", "v95-tech-betriebsstunden":"3.41 h", "v95-tech-betriebsstunden-gesamt":"34 h",
+          "v95-tech-abgas-motor":"41 °C", "v95-tech-abgas-hka":"37 °C", "v98-tech-soot-fill":"0 %",
+          "v95-tech-voltage":"235.7 / 235.6 / 235.6 V", "v95-tech-current":"0.0 / 0.0 / 0.0 A",
+          "v95-tech-impedance":"0.00 / 0.00 / 0.00 Ohm", "v95-tech-frequency":"49.978 Hz"
+        };
+        Object.entries(values).forEach(([id,value]) => { const node=view.querySelector(`#${id}`); if (node) node.textContent=value; });
+        const sootBar=view.querySelector("#v98-tech-soot-bar"); if (sootBar) sootBar.setAttribute("width","0");
+        document.querySelector("#technicalMount").append(view);
+      });
+  </script>
+</body>
+</html>

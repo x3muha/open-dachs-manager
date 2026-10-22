@@ -291,7 +291,7 @@ class WebBackupRestoreTests(unittest.TestCase):
         self.assertIn('state.backup.image = null;', app)
         self.assertNotIn('fetch("/api/backup', app)
 
-    def test_layout4_config_is_writable_live_values_are_read_only_and_both_are_captured(self):
+    def test_layout4_config_and_live_values_are_read_only_and_both_are_captured(self):
         complete_schema = self.app.schema()
         schemas = complete_schema["network_protection"]
         self.assertEqual(
@@ -321,7 +321,7 @@ class WebBackupRestoreTests(unittest.TestCase):
         config = self.app.read_network_protection(1, 20)
         live = self.app.read_network_protection(1, 21)
 
-        self.assertTrue(config["writable"])
+        self.assertFalse(config["writable"])
         self.assertFalse(live["writable"])
         self.assertEqual(config["payload_len"], 59)
         self.assertEqual(live["payload_len"], 56)
@@ -330,18 +330,17 @@ class WebBackupRestoreTests(unittest.TestCase):
         self.assertEqual(self.service.read_targets, [(1, 20), (1, 21)])
 
         self.service.reset_telemetry()
-        dry_run = self.app.write_network_protection(
-            "admin",
-            1,
-            [{"key": "NetzKonfig1.usSpannung1Unten", "value": "184,1"}],
-            4,
-            "",
-            False,
-            block=20,
-        )
-        self.assertTrue(dry_run["dry_run"])
-        self.assertFalse(dry_run["written"])
-        self.assertEqual(self.service.session_entries, 1)
+        with self.assertRaisesRegex(PermissionError, "nur lesbar"):
+            self.app.write_network_protection(
+                "admin",
+                1,
+                [{"key": "NetzKonfig1.usSpannung1Unten", "value": "184,1"}],
+                4,
+                "",
+                False,
+                block=20,
+            )
+        self.assertEqual(self.service.session_entries, 0)
         self.assertEqual(self.service.auth_calls, [])
         self.assertEqual(self.service.wire_writes, [])
 
@@ -401,7 +400,7 @@ class WebBackupRestoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "zwischen 1 und 5|ganze Zahl"):
                     self.app.write_network_protection(
                         "admin",
-                        1,
+                        0,
                         [{"key": "UC1.SA1.usSpannungUntenFix", "value": "184,1"}],
                         level,
                         "",
@@ -450,34 +449,26 @@ class WebBackupRestoreTests(unittest.TestCase):
                         "auth_level": level,
                     })
 
-    def test_level_five_reaches_generic_and_network_live_authentication(self):
+    def test_level_five_reaches_generic_write_but_network_stays_read_only(self):
         result = self.app.write_block(
-            "admin",
-            20,
+            "admin", 20,
             [{"key": "Hka_Bd_Stat.bDispHelligkeit", "value": "1"}],
-            5,
-            "1234",
-            True,
+            5, "1234", True,
         )
         self.assertTrue(result["written"])
         self.assertEqual(result["auth_level_requested"], 5)
         self.assertEqual(result["auth_level_granted"], 5)
-        self.assertEqual(self.service.auth_calls, [(5, "1234")])
 
         self.service.reset_telemetry()
-        self.service.device_payloads[(1, 16)] = network_payload(0)
-        result = self.app.write_network_protection(
-            "admin",
-            1,
-            [{"key": "UC1.SA1.usSpannungUntenFix", "value": "184,1"}],
-            5,
-            "1234",
-            True,
-        )
-        self.assertTrue(result["written"])
-        self.assertEqual(result["auth_level_requested"], 5)
-        self.assertEqual(result["auth_level_granted"], 5)
-        self.assertEqual(self.service.auth_calls, [(5, "1234")])
+        with self.assertRaisesRegex(PermissionError, "nur lesbar"):
+            self.app.write_network_protection(
+                "admin", 1,
+                [{"key": "UC1.SA1.usSpannungUntenFix", "value": "184,1"}],
+                5, "1234", True,
+            )
+        self.assertEqual(self.service.session_entries, 0)
+        self.assertEqual(self.service.auth_calls, [])
+        self.assertEqual(self.service.wire_writes, [])
 
     def test_network_capture_only_blocks_cannot_enter_any_restore_session(self):
         image = self.service.image_for({
@@ -509,37 +500,16 @@ class WebBackupRestoreTests(unittest.TestCase):
                         self.assertEqual(self.service.auth_calls, [])
                         self.assertEqual(self.service.wire_writes, [])
 
-    def test_layout4_profile_is_encoded_before_dependent_times(self):
+    def test_layout4_profile_codec_is_available_but_runtime_write_is_blocked(self):
         self.service.device_payloads[(1, 20)] = SYNTHETIC_NETWORK_CONFIG_PAYLOAD
 
-        result = self.app.write_network_protection(
-            "admin",
-            1,
-            [
-                {
-                    "key": "NetzKonfig1.usAbschaltzeitU1Oben",
-                    "value": "1,02",
-                },
-                {"key": "NetzKonfig1.ubSchutzart", "value": 5},
-            ],
-            4,
-            "",
-            False,
-            block=20,
-        )
-
-        after = bytes.fromhex(result["after_hex"])
-        self.assertEqual(after[0], 5)
-        # Profile 5 uses +2: displayed 1.02 s therefore stores raw 100.
-        self.assertEqual(after[5:7], b"d\x00")
-        self.assertEqual(
-            result["changed_keys"],
-            [
-                "NetzKonfig1.ubSchutzart",
-                "NetzKonfig1.usAbschaltzeitU1Oben",
-            ],
-        )
-        self.assertTrue(result["dry_run"])
+        with self.assertRaisesRegex(PermissionError, "nur lesbar"):
+            self.app.write_network_protection(
+                "admin", 1,
+                [{"key": "NetzKonfig1.ubSchutzart", "value": 5}],
+                4, "", False, block=20,
+            )
+        self.assertEqual(self.service.session_entries, 0)
         self.assertEqual(self.service.auth_calls, [])
         self.assertEqual(self.service.wire_writes, [])
 
@@ -730,7 +700,7 @@ class WebBackupRestoreTests(unittest.TestCase):
             [(24, True), (20, True)],
         )
         self.assertEqual(self.service.wire_writes, [])
-        audits = self.app.store.audits()
+        audits = sorted(self.app.store.audits(), key=lambda item: item["id"])
         self.assertEqual(len(audits), 2)
         self.assertTrue(all(item["audit"]["dry_run"] for item in audits))
         self.assertTrue(all(not item["audit"]["write_attempted"] for item in audits))
@@ -738,68 +708,23 @@ class WebBackupRestoreTests(unittest.TestCase):
             (Path(self.temporary.name) / "restore-preimages").exists()
         )
 
-    def test_network_restore_dry_run_and_live_noop_never_authenticate_or_write(self):
-        targets = {
-            (1, 16): network_payload(1),
-            (2, 16): network_payload(2),
-        }
-        selection = [public_target(1, 16), public_target(2, 16)]
+    def test_network_restore_is_rejected_before_dry_run_or_live_session(self):
+        targets = {(1, 16): network_payload(1), (2, 16): network_payload(2)}
         image = self.service.image_for(targets)
-        self.service.device_payloads[(1, 16)] = network_payload(0)
-        self.service.device_payloads[(2, 16)] = network_payload(0)
+        selection = [public_target(1, 16), public_target(2, 16)]
 
-        dry_run = self.app.restore_backup(
-            "admin",
-            image,
-            image["image_sha256"],
-            selection,
-            4,
-            "1234",
-            False,
-            "",
-        )
-
-        self.assertTrue(dry_run["ok"])
-        self.assertEqual(dry_run["mode"], "dry-run")
-        self.assertEqual(dry_run["summary"]["planned"], 2)
-        self.assertEqual(
-            [(item["target_key"], item["status"]) for item in dry_run["results"]],
-            [("1:16", "planned"), ("2:16", "planned")],
-        )
-        self.assertEqual(self.service.auth_calls, [])
-        self.assertEqual(self.service.wire_targets, [])
-        self.assertEqual(
-            [(cpu, block, is_dry) for cpu, block, _before, _after, is_dry in self.service.restore_targets],
-            [(1, 16, True), (2, 16, True)],
-        )
-
-        self.service.reset_telemetry()
-        self.service.device_payloads[(1, 16)] = network_payload(1)
-        self.service.device_payloads[(2, 16)] = network_payload(2)
-        no_op = self.app.restore_backup(
-            "admin",
-            image,
-            image["image_sha256"],
-            selection,
-            4,
-            "1234",
-            True,
-            BACKUP_RESTORE_CONFIRMATION,
-        )
-
-        self.assertTrue(no_op["ok"])
-        self.assertEqual(no_op["mode"], "live")
-        self.assertEqual(no_op["unchanged_blocks"], 2)
-        self.assertEqual(
-            [(item["target_key"], item["status"]) for item in no_op["results"]],
-            [("1:16", "unchanged"), ("2:16", "unchanged")],
-        )
-        self.assertEqual(self.service.auth_calls, [])
-        self.assertEqual(self.service.wire_targets, [])
-        self.assertTrue(all(not item["write_attempted"] for item in no_op["results"]))
-        self.assertFalse(
-            (Path(self.temporary.name) / "restore-preimages").exists()
-        )
+        for write_enabled in (False, True):
+            with self.subTest(write_enabled=write_enabled):
+                self.service.reset_telemetry()
+                with self.assertRaisesRegex(ValueError, "nicht wiederherstellbar"):
+                    self.app.restore_backup(
+                        "admin", image, image["image_sha256"], selection,
+                        4, "1234", write_enabled,
+                        BACKUP_RESTORE_CONFIRMATION if write_enabled else "",
+                    )
+                self.assertEqual(self.service.session_entries, 0)
+                self.assertEqual(self.service.auth_calls, [])
+                self.assertEqual(self.service.wire_writes, [])
 
     def test_live_noop_never_authenticates_or_writes(self):
         image = self.service.image_for({20: payload(0), 24: payload(0)})
@@ -868,13 +793,20 @@ class WebBackupRestoreTests(unittest.TestCase):
             [(item["block"], item["status"]) for item in result["results"]],
             [(24, "restored"), (20, "restored"), (22, "restored")],
         )
+        expected_targets = dict(targets)
+        expected_block20 = bytearray(targets[20])
+        expected_block20[26:39] = payload(0)[26:39]
+        expected_targets[20] = bytes(expected_block20)
         for item in result["results"]:
             self.assertTrue(item["written"])
             self.assertTrue(item["write_attempted"])
             self.assertTrue(item["ack_positive"])
             self.assertTrue(item["readback_ok"])
             self.assertEqual(item["readback_scope"], "block")
-            self.assertEqual(item["changed_bytes"], PAYLOAD_LENGTH)
+            self.assertEqual(
+                item["changed_bytes"],
+                PAYLOAD_LENGTH - 13 if item["block"] == 20 else PAYLOAD_LENGTH,
+            )
 
         self.assertEqual(self.service.session_entries, 1)
         self.assertEqual(self.service.maximum_active_sessions, 1)
@@ -902,7 +834,7 @@ class WebBackupRestoreTests(unittest.TestCase):
             [block for block, _target in self.service.wire_writes],
             [24, 20, 22],
         )
-        self.assertEqual(self.service.device_payloads, targets)
+        self.assertEqual(self.service.device_payloads, expected_targets)
 
         preimage_metadata = result["preimage"]
         self.assertIsNotNone(preimage_metadata)
@@ -937,7 +869,9 @@ class WebBackupRestoreTests(unittest.TestCase):
             self.assertEqual(audit["auth_level_requested"], 5)
             self.assertEqual(audit["auth_level_granted"], 5)
             self.assertEqual(audit["before_hex"], payload(0).hex(" ").upper())
-            self.assertEqual(audit["after_hex"], targets[block].hex(" ").upper())
+            self.assertEqual(
+                audit["after_hex"], expected_targets[block].hex(" ").upper()
+            )
             self.assertTrue(audit["written"])
             self.assertTrue(audit["write_attempted"])
             self.assertTrue(audit["ack_positive"])
@@ -945,86 +879,21 @@ class WebBackupRestoreTests(unittest.TestCase):
             self.assertEqual(audit["readback_scope"], "block")
             self.assertEqual(audit["preimage"], preimage_metadata)
 
-    def test_network_changed_live_batch_requires_ack_and_exact_cpu_readback(self):
-        targets = {
-            (1, 16): network_payload(1),
-            (2, 16): network_payload(2),
-        }
-        selection = [public_target(1, 16), public_target(2, 16)]
+    def test_network_changed_live_batch_is_rejected_before_session(self):
+        targets = {(1, 16): network_payload(1), (2, 16): network_payload(2)}
         image = self.service.image_for(targets)
-        self.service.device_payloads[(1, 16)] = network_payload(0)
-        self.service.device_payloads[(2, 16)] = network_payload(0)
+        selection = [public_target(1, 16), public_target(2, 16)]
 
-        result = self.app.restore_backup(
-            "admin",
-            image,
-            image["image_sha256"],
-            selection,
-            4,
-            "1234",
-            True,
-            BACKUP_RESTORE_CONFIRMATION,
-        )
+        with self.assertRaisesRegex(ValueError, "nicht wiederherstellbar"):
+            self.app.restore_backup(
+                "admin", image, image["image_sha256"], selection,
+                4, "1234", True, BACKUP_RESTORE_CONFIRMATION,
+            )
+        self.assertEqual(self.service.session_entries, 0)
+        self.assertEqual(self.service.auth_calls, [])
+        self.assertEqual(self.service.wire_writes, [])
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["differing_blocks"], 2)
-        self.assertEqual(result["written_blocks"], 2)
-        self.assertEqual(result["auth_level_granted"], 4)
-        self.assertEqual(result["summary"]["write_attempted"], 2)
-        self.assertEqual(
-            [(item["target_key"], item["status"]) for item in result["results"]],
-            [("1:16", "restored"), ("2:16", "restored")],
-        )
-        for item in result["results"]:
-            self.assertIn(item["cpu"], (1, 2))
-            self.assertEqual(item["block"], 16)
-            self.assertTrue(item["critical"])
-            self.assertTrue(item["written"])
-            self.assertTrue(item["write_attempted"])
-            self.assertTrue(item["ack_positive"])
-            self.assertTrue(item["readback_ok"])
-            self.assertEqual(item["readback_scope"], "block")
-            self.assertEqual(item["changed_bytes"], NETWORK_PAYLOAD_LENGTH)
-
-        self.assertEqual(self.service.session_entries, 1)
-        self.assertEqual(self.service.auth_calls, [(4, "1234")])
-        self.assertEqual(
-            [(cpu, block) for cpu, block, _payload in self.service.wire_targets],
-            [(1, 16), (2, 16)],
-        )
-        self.assertEqual(
-            self.service.device_payloads[(1, 16)],
-            network_payload(1),
-        )
-        self.assertEqual(
-            self.service.device_payloads[(2, 16)],
-            network_payload(2),
-        )
-
-        preimage = json.loads(
-            (
-                Path(self.temporary.name)
-                / "restore-preimages"
-                / result["preimage"]["filename"]
-            ).read_text(encoding="utf-8")
-        )
-        preimage_inspection = self.service.inspect_backup(preimage)
-        self.assertEqual(
-            preimage_inspection["restorable_targets"],
-            selection,
-        )
-
-        audits = sorted(self.app.store.audits(), key=lambda item: item["id"])
-        self.assertEqual(
-            [(item["audit"]["cpu"], item["block"]) for item in audits],
-            [(1, 16), (2, 16)],
-        )
-        self.assertTrue(all(item["audit"]["operation"] == "backup-restore" for item in audits))
-        self.assertTrue(all(item["audit"]["critical"] for item in audits))
-        self.assertTrue(all(item["audit"]["ack_positive"] for item in audits))
-        self.assertTrue(all(item["audit"]["readback_ok"] for item in audits))
-
-    def test_live_batch_fails_fast_and_audits_the_attempted_write(self):
+    def test_live_batch_continues_after_failure_and_audits_every_target(self):
         targets = {20: payload(20), 22: payload(22), 24: payload(24)}
         image = self.service.image_for(targets)
         self.service.negative_ack_blocks.add(24)
@@ -1041,34 +910,77 @@ class WebBackupRestoreTests(unittest.TestCase):
         )
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["stopped_at_block"], 24)
-        self.assertEqual(result["written_blocks"], 0)
+        self.assertIsNone(result["stopped_at_block"])
+        self.assertEqual(result["written_blocks"], 2)
         self.assertEqual(result["failed_blocks"], 1)
-        self.assertEqual(result["write_attempted_blocks"], 1)
+        self.assertEqual(result["write_attempted_blocks"], 3)
         self.assertEqual(result["uncertain_blocks"], 1)
-        self.assertEqual(result["summary"]["not_attempted"], 2)
+        self.assertEqual(result["summary"]["not_attempted"], 0)
         self.assertEqual(
             [(item["block"], item["status"]) for item in result["results"]],
-            [(24, "failed"), (20, "not-attempted"), (22, "not-attempted")],
+            [(24, "failed"), (20, "restored"), (22, "restored")],
         )
         self.assertEqual(self.service.read_blocks[:3], [20, 22, 24])
         self.assertEqual(self.service.auth_calls, [(4, "1234")])
         self.assertEqual(
             [block for block, _target in self.service.wire_writes],
-            [24],
+            [24, 20, 22],
         )
         self.assertEqual(
             [block for block, _before, _target, _dry in self.service.restore_calls],
-            [24],
+            [24, 20, 22],
         )
-        audits = self.app.store.audits()
-        self.assertEqual(len(audits), 1)
+        audits = sorted(self.app.store.audits(), key=lambda item: item["id"])
+        self.assertEqual(len(audits), 3)
         self.assertEqual(audits[0]["block"], 24)
         self.assertEqual(audits[0]["audit"]["operation"], "backup-restore")
         self.assertTrue(audits[0]["audit"]["write_attempted"])
         self.assertFalse(audits[0]["audit"]["ack_positive"])
         self.assertFalse(audits[0]["audit"]["written"])
         self.assertIn("positive ACK", audits[0]["audit"]["error"])
+        self.assertTrue(all(item["audit"]["write_attempted"] for item in audits))
+        self.assertTrue(all(item["audit"]["operation"] == "backup-restore" for item in audits))
+
+    def test_restore_preserves_destination_software_versions(self):
+        before = bytearray(payload(0))
+        target = bytearray(payload(20))
+        version_offsets = range(26, 39)
+        for offset in version_offsets:
+            before[offset] = offset
+            target[offset] = 255 - offset
+        self.service.device_payloads[20] = bytes(before)
+        image = self.service.image_for({20: bytes(target)})
+
+        result = self.app.restore_backup(
+            "admin",
+            image,
+            image["image_sha256"],
+            [20],
+            4,
+            "1234",
+            True,
+            BACKUP_RESTORE_CONFIRMATION,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["written_blocks"], 1)
+        item = result["results"][0]
+        self.assertEqual(
+            item["preserved_fields"],
+            [
+                "Hka_Bd_Stat.bSoftwareVersionMessen",
+                "Hka_Bd_Stat.bSoftwareVersionRegler",
+                "Hka_Bd_Stat.bSoftwareVersionUeberw",
+            ],
+        )
+        written = self.service.device_payloads[20]
+        self.assertEqual(written[26:39], bytes(before[26:39]))
+        self.assertEqual(written[:26], bytes(target[:26]))
+        self.assertEqual(written[39:], bytes(target[39:]))
+        self.assertEqual(
+            self.app.store.audits()[0]["audit"]["preserved_fields"],
+            item["preserved_fields"],
+        )
 
     def test_live_guards_fail_before_authentication_or_wire_write(self):
         targets = {20: payload(20), 24: payload(24)}
@@ -1127,17 +1039,6 @@ class WebBackupRestoreTests(unittest.TestCase):
         self.assertEqual(self.service.wire_writes, [])
 
         self.service.reset_telemetry()
-        self.service.serial_number = "OTHER-DACHS-999"
-        with self.assertRaisesRegex(PermissionError, "anderen Regler"):
-            self.app.restore_backup(
-                "admin", image, image["image_sha256"], [20, 24], 4, "1234",
-                True, BACKUP_RESTORE_CONFIRMATION,
-            )
-        self.assertEqual(self.service.auth_calls, [])
-        self.assertEqual(self.service.wire_writes, [])
-
-        self.service.serial_number = "TEST-DACHS-123"
-        self.service.reset_telemetry()
         del self.service.device_payloads[24]
         with self.assertRaises(KeyError):
             self.app.restore_backup(
@@ -1146,6 +1047,30 @@ class WebBackupRestoreTests(unittest.TestCase):
             )
         self.assertEqual(self.service.auth_calls, [])
         self.assertEqual(self.service.wire_writes, [])
+
+    def test_live_restore_allows_a_replacement_controller_with_another_serial_number(self):
+        image = self.service.image_for({20: payload(20), 24: payload(24)})
+        self.service.serial_number = "REPLACEMENT-999"
+        self.service.reset_telemetry()
+
+        result = self.app.restore_backup(
+            "admin",
+            image,
+            image["image_sha256"],
+            [20, 24],
+            4,
+            "1234",
+            True,
+            BACKUP_RESTORE_CONFIRMATION,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["written_blocks"], 2)
+        self.assertEqual(self.service.auth_calls, [(4, "1234")])
+        self.assertEqual(
+            [block for block, _target in self.service.wire_writes],
+            [24, 20],
+        )
 
 
 class BackupRestoreHTTPTests(unittest.TestCase):
@@ -1280,13 +1205,14 @@ class BackupRestoreHTTPTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 200)
                 self.assertEqual(legacy["block"], 16)
+                self.assertFalse(legacy["writable"])
 
                 status, config = request(
                     "GET", "/dachs/api/network-protection/1/20", guest_token
                 )
                 self.assertEqual(status, 200)
                 self.assertEqual(config["block"], 20)
-                self.assertTrue(config["writable"])
+                self.assertFalse(config["writable"])
 
                 status, live = request(
                     "GET", "/dachs/api/network-protection/1/21", guest_token
@@ -1296,7 +1222,7 @@ class BackupRestoreHTTPTests(unittest.TestCase):
                 self.assertEqual(live["fields"][0]["value"], 2.56)
 
                 service.reset_telemetry()
-                status, written = request(
+                status, denied_config = request(
                     "POST",
                     "/dachs/api/network-protection/1/20",
                     admin_token,
@@ -1308,9 +1234,9 @@ class BackupRestoreHTTPTests(unittest.TestCase):
                         "write_enabled": False,
                     },
                 )
-                self.assertEqual(status, 200)
-                self.assertTrue(written["dry_run"])
-                self.assertEqual(service.session_entries, 1)
+                self.assertEqual(status, 403)
+                self.assertIn("nur lesbar", denied_config["error"])
+                self.assertEqual(service.session_entries, 0)
                 self.assertEqual(service.auth_calls, [])
                 self.assertEqual(service.wire_writes, [])
 
@@ -1335,7 +1261,7 @@ class BackupRestoreHTTPTests(unittest.TestCase):
                     "admin", "Netzschutz-Schreibschutztest", ["write"]
                 )
                 app.set_api_settings({"write_enabled": True, "auth_level": 4})
-                status, api_written = request(
+                status, api_denied = request(
                     "POST",
                     "/dachs/api/v1/actions/set-value",
                     payload_data={
@@ -1343,20 +1269,24 @@ class BackupRestoreHTTPTests(unittest.TestCase):
                         "block": 20,
                         "key": "NetzKonfig1.usSpannung1Unten",
                         "value": "184,1",
-                        "request_id": "writable-b20",
+                        "request_id": "readonly-b20",
                     },
                     api_token=api_access["token"],
                 )
-                self.assertEqual(status, 200)
-                self.assertTrue(api_written["ok"])
-                self.assertEqual(service.auth_calls, [(4, None)])
-                self.assertEqual(
-                    [(cpu, block) for cpu, block, _payload in service.wire_targets],
-                    [(1, 20)],
-                )
+                self.assertEqual(status, 403)
+                self.assertIn("nur lesbar", api_denied["error"])
+                self.assertEqual(service.auth_calls, [])
+                self.assertEqual(service.wire_targets, [])
 
                 service.reset_telemetry()
                 guarded_targets = (
+                    {
+                        "cpu": 1,
+                        "block": 16,
+                        "key": "UC1.SA1.ubLaendercode",
+                        "value": 12,
+                        "request_id": "readonly-b16",
+                    },
                     {
                         "cpu": 1,
                         "block": 21,
@@ -1398,7 +1328,7 @@ class BackupRestoreHTTPTests(unittest.TestCase):
                 with app.store.database() as db:
                     self.assertEqual(
                         db.execute("SELECT COUNT(*) FROM api_requests").fetchone()[0],
-                        1,
+                        0,
                     )
                 self.assertEqual(service.session_entries, 0)
                 self.assertEqual(service.auth_calls, [])
@@ -1559,13 +1489,8 @@ class BackupRestoreHTTPTests(unittest.TestCase):
                     },
                     admin_token,
                 )
-                self.assertEqual(status, 200)
-                self.assertEqual(network_restore["mode"], "dry-run")
-                self.assertEqual(network_restore["unchanged_blocks"], 2)
-                self.assertEqual(
-                    [item["target_key"] for item in network_restore["results"]],
-                    ["1:16", "2:16"],
-                )
+                self.assertEqual(status, 400)
+                self.assertIn("nicht wiederherstellbar", network_restore["error"])
 
                 status, _ = request(
                     "/api/backup/create",

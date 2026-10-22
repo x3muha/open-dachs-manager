@@ -1146,6 +1146,16 @@
       "invalidvals": [],
       "invaliddisplay": ""
     },
+    "Motbel250.bQuotientBh_Start": {
+      "divisor": 10.0,
+      "adder": 0.0,
+      "format": "{0,number,0.0}",
+      "unit": "Bh/Start",
+      "invalidvals": [
+        "0"
+      ],
+      "invaliddisplay": "n.a."
+    },
     "Mm.ModulDaten.bDeltaBh": {
       "divisor": 1.0,
       "adder": 0.0,

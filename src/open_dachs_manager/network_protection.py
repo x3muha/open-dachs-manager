@@ -6,10 +6,11 @@ The regulator exposes three confirmed blocks in each addressed network CPU:
 * block 20: the newer 59-byte protection-configuration layout;
 * block 21: the newer 56-byte live network-measurement layout.
 
-Blocks 16 and 20 have a reviewed write service.  In layout 4 the original
-DataMap derives service 21 (``block + 1``) as the full-payload write command
-for block 20.  Block 21 is the corresponding live-measurement service and has
-no write command; it therefore remains strictly read-only.
+The source-derived layouts include nominal full-payload write commands for
+blocks 16 and 20.  Live acceptance against U 3.050 on both CPUs nevertheless
+rejected block 16 at the application layer and acknowledged block 20 without
+applying even one minimal value.  All three reviewed network-protection blocks
+are therefore fail-closed as read/backup-only targets.
 """
 
 from __future__ import annotations
@@ -27,9 +28,10 @@ NETWORK_PROTECTION_PAYLOAD_LENGTH = 18
 NETWORK_PROTECTION_CPUS = (1, 2)
 NETWORK_PROTECTION_BLOCKS = (16, 20, 21)
 NETWORK_PROTECTION_PAYLOAD_LENGTHS = {16: 18, 20: 59, 21: 56}
-NETWORK_PROTECTION_WRITABLE_BLOCKS = (16, 20)
+NETWORK_PROTECTION_WRITABLE_BLOCKS: tuple[int, ...] = ()
+NETWORK_PROTECTION_ENCODABLE_BLOCKS = (16, 20)
 NETWORK_PROTECTION_BACKUP_BLOCKS = NETWORK_PROTECTION_BLOCKS
-NETWORK_PROTECTION_RESTORE_BLOCKS = (16,)
+NETWORK_PROTECTION_RESTORE_BLOCKS: tuple[int, ...] = ()
 
 
 COUNTRY_CHOICES = (
@@ -178,10 +180,9 @@ _CONFIG_FIELDS = (
     NetworkProtectionField("NetzKonfig", "usSpannung10min", "Spannungsgrenze 10-Minuten-Mittelwert", 57, "V", "voltage_10min", size=2, write=False),
 )
 
-# The historic GUI tagged these fields as non-editable, but the underlying
-# layout-4 DataMap assigns block 20 the full-payload write service 21.  Keep the
-# source-oriented declarations above intact and make the reviewed protocol
-# capability explicit in one place.
+# Keep the source-aligned codec definitions available for backup inspection
+# and trace research.  Runtime schemas mask their write flag because both
+# U 3.050 CPUs ignored a minimal live write after auth 5 and positive ACK.
 CONFIG_FIELDS = tuple(replace(field, write=True) for field in _CONFIG_FIELDS)
 
 
@@ -498,7 +499,19 @@ def network_protection_schema(cpu: int, block: int = NETWORK_PROTECTION_BLOCK) -
     fields = FIELDS_BY_BLOCK[block]
     writable = block in NETWORK_PROTECTION_WRITABLE_BLOCKS
     read_only_reason = ""
-    if block == 21:
+    if block == 16:
+        read_only_reason = (
+            "Beide U-3.050-CPUs lehnten selbst die unveränderte vollständige "
+            "B16-Rücksicherung fachlich mit 7F 11 01 ab; vier Rücklesungen "
+            "blieben jeweils bytegleich."
+        )
+    elif block == 20:
+        read_only_reason = (
+            "Beide U-3.050-CPUs quittierten den nominalen Schreibdienst positiv, "
+            "übernahmen einen minimalen Auth-5-Testwert aber auch nach vier "
+            "Rücklesungen nicht."
+        )
+    elif block == 21:
         read_only_reason = (
             "Block 21 enthält laufende Messwerte und besitzt in der geprüften "
             "Original-DataMap keinen Schreibdienst."
@@ -529,7 +542,7 @@ def network_protection_schema(cpu: int, block: int = NETWORK_PROTECTION_BLOCK) -
                 "size": field.size,
                 "offset": field.offset,
                 "unit": field.unit,
-                "write": field.write,
+                "write": field.write and writable,
                 "critical": True,
                 "choices": [
                     {"value": value, "label": label}
@@ -585,7 +598,7 @@ def decode_network_protection(
             "type": field.field_type,
             "size": field.size,
             "offset": field.offset,
-            "write": field.write,
+            "write": field.write and block in NETWORK_PROTECTION_WRITABLE_BLOCKS,
             "reserved": False,
             "critical": True,
             "choices": [
@@ -608,7 +621,10 @@ def encode_network_protection_value(
     block: int = NETWORK_PROTECTION_BLOCK,
 ) -> None:
     block = validate_network_block(block)
-    if block not in NETWORK_PROTECTION_WRITABLE_BLOCKS:
+    # Keep the source-aligned codec available for offline trace and round-trip
+    # tests. Runtime authorization is fail-closed by schema, web/API, service
+    # write and restore gates before any serial session can be opened.
+    if block not in NETWORK_PROTECTION_ENCODABLE_BLOCKS:
         raise PermissionError(
             f"Netzschutz CPU {validate_network_cpu(cpu)}, Block {block} ist nur lesbar"
         )

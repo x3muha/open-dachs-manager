@@ -178,14 +178,12 @@ Phasenwinkel           raw / 10
 
 Die Abschaltzeiten aus Block 20 werden profilabhängig dekodiert und dürfen
 nicht pauschal durch 100 geteilt werden. Die historische Oberfläche markiert
-die Felder zwar als nicht editierbar, die darunterliegende originale
-Layout-4-Datenzuordnung leitet für den geraden Block 20 jedoch ausdrücklich den
-Vollblock-Schreibdienst `21` (`block + 1`) ab. Open Dachs Manager gibt deshalb
-alle 39 Felder von Block 20 auf CPU 1 und CPU 2 frei. Zusammen mit jeweils 18
-Feldern aus Block 16 sind das 114 eindeutig adressierte schreibbare
-Feldinstanzen.
+die Felder als nicht editierbar. Die DataMap leitet zwar nominal Dienst `21`
+(`block + 1`) ab, doch beide U-3.050-CPUs ignorierten einen minimalen
+Auth-5-Testwrite trotz positivem ACK. Open Dachs Manager hält deshalb alle 39
+B20-Felder auf CPU 1 und CPU 2 strikt nur lesbar.
 
-Der Netzschutz-Schreibpfad für Block 20 ist:
+Der bei der Hardwareabnahme geprüfte, jetzt gesperrte B20-Pfad war:
 
 ```text
 Block 20 lesen → Feldwerte kodieren → authentifizieren
@@ -194,12 +192,9 @@ Block 20 lesen → Feldwerte kodieren → authentifizieren
 → positives ACK → vollständige 59 Byte exakt zurücklesen → Audit
 ```
 
-Bei profilabhängigen Anzeigen ohne eindeutige Umkehrung verweigert die normale
-Werteingabe eine geratene Kodierung. `raw:<Rohwert>` erlaubt die ausdrückliche
-Expertenvorgabe; Vorzeichen, Feldbreite, CAS, Authentifizierung, ACK und
-Rückleseprüfung bleiben dabei aktiv. Kodierung und schreibfreie Probeläufe sind
-geprüft, ein physischer Block-20-Schreibvorgang am Testgerät wurde noch nicht
-ausgeführt.
+Der ACK war auf beiden CPUs positiv, der 59-Byte-Readback blieb viermal exakt
+im Ausgangszustand. Das Ergebnis gilt als fehlgeschlagener Write; B20 ist
+deshalb weder über UI noch API schreibbar.
 
 Block 21 ist der ungerade laufende Messwertblock und besitzt keinen abgeleiteten
 Schreibdienst. Er bleibt strikt nur lesbar. Block 20 und 21 werden auf beiden

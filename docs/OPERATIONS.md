@@ -72,6 +72,24 @@ OPEN_DACHS_HISTORY_INTERVAL=0
 drosselt nur die klassische 21-Werte-Historie, nicht die Liveanzeige oder die
 adaptive Historie.
 
+## 250-h-Diagnose
+
+Die Berechnung läuft im dedizierten Hintergrundworker
+`dachs-250h-diagnosis` und ausschließlich gegen die lokale SQLite-Historie.
+Der Cache `diagnosis_250h_cache.json` liegt im Produktdatenverzeichnis, ist
+auf 4 MiB begrenzt und wird mit Modus `0600`, Datei- und Verzeichnis-`fsync`
+sowie atomarem `os.replace` geschrieben. Ein gültiger Cache wird beim Start
+sofort ausgeliefert und anschließend erneuert.
+
+`GET /api/diagnosis/250h` liefert den Cachezustand; `?refresh=1` plant eine
+manuelle Aktualisierung ein. Weitere Trigger sind Dienststart, die nächste
+lokale Mitternacht in `Europe/Berlin` und ein nach fünf stabilen Sekunden
+bestätigter Motorstopp. `running`, `stale`, `last_error`,
+`generated_at`, `trigger_reason` und `next_midnight` dienen der
+Betriebsdiagnose. Berechnungs- oder Persistenzfehler beenden den Worker nicht;
+der letzte gültige Stand bleibt verfügbar. Die Funktion führt keine seriellen
+Reads, Authentifizierungen oder Writes aus.
+
 ## Lokale EDOMI-API
 
 Die Maschinen-API liegt unter `/api/v1/` beziehungsweise unter dem
@@ -97,6 +115,21 @@ Bei konfiguriertem `OPEN_DACHS_BASE_PATH=/dachs` lauten Oberfläche und
 Healthcheck intern `http://127.0.0.1:8084/dachs/` beziehungsweise
 `/dachs/healthz`. Ein Reverse Proxy muss den Präfix in diesem Modus an den
 Webdienst weiterreichen.
+
+## Lokaler Touch-Bedienplatz
+
+Unter `System → Benutzer & Berechtigungen → Lokaler Benutzer` kann ein zweiter
+HTTP-Listener aktiviert werden. Er bindet unveränderlich nur
+`127.0.0.1`; Port 1 bis 65535 und die Rolle `admin` oder `guest` sind frei
+wählbar. Standard sind Port 80 und Adminrechte, der Listener selbst ist
+standardmäßig aus. Änderungen werden laufend übernommen; ein Portkonflikt
+lässt den bisherigen Listener und die gespeicherte Einstellung unverändert.
+
+Der lokale Browser verwendet keinen Login-Cookie. Der normale Listener bleibt
+loginpflichtig, und die Maschinen-API `/api/v1/*` verlangt auf beiden Ports
+weiter ihren Bearer-Token. Im Audit heißt der lokale Akteur eindeutig
+`localhost-override`. nginx oder ein anderer Reverse Proxy darf niemals auf
+den lokalen Port zeigen; sein Upstream bleibt der normale Web-Port 8084.
 
 ## CLI und TUI gleichzeitig mit der Weboberfläche
 
@@ -151,7 +184,7 @@ Automatische Wartungsbackups liegen einzeln unter
 `open-dachs:open-dachs` und hat Modus `0700`; jede JSON-Datei hat Modus `0600`.
 Jeder neue Eintrag muss Metadaten, Datei, Abbild-SHA-256 und Datei-SHA-256
 konsistent binden und 42 erfolgreiche von 42 angeforderten Sicherungszielen
-mit exakt 38 Restore-Zielen ausweisen. Geprüfte ältere Archive behalten ihren
+mit exakt 36 Restore-Zielen ausweisen. Geprüfte ältere Archive behalten ihren
 38/38-Altvertrag.
 Das Löschen eines Wartungsberichts löscht dieses Sicherungsabbild nicht.
 Die Dateien werden nicht automatisch ausgedünnt. Das lokale Archiv liegt auf

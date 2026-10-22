@@ -101,9 +101,11 @@ class NetworkProtectionTests(unittest.TestCase):
                 item["payload_length"],
                 NETWORK_PROTECTION_PAYLOAD_LENGTHS[item["block"]],
             )
-            self.assertEqual(item["writable"], item["block"] in (16, 20))
+            self.assertFalse(item["writable"])
             self.assertTrue(item["backup_eligible"])
-            self.assertEqual(item["restore_eligible"], item["block"] == 16)
+            self.assertFalse(item["restore_eligible"])
+            self.assertTrue(item["read_only_reason"])
+            self.assertTrue(all(not field["write"] for field in item["fields"]))
 
     def test_layout4_config_offsets_scaling_and_profile_are_source_aligned(self):
         self.assertEqual(len(CONFIG_FIELDS), 39)
@@ -122,7 +124,7 @@ class NetworkProtectionTests(unittest.TestCase):
         self.assertEqual(fields["NetzKonfig1.sImpedanzsprung"]["value"], -3.21)
         self.assertEqual(fields["NetzKonfig1.sImpedanzsprungLom"]["value"], -1234)
         self.assertEqual(fields["NetzKonfig1.usSpannung10min"]["value"], 246.7)
-        self.assertTrue(all(item["write"] is True for item in fields.values()))
+        self.assertTrue(all(item["write"] is False for item in fields.values()))
 
     def test_layout4_config_all_39_fields_encode_back_byte_exactly(self):
         edited = bytearray(self.BLOCK20_SYNTHETIC)

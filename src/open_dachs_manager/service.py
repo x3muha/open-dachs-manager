@@ -46,9 +46,9 @@ _PREWRITE_VOLATILE_FIELDS = {
 }
 
 # One reviewed capture scope for browser backups and maintenance archives.
-# Network blocks 20/21 are preserved and verified, but remain outside the
-# narrower restore scope: B20 has no physical restore acceptance test and B21
-# is live telemetry without a write service.
+# Network blocks 16/20/21 are preserved and verified, but remain outside the
+# narrower restore scope: B16 is rejected at application level, B20 does not
+# apply acknowledged values, and B21 is live telemetry without a write service.
 BACKUP_CPU0_BLOCKS = (
     18, 20, 22, 24, 26, 28, 30, 31, 32, 34, 36, 38, 46, 50, 52, 54, 56,
     60, 62, 66, 70, 76, 80, 82, 84, 86, 88, 90, 92, 94, 100, 102, 104,
@@ -78,10 +78,10 @@ BACKUP_PAYLOAD_LENGTHS = {
 }
 if len(BACKUP_TARGETS) != 42 or len(set(BACKUP_TARGETS)) != 42:  # pragma: no cover
     raise RuntimeError("the reviewed backup capture set must contain exactly 42 targets")
-if len(BACKUP_RESTORE_TARGETS) != 38:  # pragma: no cover
-    raise RuntimeError("the reviewed backup restore set must contain exactly 38 targets")
-if BACKUP_RESTORE_TARGETS != BACKUP_LEGACY_TARGETS:  # pragma: no cover
-    raise RuntimeError("network restore eligibility drifted from the legacy 38-target contract")
+if len(BACKUP_RESTORE_TARGETS) != 36:  # pragma: no cover
+    raise RuntimeError("the reviewed backup restore set must contain exactly 36 targets")
+if any(cpu != 0 for cpu, _block in BACKUP_RESTORE_TARGETS):  # pragma: no cover
+    raise RuntimeError("network-protection targets must remain backup-only")
 
 
 def _canonical_json(data: dict) -> bytes:
@@ -979,8 +979,8 @@ class DachsService:
         # Every mapped CPU-0 block keeps the generic raw-backup/restore
         # contract.  The fixed 38-target maintenance contract is narrower,
         # but must not silently make other addressable pack blocks
-        # non-restorable.  On the two network CPUs only the physically
-        # accepted block 16 remains eligible for restore.
+        # non-restorable. Network-CPU blocks remain capture-only until a
+        # physical write and recovery contract has been accepted.
         restore_targets = {(0, block) for block in writable_blocks}
         restore_targets.update(
             target for target in BACKUP_RESTORE_TARGETS if target[0] != 0
@@ -1336,10 +1336,9 @@ class DachsService:
                 return audit(error=f"block {writable_block} is not mapped and writable")
         elif cpu_id not in NETWORK_PROTECTION_CPUS:
             return audit(error=f"CPU must be 0, 1 or 2, got {cpu_id}")
-        elif writable_block != NETWORK_PROTECTION_BLOCK:
+        else:
             return audit(
-                error=f"CPU {cpu_id} exposes only network-protection block "
-                f"{NETWORK_PROTECTION_BLOCK}"
+                error=f"Netzschutz CPU {cpu_id}, Block {writable_block} ist nur lesbar"
             )
         if len(before) != len(target):
             return audit(error="payload length changed")

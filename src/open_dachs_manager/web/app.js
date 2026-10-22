@@ -22,6 +22,8 @@ const state = {
   historyRequest: { mode: "hours", hours: 24 },
   historyWindow: null,
   chartRefresh: { inFlight: false, pending: false, lastCompletedAt: 0 },
+  operator: { series: [], window: null, runBands: [], inFlight: false, lastCompletedAt: 0, previousSchematicMode: null },
+  diagnosis250: { data: null, inFlight: false, loadedAt: 0 },
   authPreview: null,
   authPreviewGeneration: 0,
   authPreviewClearTimer: null,
@@ -29,7 +31,7 @@ const state = {
   sootFilterSettings: null,
   maintenance: { reports: [], current: null, autosaveTimer: null, pw4Generation: 0, pw4ClearTimer: null },
   dashboard: { settings: null, editCards: [], draggedIndex: null },
-  system: { selectedTab: "users", users: [], tokens: [], apiSettings: null },
+  system: { selectedTab: "users", users: [], tokens: [], apiSettings: null, localAccessSettings: null, firmware: null },
   backup: { image: null, inspection: null, busy: false, importGeneration: 0, archive: [], archiveLoaded: false },
   serviceCatalogTimer: null,
   serviceCatalogLoaded: false,
@@ -44,6 +46,22 @@ const appView = $("appView");
 const BASE_PATH = document.querySelector('meta[name="open-dachs-base-path"]')?.content || "";
 const BACKUP_MAX_FILE_BYTES = 1024 * 1024;
 const RESTORE_CONFIRMATION = "SICHERUNG WIEDERHERSTELLEN";
+const CHART_LEGEND_TONES = Object.freeze({
+  "#dc2626": "red",
+  "#2563eb": "blue",
+  "#d97706": "amber",
+  "#059669": "green",
+  "#f59e0b": "yellow",
+  "#b45309": "brown",
+  "#9333ea": "purple",
+  "#0f766e": "teal",
+  "#0891b2": "cyan",
+  "#7c3aed": "violet",
+  "#475569": "slate",
+  "#ea580c": "orange",
+  "#b91c1c": "dark-red",
+  "#ca8a04": "ochre",
+});
 
 function appUrl(path) {
   const suffix = String(path || "").startsWith("/") ? String(path || "") : `/${path || ""}`;
@@ -66,7 +84,11 @@ function numeric(value) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(appUrl(path), { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
+  const { headers = {}, ...requestOptions } = options;
+  const response = await fetch(appUrl(path), {
+    ...requestOptions,
+    headers: { "Content-Type": "application/json", "X-Open-Dachs-Request": "1", ...headers },
+  });
   const text = await response.text();
   let payload = {};
   try { payload = text ? JSON.parse(text) : {}; } catch (_) { payload = { error: text }; }
@@ -116,7 +138,12 @@ function showApp(user) {
   state.user = user;
   loginView.hidden = true;
   appView.hidden = false;
-  $("userBadge").textContent = `${user.username} · ${user.role === "admin" ? "Admin" : "Gast"}`;
+  const isLocalAccess = user.auth_source === "localhost-override";
+  $("userBadge").textContent = isLocalAccess
+    ? `Lokaler Benutzer · ${user.role === "admin" ? "Admin" : "Gast"}`
+    : `${user.username} · ${user.role === "admin" ? "Admin" : "Gast"}`;
+  $("logoutButton").hidden = isLocalAccess;
+  $("accountControls").hidden = isLocalAccess;
   const isAdmin = user.role === "admin";
   $("writeControls").hidden = !isAdmin;
   $("saveBlockButton").hidden = !isAdmin;
@@ -163,6 +190,7 @@ async function boot() {
     updateRestoreMode();
     if (session.user.role === "admin") await refreshMaintenanceMode();
     await refreshLive();
+    refreshDiagnosis250(false);
     await refreshMaintenance(false);
     await loadBlock(state.selectedBlock);
     refreshMonitorStatus();
@@ -170,7 +198,9 @@ async function boot() {
     state.refreshTimer = setInterval(refreshLive, 1100);
     state.chartTimer = setInterval(() => {
       if (state.selectedView === "monitorView" && historyAutoRefreshDue()) refreshCharts();
+      if (state.selectedView === "operatorView" && Date.now() - state.operator.lastCompletedAt >= 15000) refreshOperatorChart();
     }, 6500);
+    if (window.location.hash === "#bedienplatz") showView("operatorView");
   } catch (error) {
     if (error.message !== "Anmeldung erforderlich") showLogin(error.message);
   }
@@ -792,10 +822,20 @@ function showView(viewId) {
   if (state.selectedView === "maintenanceView" && viewId !== "maintenanceView") {
     clearMaintenancePw4("Beim Verlassen der Wartung verworfen");
   }
+  const leavingOperator = state.selectedView === "operatorView" && viewId !== "operatorView";
+  if (leavingOperator) movePlantBoard(false);
   state.selectedView = viewId;
+  if (viewId === "operatorView") movePlantBoard(true);
+  document.body?.classList.toggle("operator-mode", viewId === "operatorView");
   document.querySelectorAll(".app-view").forEach((view) => { view.hidden = view.id !== viewId; });
   document.querySelectorAll(".tab-button").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
+  if (window.history?.replaceState) {
+    const hash = viewId === "operatorView" ? "#bedienplatz" : "";
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+  }
+  if (viewId === "operatorView") refreshOperatorChart();
   if (viewId === "monitorView") refreshCharts();
+  if (viewId === "diagnosis250View" && Date.now() - state.diagnosis250.loadedAt > 5 * 60_000) refreshDiagnosis250(true);
   if (viewId === "auditView") refreshAudit();
   if (viewId === "maintenanceView") refreshMaintenance(true);
   if (viewId === "faultCatalogView" && !state.serviceCatalogLoaded) refreshServiceCatalog();
@@ -804,6 +844,124 @@ function showView(viewId) {
     renderBackupBlockList();
     updateRestoreMode();
     if (state.user?.role === "admin") refreshBackupArchive();
+  }
+}
+
+function movePlantBoard(toOperator) {
+  const panel = $("plantBoardPanel");
+  const target = toOperator ? $("operatorPlantMount") : $("overviewPlantMount");
+  if (!panel || !target || panel.parentElement === target) return;
+  if (toOperator) {
+    let current = "overview";
+    const active = document.querySelector("[data-schematic-mode].active");
+    if (active?.dataset.schematicMode) current = active.dataset.schematicMode;
+    state.operator.previousSchematicMode = current;
+    setSchematicMode("technical");
+  }
+  target.append(panel);
+  if (!toOperator) {
+    setSchematicMode(state.operator.previousSchematicMode || "overview");
+    state.operator.previousSchematicMode = null;
+  }
+}
+
+function diagnosisNumber(value, digits = 1, suffix = "") {
+  const number = numeric(value);
+  if (number === null) return "—";
+  return `${new Intl.NumberFormat("de-DE", { maximumFractionDigits: digits }).format(number)}${suffix}`;
+}
+
+function diagnosisSparkline(values) {
+  const clean = values.map(numeric);
+  const finite = clean.filter((value) => value !== null);
+  if (finite.length < 2) return `<div class="diagnosis-sparkline-empty">Noch kein belastbarer Verlauf</div>`;
+  const minimum = Math.min(...finite);
+  const maximum = Math.max(...finite);
+  const span = Math.max(0.001, maximum - minimum);
+  const points = clean.map((value, index) => value === null ? null : [
+    8 + index * 204 / Math.max(1, clean.length - 1),
+    56 - (value - minimum) * 44 / span,
+  ]);
+  const paths = [];
+  let current = [];
+  for (const point of points) {
+    if (point) current.push(point);
+    else if (current.length) { paths.push(current); current = []; }
+  }
+  if (current.length) paths.push(current);
+  return `<svg class="diagnosis-sparkline" viewBox="0 0 220 64" role="img" aria-label="Intervallverlauf">${paths.map((path) => `<polyline points="${path.map((point) => `${point[0].toFixed(1)},${point[1].toFixed(1)}`).join(" ")}"/>`).join("")}${points.filter(Boolean).map((point) => `<circle cx="${point[0].toFixed(1)}" cy="${point[1].toFixed(1)}" r="2.8"/>`).join("")}</svg>`;
+}
+
+function renderDiagnosis250() {
+  const data = state.diagnosis250.data;
+  const badge = $("diagnosis250Badge");
+  const actionCount = Number(data?.action_count ?? data?.hint_count ?? 0);
+  badge.hidden = actionCount <= 0;
+  badge.textContent = actionCount > 0 ? `(${actionCount})` : "";
+  if (!data?.available) {
+    $("diagnosis250Status").textContent = data?.pending ? "Berechnung läuft …" : (data?.last_error ? "Berechnung fehlgeschlagen" : "Unzureichende Historie");
+    $("diagnosis250Status").className = "status-pill neutral";
+    $("diagnosis250Quality").innerHTML = `<strong>${data?.pending ? "Hintergrundberechnung gestartet" : "Keine belastbare 250-Bh-Auswertung"}</strong><p>${escapeHtml(data?.last_error || data?.reason || "Historie ist noch nicht ausreichend.")}</p>`;
+    $("diagnosis250Metrics").innerHTML = "";
+    $("diagnosis250Rows").innerHTML = `<tr><td colspan="6" class="muted">Noch keine kohärenten Intervalldaten.</td></tr>`;
+  } else {
+    const intervals = data.intervals || [];
+    const latest = intervals.at(-1);
+    const completeCount = intervals.filter((item) => item.complete).length;
+    const cacheSuffix = data.running ? " · Aktualisierung läuft" : (data.stale ? " · veraltet" : "");
+    $("diagnosis250Status").textContent = `${completeCount} abgeschlossen · 1 laufend${cacheSuffix}`;
+    $("diagnosis250Status").className = `status-pill ${data.stale ? "error" : (latest?.sufficient ? "ok" : "neutral")}`;
+    $("diagnosis250Quality").innerHTML = `<div><p class="eyebrow">DATENBASIS</p><h3>${escapeHtml(data.source)}</h3></div><div class="diagnosis-quality-grid"><div><span>Historie</span><strong>${diagnosisNumber(data.operating_hours_from, 1)}–${diagnosisNumber(data.operating_hours_to, 1)} Bh</strong></div><div><span>Intervalle</span><strong>${completeCount} abgeschlossen</strong></div><div><span>Laufender Bereich</span><strong>${diagnosisNumber(latest?.covered_hours, 1)} / ${diagnosisNumber(latest?.expected_hours, 1)} Bh</strong></div><div><span>Abdeckung</span><strong>${diagnosisNumber(latest?.coverage_percent, 0, " %")}</strong></div></div>`;
+    const metricOrder = ["motor_exhaust", "dachs_exhaust", "coolant", "inlet", "controller", "power"];
+    const metricNoticeCounts = new Map();
+    for (const notice of data.notices || []) {
+      if (!["hint", "warning", "protection"].includes(notice.category)) continue;
+      if (!metricOrder.includes(notice.metric)) continue;
+      metricNoticeCounts.set(notice.metric, (metricNoticeCounts.get(notice.metric) || 0) + 1);
+    }
+    $("diagnosis250Metrics").innerHTML = metricOrder.map((key) => {
+      const definition = data.metrics?.[key] || {};
+      const values = intervals.map((item) => item.metrics?.[key]);
+      const trend = data.trends_k_per_1000_bh?.[key];
+      const latestValue = latest?.metrics?.[key];
+      const trendText = trend === null || trend === undefined ? "Trend: erst ab fünf vollständigen Intervallen" : `Trend: ${trend >= 0 ? "+" : ""}${diagnosisNumber(trend, 1)} K/1000 Bh`;
+      const powerText = key === "power" && latest?.power_in_band_percent !== null ? ` · ${diagnosisNumber(latest.power_in_band_percent, 0, " % im Sollband")}` : "";
+      const noticeCount = metricNoticeCounts.get(key) || 0;
+      const noticeBadge = noticeCount > 0 ? `<b class="diagnosis-metric-badge">(${noticeCount})</b>` : "";
+      return `<article class="diagnosis-metric-card"><header><span>${escapeHtml(definition.title || key)}${noticeBadge}</span><strong>${diagnosisNumber(latestValue, 2, definition.unit ? ` ${definition.unit}` : "")}</strong></header>${diagnosisSparkline(values)}<p>${escapeHtml(definition.normal || "")}${escapeHtml(powerText)}</p><small>${escapeHtml(trendText)}</small></article>`;
+    }).join("");
+    $("diagnosis250Rows").innerHTML = [...intervals].reverse().map((item) => {
+      const range = `${diagnosisNumber(item.from_bh, 0)}–${diagnosisNumber(item.to_bh, 0)} Bh`;
+      const status = item.current ? "laufend" : "abgeschlossen";
+      const quality = `${diagnosisNumber(item.coverage_percent, 0, " %")} · ${item.sufficient ? "belastbar" : "unvollständig"}`;
+      const failed = item.failed_start_reliable ? `${item.failed_starts} · ${diagnosisNumber(item.failed_start_percent, 1, " %")}` : "— · nicht verfügbar";
+      const segments = (item.target_segments || []).map((segment) => `${diagnosisNumber(segment.target_kw, 2, " kW")} · ${diagnosisNumber(segment.operating_hours, 1, " Bh")} · ${diagnosisNumber(segment.in_band_percent, 0, " %")}`).join("<br>") || "—";
+      return `<tr class="${item.current ? "diagnosis-current-row" : ""}"><td><strong>${range}</strong><small>${status}</small></td><td>${quality}<small>${diagnosisNumber(item.covered_hours, 1)} / ${diagnosisNumber(item.expected_hours, 1)} Bh · ${item.gap_count} Lücke(n)</small></td><td>${diagnosisNumber(item.bh_per_start, 2)}</td><td>${failed}</td><td>${diagnosisNumber(item.power_in_band_percent, 0, " %")}</td><td>${segments}</td></tr>`;
+    }).join("");
+  }
+  const grouped = { hint: [], warning: [], protection: [], data: [] };
+  for (const notice of data?.notices || []) (grouped[notice.category] || grouped.data).push(notice);
+  const labels = { hint: "Herstellerhinweise", warning: "Warnungen", protection: "Schutz / Störung", data: "Datenqualität" };
+  $("diagnosis250Notices").innerHTML = Object.entries(grouped).map(([category, notices]) => `<section class="diagnosis-notice-group diagnosis-${category}"><h4>${labels[category]} <span>${notices.length}</span></h4>${notices.length ? notices.map((notice) => `<article><strong>${escapeHtml(notice.title)}</strong><p>${escapeHtml(notice.text)}</p></article>`).join("") : `<p class="muted">Keine aktuellen Einträge.</p>`}</section>`).join("");
+}
+
+async function refreshDiagnosis250(showErrors = true, force = false) {
+  if (state.diagnosis250.inFlight) return;
+  state.diagnosis250.inFlight = true;
+  $("diagnosis250Refresh").disabled = true;
+  $("diagnosis250Status").textContent = "Berechne offline …";
+  $("diagnosis250Status").className = "status-pill neutral";
+  try {
+    state.diagnosis250.data = await api(`/api/diagnosis/250h${force ? "?refresh=1" : ""}`);
+    state.diagnosis250.loadedAt = Date.now();
+    renderDiagnosis250();
+  } catch (error) {
+    $("diagnosis250Status").textContent = "Berechnung fehlgeschlagen";
+    $("diagnosis250Status").className = "status-pill error";
+    if (showErrors) toast(error.message, "error");
+  } finally {
+    state.diagnosis250.inFlight = false;
+    $("diagnosis250Refresh").disabled = false;
   }
 }
 
@@ -1664,7 +1822,7 @@ async function changePassword(event) {
 }
 
 function selectSystemTab(tab) {
-  const selected = ["users", "tokens", "maintenance"].includes(tab) ? tab : "users";
+  const selected = ["users", "tokens", "maintenance", "firmware"].includes(tab) ? tab : "users";
   state.system.selectedTab = selected;
   document.querySelectorAll("[data-system-tab]").forEach((button) => {
     button.classList.toggle("active", button.dataset.systemTab === selected);
@@ -1674,7 +1832,57 @@ function selectSystemTab(tab) {
   });
   if (selected === "tokens") refreshSystemTokens();
   else if (selected === "maintenance") refreshMaintenanceMode();
-  else refreshSystemUsers();
+  else if (selected === "users") refreshSystemUsers();
+}
+
+function bytesToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function renderFirmwareInspection(result) {
+  const entries = result?.entries || [];
+  $("firmwareResult").innerHTML = `<div class="backup-archive-metrics">
+    <div><span>Datei</span><strong>${escapeHtml(result.filename)}</strong><small>${escapeHtml(formatArchiveBytes(result.packed_bytes + 16))}</small></div>
+    <div><span>SHA-256</span><strong title="${escapeHtml(result.sha256)}">${escapeHtml(shortArchiveDigest(result.sha256))}</strong><small>${escapeHtml(result.entry_count)} Modulabbilder</small></div>
+    <div><span>Live-Flash</span><strong>Gesperrt</strong><small>Kein serieller Zugriff</small></div>
+  </div><div class="table-wrap"><table class="data-table"><thead><tr><th>Architektur</th><th>Modul</th><th>Quelldatei</th><th>Größe</th></tr></thead><tbody>${entries.map((item) => `<tr><td>${escapeHtml(item.architecture)}</td><td>${escapeHtml(item.module)}</td><td><code>${escapeHtml(item.source)}</code></td><td>${escapeHtml(formatArchiveBytes(item.bytes))}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+async function inspectFirmwareFile(event) {
+  const file = event.target.files?.[0];
+  state.system.firmware = null;
+  $("firmwareResult").innerHTML = "";
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith(".muc")) {
+    $("firmwareStatus").textContent = "Abgelehnt: Es wird ausschließlich eine .muc-Datei angenommen.";
+    $("firmwareStatus").className = "write-guard-status error";
+    return;
+  }
+  if (file.size > 1024 * 1024) {
+    $("firmwareStatus").textContent = "Abgelehnt: Die Datei ist größer als 1 MiB.";
+    $("firmwareStatus").className = "write-guard-status error";
+    return;
+  }
+  $("firmwareFile").disabled = true;
+  $("firmwareStatus").textContent = "Prüfe MUC-Container und acht Modulabbilder offline …";
+  $("firmwareStatus").className = "write-guard-status neutral";
+  try {
+    const result = await api("/api/firmware/inspect", { method: "POST", body: JSON.stringify({ filename: file.name, content_b64: bytesToBase64(await file.arrayBuffer()) }) });
+    state.system.firmware = result;
+    renderFirmwareInspection(result);
+    $("firmwareStatus").textContent = `Prüfung bestanden · ${result.entry_count} Modulabbilder · Datei nicht gespeichert · serieller Zugriff: nein.`;
+    $("firmwareStatus").className = "write-guard-status ok";
+  } catch (error) {
+    $("firmwareStatus").textContent = `Firmwaredatei abgelehnt: ${error.message}`;
+    $("firmwareStatus").className = "write-guard-status error";
+  } finally {
+    $("firmwareFile").disabled = false;
+  }
 }
 
 async function refreshSystemView() {
@@ -1696,13 +1904,78 @@ function renderSystemUsers() {
   }).join("") || `<tr><td colspan="5" class="muted">Keine Benutzer vorhanden.</td></tr>`;
 }
 
+function renderLocalAccessSettings() {
+  const settings = state.system.localAccessSettings;
+  if (!settings) return;
+  $("localAccessEnabled").checked = Boolean(settings.enabled);
+  $("localAccessPort").value = settings.port ?? 80;
+  $("localAccessRole").value = settings.role === "guest" ? "guest" : "admin";
+  const role = settings.role === "guest" ? "Gast · nur lesen" : "Admin · lesen und schreiben";
+  const status = $("localAccessStatus");
+  if (settings.last_error) {
+    status.textContent = `Konfiguriert, aber inaktiv: ${settings.last_error}`;
+    status.className = "write-guard-status error";
+  } else if (settings.active) {
+    status.textContent = `Aktiv · 127.0.0.1:${settings.port} · ${role}`;
+    status.className = "write-guard-status warn";
+  } else if (settings.enabled) {
+    status.textContent = `Gespeichert, aber noch nicht aktiv · 127.0.0.1:${settings.port} · ${role}`;
+    status.className = "write-guard-status neutral";
+  } else {
+    status.textContent = "Deaktiviert · normaler Login und Reverse Proxy bleiben unverändert geschützt.";
+    status.className = "write-guard-status ok";
+  }
+  const link = $("localAccessUrl");
+  link.hidden = !settings.active || !settings.url;
+  link.href = settings.url || "";
+  link.textContent = settings.url ? `Lokale Seite öffnen: ${settings.url}` : "";
+}
+
 async function refreshSystemUsers() {
   if (state.user?.role !== "admin") return;
   try {
-    const data = await api("/api/users");
+    const [data, localAccess] = await Promise.all([
+      api("/api/users"),
+      api("/api/settings/local-access"),
+    ]);
     state.system.users = data.items || [];
+    state.system.localAccessSettings = localAccess;
     renderSystemUsers();
+    renderLocalAccessSettings();
   } catch (error) { toast(error.message); }
+}
+
+async function saveLocalAccessSettings(event) {
+  event.preventDefault();
+  try {
+    const settings = await api("/api/settings/local-access", {
+      method: "POST",
+      body: JSON.stringify({
+        enabled: $("localAccessEnabled").checked,
+        port: Number($("localAccessPort").value),
+        role: $("localAccessRole").value,
+      }),
+    });
+    state.system.localAccessSettings = settings;
+    renderLocalAccessSettings();
+    toast(settings.active
+      ? `Lokaler Benutzer ist auf 127.0.0.1:${settings.port} aktiv.`
+      : "Lokaler Benutzer ist deaktiviert.");
+    if (state.user?.auth_source === "localhost-override" && settings.active) {
+      const currentUrl = `${window.location.origin}${BASE_PATH || ""}/`;
+      if (settings.url && settings.url !== currentUrl) {
+        window.location.assign(settings.url);
+      } else if (settings.role !== state.user.role) {
+        await boot();
+      }
+    }
+  } catch (error) {
+    // Port collisions and validation errors are transactional server-side.
+    // Restore the last accepted values so input and runtime status cannot
+    // appear to describe two different listeners.
+    renderLocalAccessSettings();
+    toast(error.message, "error");
+  }
 }
 
 async function createSystemUser(event) {
@@ -2511,7 +2784,8 @@ function renderChartLegend(group, elementId) {
   const hidden = state.chartHidden[group] || new Set();
   element.innerHTML = (state.chartSeries[group] || []).map((item) => {
     const isHidden = hidden.has(item.id);
-    return `<button type="button" class="legend-item${isHidden ? " is-hidden" : ""}" data-chart-group="${group}" data-chart-series="${escapeHtml(item.id)}" style="--legend-color:${escapeHtml(item.color)}" aria-pressed="${!isHidden}" title="Kurve ein-/ausblenden">${escapeHtml(item.title)}</button>`;
+    const tone = CHART_LEGEND_TONES[String(item.color || "").toLowerCase()] || "slate";
+    return `<button type="button" class="legend-item legend-tone-${tone}${isHidden ? " is-hidden" : ""}" data-chart-group="${group}" data-chart-series="${escapeHtml(item.id)}" aria-pressed="${!isHidden}" title="Kurve ein-/ausblenden">${escapeHtml(item.title)}</button>`;
   }).join("");
   element.querySelectorAll("[data-chart-series]").forEach((button) => button.addEventListener("click", () => {
     const seriesId = button.dataset.chartSeries;
@@ -2576,6 +2850,123 @@ async function refreshCharts() {
       state.chartRefresh.pending = false;
       setTimeout(refreshCharts, 0);
     }
+  }
+}
+
+function drawOperatorChart() {
+  const canvas = $("operatorChart");
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(560, Math.floor(rect.width));
+  const height = 126;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const colors = chartColors();
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(0, 0, width, height);
+
+  const left = 60, right = 100, top = 18, bottom = 25;
+  const plotW = Math.max(100, width - left - right);
+  const plotH = height - top - bottom;
+  const fallbackEnd = Date.now();
+  const start = Number(state.operator.window?.start) || fallbackEnd - 2 * 3600000;
+  const end = Number(state.operator.window?.end) || fallbackEnd;
+  const span = Math.max(1, end - start);
+
+  for (const band of state.operator.runBands || []) {
+    const bandStart = Math.max(start, Number(band.start));
+    const bandEnd = Math.min(end, Number(band.end));
+    if (bandEnd <= bandStart) continue;
+    ctx.fillStyle = band.running ? colors.running : colors.stopped;
+    ctx.fillRect(left + (bandStart - start) / span * plotW, top, (bandEnd - bandStart) / span * plotW, plotH);
+  }
+
+  ctx.strokeStyle = colors.grid;
+  ctx.fillStyle = colors.ink;
+  ctx.font = "10px system-ui";
+  for (let index = 0; index <= 4; index += 1) {
+    const y = top + plotH * index / 4;
+    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(left + plotW, y); ctx.stroke();
+    ctx.textAlign = "right";
+    ctx.fillText(String(Math.round(3000 * (4 - index) / 4)), left - 7, y + 3);
+    ctx.textAlign = "left";
+    const power = (6 * (4 - index) / 4).toFixed(index === 4 ? 0 : 1).replace(".0", "");
+    const exhaust = Math.round(600 * (4 - index) / 4);
+    ctx.fillText(`${power} kW · ${exhaust} °C`, left + plotW + 7, y + 3);
+  }
+  for (let index = 0; index <= 4; index += 1) {
+    const x = left + plotW * index / 4;
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + plotH); ctx.stroke();
+  }
+  ctx.textAlign = "left";
+  ctx.fillText("Drehzahl", left, 11);
+  ctx.textAlign = "right";
+  ctx.fillText("Leistung · Motorabgas", left + plotW, 11);
+
+  const specs = {
+    drehzahl: { max: 3000, color: "#d97706" },
+    wirkleistung: { max: 6, color: "#0f766e" },
+    abgas_motor: { max: 600, color: "#c94855" },
+  };
+  let pointCount = 0;
+  for (const item of state.operator.series || []) {
+    const spec = specs[item.id];
+    if (!spec) continue;
+    const points = (item.points || []).map((point) => ({ time: new Date(point.recorded_at).getTime(), value: numeric(point.value) }))
+      .filter((point) => Number.isFinite(point.time) && point.value !== null && point.time >= start && point.time <= end)
+      .sort((first, second) => first.time - second.time);
+    pointCount += points.length;
+    ctx.strokeStyle = spec.color;
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      const x = left + (point.time - start) / span * plotW;
+      const y = top + (1 - Math.max(0, Math.min(spec.max, point.value)) / spec.max) * plotH;
+      if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+  }
+  if (!pointCount) {
+    ctx.fillStyle = colors.ink;
+    ctx.font = "12px system-ui";
+    ctx.textAlign = "center";
+    ctx.fillText("Noch keine gespeicherten Messwerte", left + plotW / 2, top + plotH / 2);
+  }
+  ctx.fillStyle = colors.ink;
+  ctx.font = "10px system-ui";
+  ctx.textAlign = "left";
+  ctx.fillText(chartTimeLabel(start, span), left, height - 7);
+  ctx.textAlign = "right";
+  ctx.fillText(chartTimeLabel(end, span), left + plotW, height - 7);
+}
+
+async function refreshOperatorChart() {
+  if (!state.schema || state.operator.inFlight) return;
+  state.operator.inFlight = true;
+  const status = $("operatorChartStatus");
+  if (status) status.textContent = "Lade letzte 2 Stunden …";
+  try {
+    const ids = ["drehzahl", "wirkleistung", "abgas_motor"];
+    const chartItems = (state.schema.series || []).filter((item) => ids.includes(item.id));
+    const params = new URLSearchParams({ hours: "2", limit: "1200" });
+    params.set("series", JSON.stringify(chartItems.map(({ id, block, key }) => ({ id, block, key }))));
+    const batch = await api(`/api/history-batch?${params.toString()}`);
+    const start = new Date(batch.from).getTime();
+    const end = new Date(batch.to).getTime();
+    state.operator.window = Number.isFinite(start) && Number.isFinite(end) && end > start ? { start, end } : null;
+    state.operator.series = chartItems.map((item) => ({ ...item, points: batch.series?.[item.id] || [] }));
+    state.operator.runBands = buildChartRunBands(batch.series?.drehzahl || [], state.operator.window);
+    state.operator.lastCompletedAt = Date.now();
+    if (status) status.textContent = `Letzte 2 Stunden · aktualisiert ${new Date().toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+    drawOperatorChart();
+  } catch (error) {
+    if (status) status.textContent = `Diagrammfehler: ${error.message}`;
+    drawOperatorChart();
+  } finally {
+    state.operator.inFlight = false;
   }
 }
 
@@ -2930,8 +3321,8 @@ async function loadBackupArchiveForRestore(archiveId, button = null) {
       || successful !== requested
       || failed !== 0
       || inspectedTargets.length !== requested
-      || restorable !== 38) {
-      throw new Error("Das Wartungsbackup erfüllt nach erneuter Prüfung nicht den vollständigen 38er-/42er-Integritätsvertrag mit exakt 38 Restore-Zielen");
+      || restorable !== 36) {
+      throw new Error("Das Wartungsbackup erfüllt nach erneuter Prüfung nicht den vollständigen 38er-/42er-Integritätsvertrag mit exakt 36 Restore-Zielen");
     }
     state.backup.image = image;
     state.backup.inspection = inspection;
@@ -3346,7 +3737,11 @@ function toast(message, tone = "neutral") { const element=$("toast"); element.te
 
 document.addEventListener("DOMContentLoaded", () => {
   $("loginForm").addEventListener("submit", login);
-  $("logoutButton").addEventListener("click", async () => { await api("/api/logout", { method:"POST", body:"{}" }); showLogin(); });
+  $("logoutButton").addEventListener("click", async () => {
+    if (state.user?.auth_source === "localhost-override") return;
+    await api("/api/logout", { method:"POST", body:"{}" });
+    showLogin();
+  });
   document.querySelectorAll(".tab-button").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
   document.querySelectorAll("[data-view-target]").forEach((button) => button.addEventListener("click", () => showView(button.dataset.viewTarget)));
   $("backupSelectAll").addEventListener("click", () => setBlockSelection("backup", true));
@@ -3424,6 +3819,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!$("changelogModal").hidden) closeChangelog();
     else if (!$("dashboardEditor").hidden) closeDashboardEditor();
   });
+  $("diagnosis250Refresh").addEventListener("click", () => refreshDiagnosis250(true, true));
   $("maintenanceRefresh").addEventListener("click", () => refreshMaintenance(true));
   $("maintenanceCreate").addEventListener("click", createMaintenanceReport);
   $("maintenanceReportRows").addEventListener("click", (event) => {
@@ -3473,6 +3869,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const button = event.target.closest("[data-system-tab]");
     if (button) selectSystemTab(button.dataset.systemTab);
   });
+  $("firmwareFile").addEventListener("change", inspectFirmwareFile);
+  $("localAccessForm").addEventListener("submit", saveLocalAccessSettings);
   $("userCreateForm").addEventListener("submit", createSystemUser);
   $("usersRefresh").addEventListener("click", refreshSystemUsers);
   $("userRows").addEventListener("click", (event) => {
@@ -3507,8 +3905,8 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("[data-action=reload-block]").forEach((button)=>button.addEventListener("click",()=>loadBlock(state.selectedBlock, state.selectedCpu)));
   document.querySelectorAll("[data-action=refresh-audit]").forEach((button)=>button.addEventListener("click",refreshAudit));
   window.addEventListener("resize", () => {
-    if (state.selectedView !== "monitorView") return;
-    redrawAllCharts();
+    if (state.selectedView === "monitorView") redrawAllCharts();
+    if (state.selectedView === "operatorView") drawOperatorChart();
   });
   boot();
 });

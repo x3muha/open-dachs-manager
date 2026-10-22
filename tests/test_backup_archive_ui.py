@@ -47,7 +47,7 @@ class BackupArchiveUITests(unittest.TestCase):
         self.assertIn('inspection.live_restore_compatible !== true', self.app)
         self.assertIn('![38, 42].includes(requested)', self.app)
         self.assertIn('successful !== requested', self.app)
-        self.assertIn('restorable !== 38', self.app)
+        self.assertIn('restorable !== 36', self.app)
         self.assertIn('failed !== 0', self.app)
         self.assertIn('archiveState === "ready"', self.app)
         self.assertIn('item?.pack_compatible === true', self.app)

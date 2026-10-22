@@ -1227,6 +1227,29 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(block_38[56], 7)
 
+    def test_block_38_operating_hours_per_start_uses_original_tenth_scale(self):
+        pack = PackRepository()
+        payload = bytearray(57)
+        payload[0] = 38
+
+        first = next(
+            field
+            for field in pack.decode(38, payload)
+            if field.key == "Motbel250[0].bQuotientBh_Start"
+        )
+
+        self.assertEqual(first.raw, 38)
+        self.assertEqual(first.value, 3.8)
+        self.assertEqual(first.unit, "Bh/Start")
+
+        pack.encode_value(
+            payload,
+            "Motbel250[0].bQuotientBh_Start",
+            "4.2",
+            block=38,
+        )
+        self.assertEqual(payload[0], 42)
+
     def test_write_service_dry_run_and_allowlist_are_auditable(self):
         service = DachsService("/dev/null", 19200, 0.1, PackRepository())
         before = b"\x01\x02"
@@ -2720,7 +2743,7 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(archive["ready"])
             self.assertTrue(archive["verified"])
             self.assertEqual(archive["successful_targets"], 42)
-            self.assertEqual(archive["restorable_count"], 38)
+            self.assertEqual(archive["restorable_count"], 36)
             archive_path = Path(directory) / "backup-archive" / archive["filename"]
             self.assertEqual(archive_path.stat().st_mode & 0o777, 0o600)
 

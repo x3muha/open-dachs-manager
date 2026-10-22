@@ -588,6 +588,7 @@ def _format_lookup_key(key: str, formats: dict) -> str | None:
     if base in formats:
         return base
     normalized = re.sub(r"^BD3112\.", "", base)
+    normalized = re.sub(r"^Motbel250\[\d+\]\.", "Motbel250.", normalized)
     normalized = re.sub(r"^Hka_BZbeiSC_Mw[12]_\d+L\.", lambda m: "Hka_Mw1." if "Mw1" in m.group(0) else "Hka_Mw2.", normalized)
     normalized = re.sub(r"^Hka_BZbeiSC_Mw1_XXL\.", "Hka_Mw1.", normalized)
     normalized = re.sub(r"^Hka_BZbeiSC_Hist_\d+L\.", "Hka_Bd.", normalized)

@@ -67,7 +67,7 @@ class BackupArchiveIdentityTests(unittest.TestCase):
             self.guard, self.image, require_current_pack=True
         )
         self.assertEqual(inspection["successful_blocks"], 42)
-        self.assertEqual(inspection["restorable_blocks"], 38)
+        self.assertEqual(inspection["restorable_blocks"], 36)
         self.assertEqual(
             [
                 (item["cpu"], item["block"])
@@ -183,7 +183,7 @@ class BackupArchiveIdentityTests(unittest.TestCase):
         )
 
         self.assertEqual(inspection["successful_blocks"], 38)
-        self.assertEqual(inspection["restorable_blocks"], 38)
+        self.assertEqual(inspection["restorable_blocks"], 36)
 
 
 class BackupArchiveLifecycleTests(unittest.TestCase):

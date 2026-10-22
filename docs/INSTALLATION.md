@@ -85,12 +85,16 @@ Der Installer legt folgende Komponenten an:
 | `/var/lib/open-dachs-manager/dashboard_settings.json` | gemeinsame Auswahl und Reihenfolge der Übersichtskacheln |
 | `/var/lib/open-dachs-manager/soot_filter_settings.json` | lokale Temperaturkennlinie der geschätzten Rußfilteranzeige |
 | `/var/lib/open-dachs-manager/api_settings.json` | globale API-Schreibfreigabe und serverseitiges Auth-Level; entsteht erst nach einer Änderung |
+| `/var/lib/open-dachs-manager/local_access_settings.json` | optionaler Loopback-Bedienplatz mit Port und Rolle; entsteht erst nach einer Änderung |
 | `/var/lib/open-dachs-manager/servicecodes_de.properties` | optionale lokale Diagnoseergänzung für Ursachen und Maßnahmen |
 | `/run/open-dachs-manager/serial.sock` | Socket des gemeinsamen Serialworkers |
 | `/etc/systemd/system/open-dachs-manager-*.service` | systemd-Dienste |
 
 Die Dienste laufen als unprivilegierter Systembenutzer `open-dachs`. Der
 Installer fügt diesen Benutzer der erkannten Gerätegruppe des Adapters hinzu.
+Nur der Webdienst erhält zusätzlich ausschließlich `CAP_NET_BIND_SERVICE`,
+damit der optionale Loopback-Bedienplatz den HTTP-Standardport 80 direkt
+binden darf; weitere Root- oder Netzwerkfähigkeiten erhält er nicht.
 Bei jeder Installation oder Aktualisierung stellt er außerdem sicher, dass das
 Backup-Archiv als `open-dachs:open-dachs` mit Verzeichnisrechten `0700`
 existiert. Das Archiv wird bei Updates nicht geleert.
@@ -135,6 +139,14 @@ Dienst weiter auf `0.0.0.0:8084`. Entfernt der Proxy den Präfix bereits vor
 dem Weiterleiten, bleibt der Base Path leer. Der Healthcheck lautet dann
 weiter `/healthz`.
 
+Der optionale lokale Benutzer besitzt einen getrennten Listener auf
+`127.0.0.1:<Port>`. Ein Reverse Proxy darf ausschließlich den normalen
+Web-Port 8084 als Upstream verwenden und niemals auf diesen Loopback-Port
+zeigen. Host-, Origin- und Forwarding-Prüfungen sperren normale versehentliche
+Weiterleitungen; ein Proxy, der Ziel, Host, Origin und Proxyspuren absichtlich
+als lokalen Browser umschreibt, ist technisch nicht unterscheidbar und deshalb
+eine unzulässige Konfiguration.
+
 ## 4. Erste Anmeldung
 
 Bei einem neuen Datenverzeichnis erzeugt der Webdienst zufällige Admin- und
@@ -153,6 +165,14 @@ Passwörter zurücksetzen. Jeder angemeldete Benutzer kann sein eigenes Passwort
 ändern. Relevante Kontoänderungen beenden die offenen Sitzungen des Kontos. Im
 Datenverzeichnis werden Passwort-Hashes und keine Klartextpasswörter
 gespeichert.
+
+Für einen Browser direkt auf demselben Rechner lässt sich dort außerdem
+`Lokaler Benutzer` aktivieren. Standard sind Port 80 und Adminrechte; die
+Funktion selbst bleibt bis zur bewussten Aktivierung aus. Der Listener ist
+fest an IPv4-Loopback `127.0.0.1` gebunden, der Bind-Host ist nicht
+konfigurierbar. Port und Rolle werden ohne Dienstneustart übernommen. Der
+lokale Benutzer besitzt kein Passwort und keinen portübergreifend nutzbaren
+Session-Cookie.
 
 API-Tokens werden unter `System → API & Tokens` erzeugt. Das vollständige
 Token wird nur einmal angezeigt; in SQLite bleibt ausschließlich sein Hash.
