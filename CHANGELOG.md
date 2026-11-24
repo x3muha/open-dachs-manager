@@ -1,5 +1,13 @@
 # Änderungsverlauf
 
+## V3 1.8.18 - 2026-11-24
+
+- Der Installer nimmt `curl` jetzt ausdrücklich in Systempaket- und
+  Werkzeugprüfung auf. Dadurch ist die lokal begrenzte, umleitungsfreie
+  Zustandsprüfung des privilegierten Aktualisierungs-Hilfsdienstes auch auf
+  minimalen Debian-/Ubuntu-Installationen garantiert verfügbar. Funktionsumfang,
+  Signierschlüssel, Datenbankschema und Rückfallvertrag bleiben gegenüber 1.8.17 unverändert.
+
 ## V3 1.8.17 - 2026-11-24
 
 - Die Netzfrequenzkurve und ihre Y-Achse verwenden jetzt dieselbe tatsächlich

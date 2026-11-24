@@ -118,7 +118,7 @@ if [[ -n "$ODM_SERVICE_CODES_FILE" ]]; then
 fi
 
 install_system_dependencies() {
-  local packages=(git python3 python3-venv python3-pip ca-certificates openssl psmisc)
+  local packages=(git python3 python3-venv python3-pip ca-certificates openssl psmisc curl)
   local missing=()
   local package_name
 
@@ -149,7 +149,7 @@ install_system_dependencies() {
 
 install_system_dependencies
 
-for command_name in python3 systemctl getent groupadd useradd usermod install stat mktemp tar readlink chmod chown openssl sha256sum find sort xargs cut mv ln fuser; do
+for command_name in python3 systemctl getent groupadd useradd usermod install stat mktemp tar readlink chmod chown openssl sha256sum find sort xargs cut mv ln fuser curl; do
   command -v "$command_name" >/dev/null 2>&1 || die "benötigter Befehl fehlt: $command_name"
 done
 
