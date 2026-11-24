@@ -47,11 +47,13 @@ class HelperFilesystemTests(unittest.TestCase):
 
     def test_sqlite_online_backup_and_quick_check(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as td:
-            root=Path(td); database=root/"live.db"; backups=root/"backups"
+            root=Path(td); database=root/"live.db"; backups=root/"backups"; backups.mkdir(mode=0o700)
             db=sqlite3.connect(database); db.execute("create table t(value text)"); db.execute("insert into t values ('ok')"); db.commit(); db.close()
             old_db,old_backups=helper.DATABASE,helper.BACKUPS; helper.DATABASE,helper.BACKUPS=database,backups
             try:
-                result=helper.sqlite_backup("a"*32)
+                with mock.patch.object(helper,"ensure_root_dir",return_value=backups), \
+                     mock.patch.object(helper.os,"chown"):
+                    result=helper.sqlite_backup("a"*32)
                 check=sqlite3.connect(result); self.assertEqual(check.execute("pragma quick_check").fetchone()[0],"ok"); self.assertEqual(check.execute("select value from t").fetchone()[0],"ok"); check.close()
             finally: helper.DATABASE,helper.BACKUPS=old_db,old_backups
 
@@ -62,7 +64,8 @@ class HelperFilesystemTests(unittest.TestCase):
             (backups/("d"*32+".db")).symlink_to(outside)
             old_db,old_backups=helper.DATABASE,helper.BACKUPS; helper.DATABASE,helper.BACKUPS=database,backups
             try:
-                with self.assertRaises(OSError): helper.sqlite_backup("d"*32)
+                with mock.patch.object(helper,"ensure_root_dir",return_value=backups), self.assertRaises(OSError):
+                    helper.sqlite_backup("d"*32)
             finally: helper.DATABASE,helper.BACKUPS=old_db,old_backups
 
     def test_atomic_switch_keeps_direct_symlink(self):
@@ -105,15 +108,26 @@ class HelperFilesystemTests(unittest.TestCase):
     def test_parent_symlink_and_recursive_release_permissions_rejected(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as td:
             root=Path(td); real=root/"real"; real.mkdir(); (root/"link").symlink_to(real)
-            with self.assertRaisesRegex(helper.Failure,"symlink-parent"):
+            real_lstat=helper.os.lstat
+            def root_owned_lstat(path,*args,**kwargs):
+                info=real_lstat(path,*args,**kwargs)
+                if Path(path)==root/"link": return info
+                return mock.Mock(st_mode=info.st_mode,st_uid=0)
+            with mock.patch.object(helper.os,"lstat",side_effect=root_owned_lstat), self.assertRaisesRegex(helper.Failure,"symlink-parent"):
                 helper.verify_parent_chain(root/"link")
             releases=root/"releases"; releases.mkdir(); candidate=releases/"1.8.18-x"; candidate.mkdir()
             child=candidate/"bad"; child.write_text("x"); child.chmod(0o666)
             old=helper.RELEASES; helper.RELEASES=releases
             try:
-                with self.assertRaisesRegex(helper.Failure,"writable-child"): helper.validate_release_tree(candidate)
+                release_lstat=helper.os.lstat
+                def root_owned_release_lstat(path,*args,**kwargs):
+                    info=release_lstat(path,*args,**kwargs)
+                    return mock.Mock(st_mode=info.st_mode,st_uid=0)
+                with mock.patch.object(helper.os,"lstat",side_effect=root_owned_release_lstat), self.assertRaisesRegex(helper.Failure,"writable-child"):
+                    helper.validate_release_tree(candidate)
                 child.chmod(0o600); outside=root/"outside"; outside.write_text("x"); (candidate/"escape").symlink_to(outside)
-                with self.assertRaisesRegex(helper.Failure,"symlink-escape"): helper.validate_release_tree(candidate)
+                with mock.patch.object(helper.os,"lstat",side_effect=root_owned_release_lstat), self.assertRaisesRegex(helper.Failure,"symlink-escape"):
+                    helper.validate_release_tree(candidate)
             finally: helper.RELEASES=old
 
     def test_disk_gates_check_release_and_backup_filesystems_separately(self):
@@ -170,7 +184,10 @@ class HelperFilesystemTests(unittest.TestCase):
             helper.PRODUCT_DATA,helper.BACKUPS=product,backups
             helper.MUTABLE_FILES=("users.json",); helper.MUTABLE_DIRS=()
             try:
-                with mock.patch.object(helper.pwd,"getpwnam",return_value=mock.Mock(pw_uid=os.getuid())):
+                with mock.patch.object(helper,"validate_existing_snapshot_tree"), \
+                     mock.patch.object(helper,"ensure_root_dir",return_value=partial), \
+                     mock.patch.object(helper.os,"chown"), mock.patch.object(helper.os,"fchown"), \
+                     mock.patch.object(helper.pwd,"getpwnam",return_value=mock.Mock(pw_uid=os.getuid())):
                     result=helper.snapshot_mutable(request_id)
                 self.assertEqual((result/"users.json").read_text(),"fresh")
                 manifest=json.loads((result/"SNAPSHOT.json").read_text())

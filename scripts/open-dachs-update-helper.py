@@ -497,20 +497,24 @@ def sqlite_backup(request_id):
     return target
 
 
+def validate_existing_snapshot_tree(root):
+    ensure_root_dir(root)
+    for current, dirs, files in os.walk(root, followlinks=False):
+        for name in dirs + files:
+            info = os.lstat(Path(current) / name)
+            if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                raise Failure("unsafe-existing-mutable-snapshot")
+            if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                raise Failure("unsafe-existing-mutable-snapshot")
+
+
 def snapshot_mutable(request_id):
     root = BACKUPS / f"{request_id}-files"
     if root.exists():
         # A crash may leave an apparently root-owned but incomplete tree.
         # Never infer completeness from directory existence; validate that no
         # hostile/special entries appeared, then rebuild the snapshot fully.
-        ensure_root_dir(root)
-        for current, dirs, files in os.walk(root, followlinks=False):
-            for name in dirs + files:
-                info = os.lstat(Path(current) / name)
-                if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-                    raise Failure("unsafe-existing-mutable-snapshot")
-                if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
-                    raise Failure("unsafe-existing-mutable-snapshot")
+        validate_existing_snapshot_tree(root)
         shutil.rmtree(root); fsync_dir(root.parent)
     os.mkdir(root, 0o700); os.chown(root, 0, 0); fsync_dir(root.parent)
     service_uid = pwd.getpwnam("open-dachs").pw_uid

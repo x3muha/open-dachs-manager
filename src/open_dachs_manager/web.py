@@ -4443,7 +4443,7 @@ class DachsWebApp:
         # monitor loop performs the same maintenance hourly after the web
         # listener is already responsive.
         self._last_retention_purge = time.monotonic()
-        self._last_notification_retention_purge = 0.0
+        self._last_notification_retention_purge = time.monotonic() - 3600.0
         self.serial_state_path = self.data_dir / "serial_state.json"
         self.dashboard_cleanup_marker = self.data_dir / HISTORY_CLEANUP_MARKER
         self.serial_enabled = self._load_serial_enabled()
