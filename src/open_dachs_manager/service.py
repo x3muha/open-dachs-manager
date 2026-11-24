@@ -32,7 +32,15 @@ from .network_protection import (
     network_protection_payload_length,
 )
 from .serial_worker import SerialWorkerSession
-from .transport import BlockResult, SerialSession, validate_block
+from .sc123_limit import (
+    SC123_LIMIT_CAPABILITY_BLOCK,
+    SC123_LIMIT_HEARTBEAT_OFFSET,
+    SC123_LIMIT_PAYLOAD_LENGTH,
+    SC123_LIMIT_RECORD_LENGTH,
+    SC123_LIMIT_RECORD_OFFSET,
+    SC123_LIMIT_STORAGE_BLOCK,
+)
+from .transport import BlockResult, SerialSession, TransportError, validate_block
 
 
 BACKUP_SCHEMA = "dachs-msr2-backup/v3"
@@ -42,8 +50,127 @@ BACKUP_PACK_NAME = "MSR2 Dachs Runtime Pack"
 MAX_RESTORE_PAYLOAD_LENGTH = 4094
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _PREWRITE_VOLATILE_FIELDS = {
-    (0, 50): (70, (("Hka_Ew.ulSystemTime", 36, 4),)),
+    # Reserve_2 is the dynamic +1 capability heartbeat of the optional
+    # adjustable-SC123 firmware. It is unused by stock R 000.004.043.
+    (0, 50): (
+        70,
+        (
+            ("Hka_Ew.Reserve_2", 31, 1),
+            ("Hka_Ew.ulSystemTime", 36, 4),
+        ),
+    ),
 }
+_BLOCK60_SC123_RECORD_OFFSETS = frozenset(
+    range(SC123_LIMIT_RECORD_OFFSET, SC123_LIMIT_RECORD_OFFSET + SC123_LIMIT_RECORD_LENGTH)
+)
+
+
+def _sc123_firmware_owned_offsets(
+    cpu: int, block: int, payload_length: int
+) -> frozenset[int]:
+    if int(cpu) != 0 or int(payload_length) != SC123_LIMIT_PAYLOAD_LENGTH:
+        return frozenset()
+    if int(block) == SC123_LIMIT_CAPABILITY_BLOCK:
+        return frozenset({SC123_LIMIT_HEARTBEAT_OFFSET})
+    if int(block) == SC123_LIMIT_STORAGE_BLOCK:
+        return _BLOCK60_SC123_RECORD_OFFSETS
+    return frozenset()
+
+
+def sc123_firmware_owned_offsets(
+    cpu: int, block: int, payload_length: int = SC123_LIMIT_PAYLOAD_LENGTH
+) -> tuple[int, ...]:
+    """Expose the exact protected byte offsets for UI/schema defenses."""
+    return tuple(sorted(_sc123_firmware_owned_offsets(cpu, block, payload_length)))
+
+
+def protected_sc123_write_offsets(
+    cpu: int, block: int, before: bytes, after: bytes
+) -> tuple[int, ...]:
+    """Return firmware-owned SC123 offsets changed by a generic payload."""
+    if len(before) != len(after):
+        return ()
+    owned = sc123_firmware_owned_offsets(cpu, block, len(before))
+    return tuple(sorted(offset for offset in owned if before[offset] != after[offset]))
+
+
+def validate_generic_write_payload(
+    cpu: int, block: int, before: bytes, after: bytes
+) -> None:
+    """Keep firmware-owned SC123 bytes exclusive to the dedicated flow."""
+    offsets = protected_sc123_write_offsets(cpu, block, before, after)
+    if not offsets:
+        return
+    rendered = ", ".join(str(offset) for offset in offsets)
+    raise PermissionError(
+        "Firmware-eigene SC123-Bytes dürfen nur über den dedizierten "
+        f"SC123-Pfad geschrieben werden (CPU {int(cpu)}, Block {int(block)}, "
+        f"Offset(s) {rendered})"
+    )
+
+
+def _restore_payload_equal(cpu: int, block: int, left: bytes, right: bytes) -> bool:
+    """Compare a restore image while excluding firmware-owned SC123 bytes."""
+    if len(left) != len(right):
+        return False
+    owned = _sc123_firmware_owned_offsets(cpu, block, len(left))
+    if not owned:
+        return left == right
+    return all(
+        left[index] == right[index]
+        for index in range(len(left))
+        if index not in owned
+    )
+
+
+def restore_target_preserving_firmware_owned(
+    cpu: int, block: int, target: bytes, current: bytes
+) -> bytes:
+    """Rebase firmware-owned SC123 bytes from the current destination."""
+    if len(target) != len(current):
+        return target
+    owned = _sc123_firmware_owned_offsets(cpu, block, len(target))
+    if not owned:
+        return target
+    rebased = bytearray(target)
+    for offset in owned:
+        rebased[offset] = current[offset]
+    return bytes(rebased)
+
+
+def _restore_readback_scope(cpu: int, block: int) -> str:
+    if int(cpu) == 0 and int(block) == SC123_LIMIT_CAPABILITY_BLOCK:
+        return "stable-block-excluding-sc123-heartbeat"
+    if int(cpu) == 0 and int(block) == SC123_LIMIT_STORAGE_BLOCK:
+        return "stable-block-excluding-sc123-record"
+    return "block"
+
+
+def _restore_postwrite_equal(
+    cpu: int, block: int, actual: bytes, expected: bytes
+) -> bool:
+    """Verify a restore write; only the dynamic B50 heartbeat may move."""
+    if len(actual) != len(expected):
+        return False
+    if (
+        int(cpu) == 0
+        and int(block) == SC123_LIMIT_CAPABILITY_BLOCK
+        and len(actual) == SC123_LIMIT_PAYLOAD_LENGTH
+    ):
+        return all(
+            actual[index] == expected[index]
+            for index in range(len(actual))
+            if index != SC123_LIMIT_HEARTBEAT_OFFSET
+        )
+    return actual == expected
+
+
+def _restore_postwrite_scope(cpu: int, block: int) -> str:
+    if int(cpu) == 0 and int(block) == SC123_LIMIT_CAPABILITY_BLOCK:
+        return "stable-block-excluding-sc123-heartbeat"
+    if int(cpu) == 0 and int(block) == SC123_LIMIT_STORAGE_BLOCK:
+        return "full-block-including-preserved-sc123-record"
+    return "block"
 
 # One reviewed capture scope for browser backups and maintenance archives.
 # Network blocks 16/20/21 are preserved and verified, but remain outside the
@@ -295,6 +422,31 @@ class DachsService:
     def authenticate(self, session: SerialSession, level: int, pass4: str | None = None) -> AuthResult:
         return authenticate(session, self.pack, level, pass4, self.timeout)
 
+    def deauthenticate(self, session: SerialSession, pass4: str) -> None:
+        """Drop a previously granted MSR2 privilege level back to zero."""
+        password = str(pass4 or "").strip()
+        if len(password) != 4 or not password.isdigit():
+            raise ValueError("PW4 must contain exactly four digits")
+        response = session.request(
+            bytes([0x7E]) + password.encode("ascii") + bytes([0]),
+            packet=session.next_packet(),
+            timeout=self.timeout,
+        )
+        if response.ack is None or response.ack.positive is not True:
+            raise TransportError("MSR2 deauthentication did not receive a positive ACK")
+        payload = bytes(response.data.payload) if response.data is not None else b""
+        # Controller variants answer either with the granted level only or
+        # with the exact four password bytes echoed after it.  Accept only
+        # those two byte-exact forms; never include a possible credential echo
+        # in an exception or audit message.
+        expected_short = bytes([0xFE, 0x00])
+        expected_echo = expected_short + password.encode("ascii")
+        if payload not in (expected_short, expected_echo):
+            raise TransportError(
+                "MSR2 deauthentication returned an unexpected redacted response "
+                f"(length={len(payload)}, prefix={payload[:2].hex() or 'empty'})"
+            )
+
     def authentication_inputs(self, session: SerialSession) -> AuthInputs:
         return read_auth_inputs(session, self.pack, self.timeout)
 
@@ -423,7 +575,10 @@ class DachsService:
                 return None
         changed_key_set = set(changed_keys)
         volatile_keys = tuple(
-            key for key, _offset, _size in field_specs if key not in changed_key_set
+            key
+            for key, offset, size in field_specs
+            if key not in changed_key_set
+            and before[offset:offset + size] != current[offset:offset + size]
         )
         volatile_masks = self._field_masks(block, volatile_keys, len(before))
         changed_masks = self._field_masks(block, changed_keys, len(before))
@@ -477,6 +632,22 @@ class DachsService:
                 None,
                 now,
                 "payload length changed",
+                tuple(changed_keys),
+                cpu=cpu,
+            )
+        try:
+            validate_generic_write_payload(cpu, block, before, after)
+        except PermissionError as exc:
+            return WriteAudit(
+                changed_keys[0] if changed_keys else "",
+                block,
+                before.hex(" ").upper(),
+                after.hex(" ").upper(),
+                dry_run,
+                False,
+                None,
+                now,
+                str(exc),
                 tuple(changed_keys),
                 cpu=cpu,
             )
@@ -1362,8 +1533,11 @@ class DachsService:
                 decode_network_protection(cpu_id, target)
             except ValueError as exc:
                 return audit(error=f"invalid network-protection payload: {exc}")
-        if before == target:
-            return audit(readback_ok=True, readback_scope="block")
+        if _restore_payload_equal(cpu_id, writable_block, before, target):
+            return audit(
+                readback_ok=True,
+                readback_scope=_restore_readback_scope(cpu_id, writable_block),
+            )
         if dry_run:
             return audit()
 
@@ -1372,10 +1546,17 @@ class DachsService:
         readback_attempts = 0
         try:
             current = self.read_block(session, writable_block, cpu=cpu_id)
-            if not current.ok or current.payload != before:
+            current_payload = bytes(current.payload) if current.ok else b""
+            if not current.ok or not _restore_payload_equal(
+                cpu_id, writable_block, current_payload, before
+            ):
                 raise RuntimeError(
                     "block changed since it was loaded; reload before restoring"
                 )
+            before = current_payload
+            target = restore_target_preserving_firmware_owned(
+                cpu_id, writable_block, target, current_payload
+            )
             write_attempted = True
             if cpu_id:
                 response = session.write_block(
@@ -1398,12 +1579,16 @@ class DachsService:
             for attempt in range(1, self.readback_attempts + 1):
                 readback_attempts = attempt
                 readback = self.read_block(session, writable_block, cpu=cpu_id)
-                if readback.ok and readback.payload == target:
+                if readback.ok and _restore_postwrite_equal(
+                    cpu_id, writable_block, bytes(readback.payload), target
+                ):
                     return audit(
                         written=True,
                         readback_ok=True,
                         ack_positive=True,
-                        readback_scope="block",
+                        readback_scope=_restore_postwrite_scope(
+                            cpu_id, writable_block
+                        ),
                         readback_attempts=readback_attempts,
                         write_attempted=True,
                     )

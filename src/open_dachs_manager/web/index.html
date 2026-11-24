@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="open-dachs-base-path" content="__OPEN_DACHS_BASE_PATH__">
   <title>Open Dachs Manager</title>
-  <link rel="stylesheet" href="static/style.css?v=37">
+  <link rel="stylesheet" href="static/style.css?v=50">
 </head>
 <body>
   <div id="loginView" class="login-shell">
@@ -26,7 +26,7 @@
     <header class="topbar">
       <div class="topbar-inner">
         <div class="brand">
-          <p class="eyebrow">MSR2 · SERIAL · <button class="version-changelog-button" type="button" data-open-changelog aria-haspopup="dialog">V3 __OPEN_DACHS_VERSION__</button></p>
+          <p class="eyebrow">MSR2 · SERIAL · <button class="version-changelog-button" type="button" data-open-changelog aria-haspopup="dialog">V3 __OPEN_DACHS_VERSION__</button> <span id="updateHeaderBadge" class="diagnosis-tab-badge" hidden>Update verfügbar</span></p>
           <h1>Open Dachs Manager</h1>
         </div>
         <nav class="main-tabs" aria-label="Bereiche">
@@ -80,7 +80,7 @@
         </section>
         <section class="dashboard-section">
           <div class="section-head dashboard-head">
-            <div><p class="eyebrow">LIVEWERTE</p><h3>Meine Kacheln</h3><p class="muted">Die Auswahl wird lokal auf dem Pi gespeichert. Zusätzliche Blöcke werden im langsamen Zyklus gelesen.</p></div>
+            <div><p class="eyebrow">LIVEWERTE</p><h3>Meine Kacheln</h3></div>
             <button id="dashboardEdit" class="dashboard-admin" type="button">Bearbeiten</button>
           </div>
           <div id="overviewCards" class="metric-grid"></div>
@@ -88,14 +88,19 @@
         <div id="overviewPlantMount"></div>
         <section id="plantBoardPanel" class="panel plant-board-panel">
           <div class="section-head hmi-section-head">
-            <div><p class="eyebrow">ANLAGENÜBERSICHT</p><h3>Dachs-Prozessbild</h3><p class="muted">Ruhige HMI-Darstellung · deutliche Medienwege · Farbe warnt nur bei Abweichungen</p></div>
+            <div><p class="eyebrow">ANLAGENÜBERSICHT</p><h3>Dachs-Prozessbild</h3></div>
             <div class="schematic-toolbar"><span class="status-pill ok">LIVE · SERIELL</span><div class="schematic-switch" role="group" aria-label="Darstellung wählen"><button type="button" class="active" data-schematic-mode="overview">Anlage</button><button type="button" data-schematic-mode="technical">Technisch</button></div></div>
           </div>
           <div class="hmi-message-grid" aria-label="Aktuelle Fehler und Warnungen">
+            <article id="hmiDachsControl" class="hmi-message-card hmi-control-card normal">
+              <span class="hmi-message-symbol neutral" aria-hidden="true">⏻</span>
+              <div><small>BETRIEBSFREIGABE</small><strong id="hmiDachsControlText">Dachs-Zustand wird gelesen</strong><span id="hmiDachsControlDetail">Ein = Automatikfreigabe · Aus = normaler Stopp</span></div>
+              <div class="hmi-message-actions hmi-control-actions"><button id="hmiDachsOn" class="primary" type="button" hidden>Dachs Ein</button><button id="hmiDachsOff" class="danger" type="button" hidden>Dachs Aus</button></div>
+            </article>
             <article id="hmiServiceMessage" class="hmi-message-card normal">
               <span id="hmiServiceSymbol" class="hmi-message-symbol" aria-hidden="true">✓</span>
               <div><small>AKTUELLE STÖRUNG</small><strong id="hmiServiceText">Kein aktiver Servicecode</strong><span id="hmiServiceCode">SC —</span></div>
-              <button id="hmiOpenFaultCatalog" type="button">Fehlerkatalog</button>
+              <div class="hmi-message-actions"><button id="hmiOpenFaultCatalog" type="button">Fehlerkatalog</button><button id="hmiResetServiceCode" class="danger" type="button" hidden>Entstören</button></div>
             </article>
             <article id="hmiWarningMessage" class="hmi-message-card normal">
               <span id="hmiWarningSymbol" class="hmi-message-symbol" aria-hidden="true">✓</span>
@@ -103,7 +108,7 @@
             </article>
             <article class="hmi-message-card hmi-message-counters">
               <span class="hmi-message-symbol neutral" aria-hidden="true">Σ</span>
-              <div><small>MELDUNGSZÄHLER</small><strong><span id="hmiFaultCount">—</span> entstört · <span id="hmiWarningCount">—</span> Warnungen</strong><span>Klartexte aus Open-Dachs-Katalog</span></div>
+              <div><small>MELDUNGSZÄHLER</small><strong><span id="hmiFaultCount">—</span> entstört · <span id="hmiWarningCount">—</span> Warnungen</strong></div>
             </article>
           </div>
           <div id="schematicStage" class="hmi-schematic-stage">
@@ -308,7 +313,6 @@
                 </g>
                 <g class="tech95-legend">
                   <text x="64" y="760">MESSSTELLEN</text><text x="64" y="785">T1 Dachs-Austritt · T2 Dachs-Eintritt · T3 Motorabgas vor Filter · T4 Dachs-Abgas nach Filter · P elektrische Leistung</text>
-                  <text x="1420" y="785" text-anchor="end">Schema nach Funktionsgruppen · nicht maßstäblich</text>
                 </g>
               </svg>
             </div>
@@ -361,7 +365,7 @@
               <dl><div><dt>Vorlauf VF</dt><dd id="board-value-vorlauf">—</dd></div><div><dt>Rücklauf RF</dt><dd id="board-value-ruecklauf">—</dd></div></dl>
             </article>
             <article class="plant-network-card">
-              <header><div><small>BLOCK 26 · 10 s</small><h4>STEUERUNG / NETZ</h4></div></header>
+              <header><div><small>BLOCK 26 · 0,75 s</small><h4>STEUERUNG / NETZ</h4></div></header>
               <table class="plant-data-table">
                 <tbody>
                   <tr><th>Spannung L1 / L2 / L3</th><td id="board-value-voltage">—</td></tr>
@@ -433,7 +437,7 @@
               <rect class="compact-control-body" x="835" y="275" width="300" height="205"></rect>
               <rect class="compact-control-head" x="835" y="275" width="300" height="44"></rect>
               <text class="compact-control-title" x="855" y="303">STEUERUNG / NETZ</text>
-              <text class="compact-control-subtitle" x="1115" y="303" text-anchor="end">BLOCK 26 · 10 s</text>
+              <text class="compact-control-subtitle" x="1115" y="303" text-anchor="end">BLOCK 26 · 0,75 s</text>
               <text class="compact-control-label" x="855" y="350">Spannung</text><text id="compact-value-voltage" class="compact-control-value" x="1115" y="350" text-anchor="end">—</text>
               <text class="compact-control-label" x="855" y="382">Strom</text><text id="compact-value-current" class="compact-control-value" x="1115" y="382" text-anchor="end">—</text>
               <text class="compact-control-label" x="855" y="414">Impedanz</text><text id="compact-value-impedance" class="compact-control-value" x="1115" y="414" text-anchor="end">—</text>
@@ -560,7 +564,7 @@
               <line class="legend-cool" x1="400" y1="587" x2="436" y2="587"></line><text x="444" y="591">Kühlwasser</text>
               <line class="legend-gas" x1="560" y1="587" x2="596" y2="587"></line><text x="604" y="591">Abgas</text>
               <rect class="legend-sensor" x="700" y="577" width="20" height="20"></rect><text x="728" y="591">Messstelle / Sensor</text>
-              <text class="diagram-note" x="1320" y="591" text-anchor="end">Schema · nicht maßstäblich</text>
+
             </g>
             <g class="technical-simple-edges" aria-hidden="true">
               <path class="technical-pipe pipe-hot" d="M70 312 H48"></path>
@@ -584,7 +588,7 @@
               <rect x="540" y="105" width="420" height="390" rx="5"></rect>
               <rect class="technical-control-head" x="540" y="105" width="420" height="46" rx="5"></rect>
               <text class="technical-control-title" x="565" y="134">STEUERUNG / NETZ</text>
-              <text class="technical-control-subtitle" x="935" y="134" text-anchor="end">BLOCK 26 · 10 s</text>
+              <text class="technical-control-subtitle" x="935" y="134" text-anchor="end">BLOCK 26 · 0,75 s</text>
               <text class="technical-control-label" x="565" y="190">Spannung L1 / L2 / L3</text><text id="tech-value-voltage" class="technical-control-value" x="935" y="190" text-anchor="end">—</text>
               <text class="technical-control-label" x="565" y="226">Strom L1 / L2 / L3</text><text id="tech-value-current" class="technical-control-value" x="935" y="226" text-anchor="end">—</text>
               <text class="technical-control-label" x="565" y="262">Impedanz L1 / L2 / L3</text><text id="tech-value-impedance" class="technical-control-value" x="935" y="262" text-anchor="end">—</text>
@@ -593,14 +597,18 @@
               <text class="technical-control-label" x="565" y="362">Betriebsstunden gesamt</text><text id="tech-value-betriebsstunden-gesamt" class="technical-control-value" x="935" y="362" text-anchor="end">—</text>
               <text class="technical-control-label" x="565" y="398">Anzahl Starts</text><text id="tech-value-starts" class="technical-control-value" x="935" y="398" text-anchor="end">—</text>
               <text class="technical-control-label" x="565" y="434">Aktueller Fehlercode</text><text id="tech-value-servicecode" class="technical-control-value" x="935" y="434" text-anchor="end">—</text>
-              <text class="technical-control-note" x="565" y="472">L1 / L2 / L3 · Werte werden langsam nachgeladen</text>
+
             </g>
           </svg>
           </div>
         </section>
         <div class="two-column">
           <section class="panel"><div class="section-head"><div><p class="eyebrow">MOTOR</p><h3>Leistungszustand</h3></div></div><div id="motorStateCards" class="detail-grid"></div></section>
-          <section class="panel"><div class="section-head"><div><p class="eyebrow">SYSTEM</p><h3>Status und Meldungen</h3></div></div><div id="systemStateCards" class="detail-grid"></div></section>
+          <section class="panel"><div class="section-head"><div><p class="eyebrow">SYSTEM</p><h3>Status und Meldungen</h3></div></div><div id="systemStateCards" class="detail-grid"></div>
+            <div id="displayStatusHistory" class="table-wrap display-status-history" hidden></div>
+            <div class="system-subsection soot-regeneration"><h4 class="system-subheading">Rußfilterregeneration</h4><div id="sootRegenerationCards" class="detail-grid"></div></div>
+            <div class="system-subsection ram-telemetry"><h4 class="system-subheading">Interne Reglerwerte</h4><div id="ramTelemetryCards" class="detail-grid"></div></div>
+          </section>
         </div>
       </section>
 
@@ -621,10 +629,10 @@
       </section>
 
       <section id="monitorView" class="app-view" hidden>
-        <header class="page-head"><div><p class="eyebrow">ZEITREIHEN</p><h2>Schnellüberwachung</h2><p class="muted">Lesender Poller über den gemeinsamen Serialworker, Speicherung in SQLite.</p></div><div class="page-head-actions"><span id="monitorStatus" class="status-pill neutral">—</span><button id="monitorToggle" data-action="toggle-monitor">Überwachung stoppen</button><button id="serialToggle" class="danger" data-action="toggle-serial">Web-Serialzugriff pausieren</button></div></header>
+        <header class="page-head"><div><p class="eyebrow">ZEITREIHEN</p><h2>Schnellüberwachung</h2></div><div class="page-head-actions"><span id="monitorStatus" class="status-pill neutral">—</span><button id="monitorToggle" data-action="toggle-monitor">Überwachung stoppen</button><button id="serialToggle" class="danger" data-action="toggle-serial">Web-Serialzugriff pausieren</button></div></header>
         <div id="monitorStats" class="metric-grid compact"></div>
         <section class="panel history-controls">
-          <div><p class="eyebrow">ZEITRAUM</p><h3>Historischen Zeitraum anzeigen</h3><p class="muted">Schnellbereich direkt wählen, freie Stunden mit Button oder Enter bestätigen oder Start und Ende als Datum mit Uhrzeit festlegen.</p></div>
+          <div><p class="eyebrow">ZEITRAUM</p><h3>Historischen Zeitraum anzeigen</h3></div>
           <div class="history-control-grid">
             <label>Schnellbereich<select id="temperatureRange"><option value="1">1 Stunde</option><option value="2">2 Stunden</option><option value="3">3 Stunden</option><option value="4">4 Stunden</option><option value="5">5 Stunden</option><option value="6">6 Stunden</option><option value="8">8 Stunden</option><option value="10">10 Stunden</option><option value="12">12 Stunden</option><option value="16">16 Stunden</option><option value="24" selected>24 Stunden</option><option value="48">48 Stunden</option></select></label>
             <form id="historyHoursForm" class="history-hours-form"><label>Freie Stunden<input id="historyHours" type="number" min="1" max="720" step="1" inputmode="numeric" placeholder="1–720"></label><button type="submit">Stunden übernehmen</button></form>
@@ -634,24 +642,25 @@
           <div class="history-state-key" aria-label="Laufzustand in den Diagrammen"><span class="running">Dachs läuft</span><span class="stopped">Dachs steht</span><span class="unknown">Keine Messdaten</span></div>
           <div id="historyRangeStatus" class="history-range-status muted">Aktiv: letzte 24 Stunden</div>
         </section>
-        <section class="panel"><div class="section-head"><div><p class="eyebrow">TEMPERATUREN</p><h3>Dachs-Vorlauf, Dachs-Rücklauf, Kapsel und Regler</h3><p class="chart-help muted">Vorlauf = Kühlwasser Motor · Rücklauf = Dachs-Eintritt · Maus zeigt Werte und Messpunkte · Bereich ziehen · Doppelklick setzt Zoom zurück · Farbe anklicken blendet Kurve aus</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="temperature" hidden>Zoom zurücksetzen</button></div></div><canvas id="temperatureChart" class="chart" height="320"></canvas><div id="temperatureLegend" class="chart-legend"></div></section>
-        <section class="panel"><div class="section-head"><div><p class="eyebrow">MOTOR / GENERATOR</p><h3>Wirkleistung und Umdrehungen</h3><p class="chart-help muted">Drehzahl links bis 3000 1/min · Leistung rechts bis 6 kW · Farbe anklicken blendet Kurve aus</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="motor" hidden>Zoom zurücksetzen</button></div></div><canvas id="motorChart" class="chart" height="280"></canvas><div id="motorLegend" class="chart-legend"></div></section>
-        <section class="panel motor-status-history"><div class="section-head"><div><p class="eyebrow">MOTORSTATUS · BLOCK 24</p><h3>Start-, Lauf- und Abschaltphasen</h3><p class="chart-help muted">Jeder Statuswechsel bleibt erhalten · Maus zeigt Nummer und Bedeutung · Bereich ziehen zoomt alle vier Diagramme gemeinsam · Datenlücken sind schraffiert</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="motorStatus" hidden>Zoom zurücksetzen</button></div></div><canvas id="motorStatusChart" class="chart motor-status-chart" height="112" tabindex="0" aria-label="Motorstatus aus Block 24 als Zeitband; Pfeiltasten wechseln zwischen Statusereignissen" aria-describedby="motorStatusHoverText"></canvas><div id="motorStatusLegend" class="motor-status-legend" aria-label="Farben der Motorzustände"><span class="off">Aus · 15/16</span><span class="preparation">Startvorbereitung · 20</span><span class="start">Start/Anlasser · 21–24</span><span class="running">Läuft/Regelung · 30–35</span><span class="shutdown">Abschaltroutine · 11–13</span><span class="fault">Störabschaltung · 10/14</span><span class="ok">OK · 0</span><span class="unknown">Unbekannt</span><span class="gap">Keine Messdaten</span></div><output id="motorStatusHoverText" class="sr-only" aria-live="polite"></output></section>
-        <section class="panel"><div class="section-head"><div><p class="eyebrow">ABGAS</p><h3>Motorabgas und Dachsabgas</h3><p class="chart-help muted">Motorabgas links bis 600 °C · Dachsabgas rechts bis 200 °C · Farbe anklicken blendet Kurve aus</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="exhaust" hidden>Zoom zurücksetzen</button></div></div><canvas id="exhaustChart" class="chart" height="280"></canvas><div id="exhaustLegend" class="chart-legend"></div></section>
+        <section class="panel"><div class="section-head"><div><p class="eyebrow">TEMPERATUREN</p><h3>Dachs-Vorlauf, Dachs-Rücklauf, Kapsel und Regler</h3><p class="chart-help muted">Vorlauf = Kühlwasser Motor · Rücklauf = Dachs-Eintritt</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="temperature" hidden>Zoom zurücksetzen</button></div></div><canvas id="temperatureChart" class="chart" height="320"></canvas><div id="temperatureLegend" class="chart-legend"></div></section>
+        <section class="panel"><div class="section-head"><div><p class="eyebrow">MOTOR / GENERATOR</p><h3>Wirkleistung und Umdrehungen</h3><p class="chart-help muted">Drehzahl links · Leistung rechts</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="motor" hidden>Zoom zurücksetzen</button></div></div><canvas id="motorChart" class="chart" height="280"></canvas><div id="motorLegend" class="chart-legend"></div></section>
+        <section class="panel motor-status-history"><div class="section-head"><div><p class="eyebrow">MOTORSTATUS · BLOCK 24</p><h3>Start-, Lauf- und Abschaltphasen</h3></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="motorStatus" hidden>Zoom zurücksetzen</button></div></div><canvas id="motorStatusChart" class="chart motor-status-chart" height="112" tabindex="0" aria-label="Motorstatus aus Block 24 als Zeitband; Pfeiltasten wechseln zwischen Statusereignissen" aria-describedby="motorStatusHoverText"></canvas><div id="motorStatusLegend" class="motor-status-legend" aria-label="Farben der Motorzustände"><span class="off">Aus · 15/16</span><span class="preparation">Startvorbereitung · 20</span><span class="start">Start/Anlasser · 21–24</span><span class="running">Läuft/Regelung · 30–35</span><span class="shutdown">Abschaltroutine · 11–13</span><span class="fault">Störabschaltung · 10/14</span><span class="ok">OK · 0</span><span class="unknown">Unbekannt</span><span class="gap">Keine Messdaten</span></div><output id="motorStatusHoverText" class="sr-only" aria-live="polite"></output></section>
+        <section class="panel"><div class="section-head"><div><p class="eyebrow">ABGAS</p><h3>Motorabgas und Dachsabgas</h3><p class="chart-help muted">Motorabgas links · Dachsabgas rechts</p></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="exhaust" hidden>Zoom zurücksetzen</button></div></div><canvas id="exhaustChart" class="chart" height="280"></canvas><div id="exhaustLegend" class="chart-legend"></div></section>
+        <section class="panel"><div class="section-head"><div><p class="eyebrow">NETZ · BLOCK 26</p><h3>Netzfrequenz</h3></div><div class="chart-tools"><button type="button" data-action="reset-chart-zoom" data-chart-group="frequency" hidden>Zoom zurücksetzen</button></div></div><canvas id="frequencyChart" class="chart" height="230" aria-label="Historische Netzfrequenz aus Block 26 in Hertz"></canvas><div id="frequencyLegend" class="chart-legend"></div></section>
       </section>
 
       <section id="diagnosis250View" class="app-view diagnosis-250-view" hidden>
         <header class="page-head">
-          <div><p class="eyebrow">LOKALE SQLITE-HISTORIE · 250 BETRIEBSSTUNDEN</p><h2>250-h-Diagnose</h2><p class="muted">Aus bereits gespeicherten ODM-Snapshots rekonstruiert. Keine MSR2-Diagnoseblöcke, keine zusätzlichen Blockreads und kein Schreibzugriff.</p></div>
+          <div><p class="eyebrow">LOKALE SQLITE-HISTORIE · 250 BETRIEBSSTUNDEN</p><h2>250-h-Diagnose</h2></div>
           <div class="page-head-actions"><span id="diagnosis250Status" class="status-pill neutral">Noch nicht geladen</span><button id="diagnosis250Refresh" type="button">Neu berechnen</button></div>
         </header>
         <section id="diagnosis250Quality" class="panel diagnosis-quality-panel"><p class="muted">Historienabdeckung wird geprüft …</p></section>
         <section class="panel diagnosis-notice-panel">
-          <div class="section-head"><div><p class="eyebrow">AKTUELLER KONTEXT</p><h3>Hinweise, Warnungen und Schutzereignisse</h3><p class="muted">Herstellerhinweise sind Entscheidungshilfen, keine automatische Defektdiagnose. Datenmängel und echte Meldungs-/Schutzkontexte bleiben getrennt.</p></div></div>
+          <div class="section-head"><div><p class="eyebrow">AKTUELLER KONTEXT</p><h3>Hinweise, Warnungen und Schutzereignisse</h3></div></div>
           <div id="diagnosis250Notices" class="diagnosis-notice-groups"><p class="muted">Noch keine Auswertung geladen.</p></div>
         </section>
         <section class="panel">
-          <div class="section-head"><div><p class="eyebrow">250-BH-MITTELWERTE</p><h3>Verläufe aus interner Historie</h3><p class="muted">Abgeschlossene Intervalle und der laufende Teilbereich werden getrennt. Trendgrenzen beziehen sich auf 1000 Betriebsstunden.</p></div></div>
+          <div class="section-head"><div><p class="eyebrow">250-BH-MITTELWERTE</p><h3>Verläufe aus interner Historie</h3><p class="muted">Trendgrenzen beziehen sich auf 1000 Betriebsstunden.</p></div></div>
           <div id="diagnosis250Metrics" class="diagnosis-metric-grid"></div>
         </section>
         <section class="panel">
@@ -659,15 +668,14 @@
           <div class="table-wrap"><table class="data-table diagnosis-interval-table"><thead><tr><th>Bereich</th><th>Daten</th><th>Bh/Start</th><th>Fehlstarts</th><th>Leistung im Band</th><th>Sollwertsegmente</th></tr></thead><tbody id="diagnosis250Rows"><tr><td colspan="6" class="muted">Noch keine Intervalle geladen.</td></tr></tbody></table></div>
         </section>
         <section class="panel diagnosis-reference-panel">
-          <div><p class="eyebrow">HERSTELLERHINWEISE · NICHT SCHUTZGRENZEN</p><h3>Dokumentierte Orientierungswerte</h3></div>
-          <dl><div><dt>Bh/Start</dt><dd>&gt;1; höher ist günstiger</dd></div><div><dt>Fehlstarts</dt><dd>&lt;4 %</dd></div><div><dt>Motorabgas HR</dt><dd>420–490 °C; Trend +20 K/1000 Bh</dd></div><div><dt>Dachs-Abgas</dt><dd>&lt;170 °C; Trend +15 K/1000 Bh</dd></div><div><dt>Kühlwasser</dt><dd>72–85 °C; Trend +10 K/1000 Bh</dd></div><div><dt>Dachs-Eintritt</dt><dd>60–65 °C dokumentierte Grauzone</dd></div><div><dt>Regler</dt><dd>&lt;40 °C</dd></div><div><dt>Generator</dt><dd>dynamischer Sollwert ±150 W</dd></div></dl>
-          <p class="source-note">Die unmittelbaren Schutzschwellen des Reglers sind davon verschieden. Kondenser-Abgas wird nicht angezeigt, weil keine eindeutig reale, separat belegte ODM-Serie vorliegt. Der bestehende Rußfilter-Füllstand bleibt eine unabhängige Anzeige und wird durch diese Diagnose weder berechnet noch verändert.</p>
+          <div><p class="eyebrow">HERSTELLERHINWEISE</p><h3>Dokumentierte Orientierungswerte</h3></div>
+          <dl><div><dt>Bh/Start</dt><dd>&gt;1; höher ist günstiger</dd></div><div><dt>Fehlstarts</dt><dd>&lt;4 %</dd></div><div><dt>Motorabgas HR</dt><dd>420–490 °C; Trend +20 K/1000 Bh</dd></div><div><dt>Dachs-Abgas</dt><dd>&lt;170 °C; Trend +15 K/1000 Bh</dd></div><div><dt>Kühlwasser</dt><dd>72–85 °C; Trend +10 K/1000 Bh</dd></div><div><dt>Dachs-Eintritt</dt><dd>60–65 °C</dd></div><div><dt>Regler</dt><dd>&lt;40 °C</dd></div><div><dt>Generator</dt><dd>dynamischer Sollwert ±150 W</dd></div></dl>
         </section>
       </section>
 
       <section id="maintenanceView" class="app-view" hidden>
         <header class="page-head">
-          <div><p class="eyebrow">WARTUNG &amp; ANLAGENBERICHT</p><h2>Geführte Dachs-Wartung</h2><p class="muted">Beim Wartungsstart speist ein einziger gemeinsamer 42-Ziele-Lesevorgang zugleich das vollständige, geprüfte Backup und den Anlagenstand. 38 Konfigurationsziele bleiben wiederherstellbar; die neuen Netzblöcke 20/21 werden zusätzlich schreibfrei gesichert.</p></div>
+          <div><p class="eyebrow">WARTUNG &amp; ANLAGENBERICHT</p><h2>Geführte Dachs-Wartung</h2></div>
           <div class="page-head-actions"><button id="maintenanceRefresh" type="button">Aktualisieren</button><button id="maintenanceCreate" class="primary maintenance-admin" type="button">Wartung starten &amp; Pflichtbackup erstellen</button></div>
         </header>
         <section id="maintenanceStatusPanel" class="panel maintenance-status-panel maintenance-unknown">
@@ -675,7 +683,7 @@
           <div><p class="eyebrow">LIVE · BLOCK 104</p><h3 id="maintenanceStatusTitle">Wartungsstatus noch nicht gelesen</h3><div id="maintenanceStatusMetrics" class="maintenance-status-metrics"></div></div>
         </section>
         <section class="panel">
-          <div class="section-head"><div><p class="eyebrow">LOKALES ARCHIV AUF DEM PI</p><h3>Anlagen-Snapshots und Online-Wartungsprotokolle</h3><p class="muted">Jeder Wartungsstart erzeugt einen schreibfreien Gesamtzustand und ein unveränderliches 42-Ziele-Sicherungsabbild. Snapshot, Checkliste, Messwerte und Bemerkungen bleiben lokal in SQLite gespeichert; das Backup bleibt auch nach dem Löschen eines Berichts erhalten.</p></div></div>
+          <div class="section-head"><div><p class="eyebrow">LOKALES ARCHIV AUF DEM PI</p><h3>Anlagen-Snapshots und Online-Wartungsprotokolle</h3></div></div>
           <div class="table-wrap"><table class="data-table"><thead><tr><th>Nr.</th><th>Erstellt</th><th>Status</th><th>Monteur</th><th>Betriebsstunden</th><th>Pflichtbackup</th><th>Exporte</th><th>Aktionen</th></tr></thead><tbody id="maintenanceReportRows"><tr><td colspan="8" class="muted">Noch keine Berichte.</td></tr></tbody></table></div>
         </section>
         <section id="maintenanceEditor" class="panel maintenance-editor" hidden>
@@ -683,29 +691,34 @@
           <div id="maintenanceBackupSummary" class="maintenance-backup-summary"></div>
           <div id="maintenanceComparison" class="maintenance-comparison"></div>
           <form id="maintenanceForm">
-            <div class="maintenance-form-head"><label>Kraftstoffart<select id="maintenanceFuelType"><option value="gas">Gas</option><option value="oil">Heizöl</option></select></label><label>Monteur / Firma<input id="maintenanceTechnician" maxlength="19" autocomplete="name"></label><label class="maintenance-notes">Bemerkung<textarea id="maintenanceNotes" rows="3" maxlength="8000"></textarea></label></div>
+            <div class="maintenance-form-head"><label>Kraftstoffart<select id="maintenanceFuelType"><option value="gas">Gas</option><option value="oil">Heizöl</option></select><small id="maintenanceFuelNote" class="maintenance-fuel-note" hidden></small></label><label>Monteur / Firma<input id="maintenanceTechnician" maxlength="19" autocomplete="name"></label><label class="maintenance-notes">Bemerkung<textarea id="maintenanceNotes" rows="3" maxlength="8000"></textarea></label></div>
             <div class="maintenance-columns">
               <section><h4>Regler-Checkliste</h4><div id="maintenanceChecklist" class="maintenance-checklist"></div></section>
               <section><h4>Vorher-/Nachher-Werte</h4><div id="maintenanceMeasurements" class="maintenance-measurements"></div><h4 class="maintenance-subheading">Zusätzliche lokale Arbeitsliste</h4><p class="muted maintenance-local-note">Diese Punkte ergänzen den Bericht, werden aber niemals in den MSR2-Regler geschrieben.</p><div id="maintenanceSupplemental" class="maintenance-checklist maintenance-supplemental"></div></section>
             </div>
-            <div class="maintenance-save-actions"><span id="maintenanceSaveHint" class="muted">Änderungen werden lokal auf dem Pi gespeichert.</span><button id="maintenanceSave" class="primary maintenance-admin" type="submit">Entwurf speichern</button></div>
+            <h4 class="maintenance-subheading">Entwurf speichern</h4><p id="maintenanceSaveHint" class="muted maintenance-local-note">Änderungen werden lokal auf ODM gespeichert.</p>
+            <div class="maintenance-save-actions"><span></span><button id="maintenanceSave" class="primary maintenance-admin" type="submit">Entwurf speichern</button></div>
           </form>
           <section id="maintenanceCompletion" class="maintenance-completion maintenance-admin">
-            <div><p id="maintenanceCompletionEyebrow" class="eyebrow">DEMOMODUS</p><h4 id="maintenanceCompletionTitle">Testlauf lokal abschließen</h4><p id="maintenanceCompletionDescription" class="muted">Validiert und archiviert das Protokoll ausschließlich auf dem Pi. Block 100, Block 104 und das Bestätigungsbit bleiben unverändert.</p></div>
+            <div><p id="maintenanceCompletionEyebrow" class="eyebrow">DEMOMODUS</p><h4 id="maintenanceCompletionTitle">Testlauf lokal abschließen</h4><p id="maintenanceCompletionDescription" class="muted">Validiert und archiviert das Protokoll ausschließlich auf ODM. Block 100, Block 104 und das Bestätigungsbit bleiben unverändert.</p></div>
             <div class="maintenance-completion-fields"><label id="maintenanceAuthLevelField" hidden>Auth-Level<select id="maintenanceAuthLevel"><option value="1">1 · Betreiber erweitert</option><option value="2">2 · Service</option><option value="3">3 · Werksservice</option><option value="4" selected>4 · Administrator</option><option value="5">5 · Legacy/V2</option></select></label><div id="maintenancePass4Field" class="maintenance-pass4-control" hidden><label>PW4 / Passwort<input id="maintenancePass4" type="password" inputmode="numeric" maxlength="4" autocomplete="off"></label><button id="maintenancePw4Read" type="button">PW4 auslesen</button><small id="maintenancePw4Status" class="muted">Noch nicht gelesen</small></div><label>Bestätigung<input id="maintenanceConfirmation" autocomplete="off" placeholder="DEMO ABSCHLIESSEN"></label><button id="maintenanceComplete" class="primary" type="button">Demolauf abschließen</button></div>
+          </section>
+          <section id="maintenanceIntermediateCompletion" class="maintenance-completion maintenance-intermediate maintenance-admin" hidden>
+            <div><p class="eyebrow">LOKALER SONDERABSCHLUSS</p><h4>Zwischenwartung</h4><p class="muted">Schließt diesen Entwurf ausschließlich lokal als eigenen Bericht. Keine Authentifizierung, keine Serialworker-Sitzung und keine Änderungen an Block 100, Block 104 oder am Dachs.</p></div>
+            <div class="maintenance-completion-fields"><label>Grund<textarea id="maintenanceIntermediateReason" rows="3" maxlength="500" required placeholder="Warum wurde diese Zwischenwartung durchgeführt?"></textarea><small>Pflichtfeld · maximal 500 Zeichen</small></label><button id="maintenanceIntermediateComplete" class="primary" type="button">Zwischenwartung speichern</button></div>
           </section>
         </section>
       </section>
 
       <section id="backupView" class="app-view" hidden>
         <header class="page-head">
-          <div><p class="eyebrow">MSR2 SICHERUNGSABBILD</p><h2>Backup &amp; Wiederherstellung</h2><p class="muted">Alle 36 Reglerblöcke auf CPU 0 sowie Block 16, 20 und 21 auf CPU 1 und CPU 2 sichern – insgesamt 42 Ziele. Wiederherstellbar bleiben ausschließlich die 36 Reglerblöcke; alle sechs Netzschutz-Ziele sind read/backup-only.</p></div>
+          <div><p class="eyebrow">MSR2 SICHERUNGSABBILD</p><h2>Backup &amp; Wiederherstellung</h2></div>
           <span class="status-pill neutral">CPU 0 / 1 / 2 · Blockweise</span>
         </header>
 
         <section id="backupArchivePanel" class="panel backup-archive-panel backup-admin" hidden>
           <div class="section-head backup-section-head">
-            <div><p class="eyebrow">WARTUNGSBACKUPS · ADMIN</p><h3>Geschütztes Backup-Archiv</h3><p class="muted">Bei jedem Wartungsstart entsteht automatisch ein vollständiges 42-Ziele-Abbild mit 36 Restore-Zielen. Ältere geprüfte 38er-Abbilder bleiben weiterhin lesbar und nutzbar.</p></div>
+            <div><p class="eyebrow">WARTUNGSBACKUPS · ADMIN</p><h3>Geschütztes Backup-Archiv</h3><p class="muted">Bei jedem Wartungsstart entsteht automatisch ein vollständiges Backup.</p></div>
             <button id="backupArchiveRefresh" type="button">Archiv aktualisieren</button>
           </div>
           <div id="backupArchiveStatus" class="backup-status backup-status-neutral">Archiv wurde noch nicht geladen.</div>
@@ -727,23 +740,22 @@
             <label class="backup-file-picker">JSON-Abbild auswählen<input id="restoreFile" type="file" accept=".json,application/json"></label>
           </div>
           <div id="restoreImageStatus" class="restore-image-status muted">Noch kein Sicherungsabbild eingelesen.</div>
-          <div class="restore-warning"><strong>Rohblock-Wiederherstellung</strong><span>Ein ausgewähltes Ziel wird vollständig aus dem Abbild übernommen. Darin enthaltene Laufzustände, Zähler oder Zeitwerte können älter sein. Netzschutz-Ziele auf CPU 1 und CPU 2 sind besonders sicherheitsrelevant und werden eindeutig mit ihrer CPU angezeigt. Vor dem Live-Schreiben erfolgen erneutes Lesen, Authentifizierung, positive Bestätigung und bytegenaue Rückleseprüfung.</span></div>
+          <div class="restore-warning"><strong>Rohblock-Wiederherstellung</strong><span>Ein ausgewähltes Ziel wird vollständig aus dem Abbild übernommen. Darin enthaltene Laufzustände, Zähler oder Zeitwerte können älter sein.</span></div>
           <div class="backup-selection-actions restore-selection-actions"><button id="restoreSelectAll" type="button" disabled>Alle gültigen Ziele auswählen</button><button id="restoreSelectNone" type="button" disabled>Auswahl aufheben</button></div>
           <div id="restoreBlockList" class="backup-block-list restore-block-list" role="group" aria-label="CPU- und Blockziele für die Wiederherstellung auswählen"><p class="muted">Nach dem Einlesen erscheinen hier die gültigen CPU-/Blockziele.</p></div>
           <div class="restore-guard">
             <label>Auth-Level<select id="restoreAuthLevel"><option value="1">1 · Betreiber erweitert</option><option value="2">2 · Service</option><option value="3">3 · Werksservice</option><option value="4" selected>4 · Administrator</option><option value="5">5 · Legacy/V2</option></select></label>
             <label>PW4 / Passwort-Override<input id="restorePass4" type="password" autocomplete="off" placeholder="leer = berechnete PW4 verwenden"></label>
             <label class="check-label"><input id="restoreWriteEnabled" type="checkbox"> Hardware-Wiederherstellung aktivieren</label>
-            <label>Bestätigung<input id="restoreConfirmation" autocomplete="off" placeholder="SICHERUNG WIEDERHERSTELLEN"></label>
           </div>
-          <div class="backup-action-row"><span id="restoreStatus" class="muted">Dry-Run: Es wird nichts geschrieben.</span><button id="restoreSubmit" class="primary" type="button" disabled>Wiederherstellung prüfen</button></div>
+          <div class="backup-action-row"><span id="restoreStatus" class="muted"></span><button id="restoreSubmit" class="primary" type="button" disabled>Wiederherstellung prüfen</button></div>
           <div id="restoreResults" class="restore-results"></div>
         </section>
       </section>
 
       <section id="faultCatalogView" class="app-view" hidden>
         <header class="page-head">
-          <div><p class="eyebrow">FEHLERKATALOG</p><h2>Servicecodes und Klartexte</h2><p class="muted">Eigener Open-Dachs-Katalog mit deutschen Meldungstiteln. Der lokale Diagnosekatalog auf dem Pi ergänzt bei vorhandenen Daten Ursachen und Maßnahmen.</p></div>
+          <div><p class="eyebrow">FEHLERKATALOG</p><h2>Servicecodes und Klartexte</h2></div>
           <div class="page-head-actions"><span id="serviceCatalogStatus" class="muted">Integrierter Klartextkatalog wird geprüft.</span></div>
         </header>
         <section class="panel service-catalog-panel">
@@ -756,21 +768,21 @@
       </section>
 
       <section id="settingsView" class="app-view" hidden>
-        <header class="page-head"><div><p class="eyebrow">MSR2 REGISTER</p><h2>Einstellungen und Register</h2><p class="muted">Regler-CPU und beide Netzüberwachungs-CPUs besitzen getrennte Blockräume. Block 16, 20 und 21 auf CPU 1 und CPU 2 werden nach den realen Hardwarebefunden ausschließlich gelesen und gesichert; Schreiben und Restore sind serverseitig gesperrt.</p></div><span id="settingsRoleHint" class="status-pill neutral"></span></header>
+        <header class="page-head"><div><p class="eyebrow">MSR2 REGISTER</p><h2>Einstellungen und Register</h2></div><span id="settingsRoleHint" class="status-pill neutral"></span></header>
         <section id="writeControls" class="panel write-controls" hidden>
-          <div class="write-intro"><p class="eyebrow">SCHREIBSCHUTZ</p><h3>Admin-Schreibfreigabe</h3><p class="muted">Ohne Haken bleibt der Vorgang ein Dry-Run. Beim echten Schreiben folgen Lesen, Kodierung, Authentifizierung, bytegenauer Ausgangszustandsvergleich, Schreibdienst, positives ACK und Rückleseprüfung. Für die Netzschutz-CPUs sind B16, B20 und B21 unabhängig von dieser Freigabe strikt nur lesbar.</p></div>
+          <div class="write-intro"><p class="eyebrow">SCHREIBSCHUTZ</p><h3>Admin-Schreibfreigabe</h3></div>
           <label>Auth-Level<select id="authLevel"><option value="1">1 · Betreiber erweitert</option><option value="2">2 · Service</option><option value="3">3 · Werksservice</option><option value="4" selected>4 · Administrator</option><option value="5">5 · Legacy/V2</option></select></label>
           <label>PW4 / Passwort-Override<input id="pass4" type="password" autocomplete="off" placeholder="leer = berechnete PW4 verwenden"></label>
           <label class="check-label"><input id="writeEnabled" type="checkbox"> Hardware-Schreiben aktivieren</label>
           <div id="writeGuardStatus" class="write-guard-status neutral">Dry-Run: Hardware bleibt unverändert.</div>
           <div class="auth-preview">
-            <div class="auth-preview-head"><div><p class="eyebrow">MSR2-AUTHENTIFIZIERUNG</p><h3>PW4 aus der Anlage berechnen</h3><p class="muted">Die Seriennummer und Betriebsstunden werden lesend aus Block 20 und 22 geholt. Es wird dabei kein Register geschrieben.</p></div><button id="authPreviewButton" type="button">PW4 aus Anlage lesen</button></div>
+            <div class="auth-preview-head"><div><p class="eyebrow">MSR2-AUTHENTIFIZIERUNG</p><h3>PW4 aus der Anlage berechnen</h3><p class="muted">Es wird dabei kein Register geschrieben.</p></div><button id="authPreviewButton" type="button">PW4 aus Anlage lesen</button></div>
             <div class="auth-preview-values"><div><span>Seriennummer</span><strong id="authPreviewSerial">—</strong></div><div><span>Betriebsstunden</span><strong id="authPreviewHours">—</strong></div><div><span>Berechnete PW4</span><code id="authPreviewPw4">—</code></div><div><span>Status</span><strong id="authPreviewStatus" class="muted">Noch nicht berechnet</strong></div></div>
-            <div class="auth-preview-actions"><button id="authPreviewApply" type="button" disabled>Berechnete PW4 übernehmen</button><span id="authPreviewFormula" class="muted">Formel: letzte 4 Stellen des MSR2-Tagescodes</span></div>
+            <div class="auth-preview-actions"><button id="authPreviewApply" type="button" disabled>Berechnete PW4 übernehmen</button><span id="authPreviewFormula" class="muted"></span></div>
           </div>
         </section>
         <section id="sootFilterControls" class="panel soot-filter-controls">
-          <div><p class="eyebrow">RUSSFILTER</p><h3>Geschätzter Füllstand</h3><p class="muted">Lineare Schätzung aus der Motorabgastemperatur. Unterhalb der 0-%-Temperatur werden 0 %, oberhalb der 100-%-Temperatur 100 % angezeigt.</p></div>
+          <div><p class="eyebrow">RUSSFILTER</p><h3>Geschätzter Füllstand</h3><p class="muted">Geschätzter Rußfilterfüllstand anhand des Temperaturverlaufs (Alpha-Status).</p></div>
           <form id="sootFilterSettingsForm" class="soot-filter-form">
             <label>0 % bei<input id="sootFilterZeroTemperature" type="number" min="100" max="790" step="1" inputmode="decimal" required><span>°C</span></label>
             <label>100 % bei<input id="sootFilterFullTemperature" type="number" min="110" max="800" step="1" inputmode="decimal" required><span>°C</span></label>
@@ -778,45 +790,129 @@
           </form>
           <div id="sootFilterSettingsStatus" class="soot-filter-settings-status muted">Standard: 420 °C = 0 % · 520 °C = 100 % · Grün &lt; 60 % · Orange 60–89 % · Rot ab 90 %.</div>
         </section>
+        <section id="clockSyncPanel" class="panel clock-sync-panel" hidden>
+          <div><p class="eyebrow">REGLERUHR · NUR ADMIN</p><h3>Täglicher Uhrabgleich mit der ODM-Zeit</h3><p class="muted">Stellt die Regleruhr einmal täglich zur gewählten ODM-Zeit, wenn der Versatz die Schwelle erreicht. Pfad: Block 50 Offset 36 (<code>Hka_Ew.ulSystemTime</code>) mit Kommando-Bit 5, Auth 3, Readback ±3 s, Deauth und Audit. Übersprungen wird, wenn ODM nicht per NTP synchron ist oder das Zielintervall Mitternacht, die Nachtabschalt-Sekunde (03:00 + Starts mod 100 min) oder eine Zeitumstellung ±15 min berührt. Die Firmware schreibt dabei RAM und RTC.</p></div>
+          <div id="clockSyncStatus" class="write-guard-status neutral">Status wird geladen …</div>
+          <form id="clockSyncForm" class="clock-sync-form">
+            <label class="check-label"><input id="clockSyncEnabled" type="checkbox"> Täglichen Abgleich aktivieren</label>
+            <label>Uhrzeit (ODM)<input id="clockSyncTime" type="time" min="06:00" max="22:00" step="60" value="12:00" required></label>
+            <label>Schwelle (s)<input id="clockSyncThreshold" type="number" min="10" max="3600" step="1" value="30" required></label>
+            <label>Max. Versatz (s)<input id="clockSyncMaxOffset" type="number" min="60" max="43200" step="1" value="3600" required></label>
+            <label class="check-label"><input id="clockSyncAcknowledge" type="checkbox"> Ich erlaube, dass ODM die Regleruhr ohne Bediener mit Auth 3 stellt</label>
+            <div class="clock-sync-actions"><button class="primary" type="submit">Einstellung speichern</button><button id="clockSyncNow" type="button">Jetzt synchronisieren</button></div>
+          </form>
+        </section>
         <div id="settingsTabs" class="register-tabs" role="tablist"></div>
         <section class="panel settings-panel"><div class="section-head"><div><p id="selectedBlockEyebrow" class="eyebrow">BLOCK</p><h3 id="selectedBlockTitle">Block auswählen</h3></div><div class="page-head-actions"><label class="check-label reserve-toggle"><input id="showReserved" type="checkbox"> Reservefelder anzeigen</label><span id="blockReadStatus" class="muted"></span><button data-action="reload-block">Block neu lesen</button><button id="saveBlockButton" class="primary" data-action="save-block">Änderungen anwenden</button></div></div><div id="settingsFields" class="register-grid"></div></section>
       </section>
 
       <section id="systemView" class="app-view" hidden>
-        <header class="page-head"><div><p class="eyebrow">OPEN DACHS MANAGER</p><h2>Systemverwaltung</h2><p class="muted">Benutzer, Rollen, Passwörter, API-Zugänge und der Wartungs-Testmodus werden hier verwaltet – vollständig getrennt von den Dachs/MSR2-Einstellungen.</p></div><span class="status-pill ok">Nur Admin</span></header>
+        <header class="page-head"><div><p class="eyebrow">OPEN DACHS MANAGER</p><h2>Systemverwaltung</h2></div><span class="status-pill ok">Nur Admin</span></header>
         <div id="systemTabs" class="register-tabs system-tabs" role="tablist">
           <button type="button" role="tab" class="active" data-system-tab="users">Benutzer &amp; Berechtigungen</button>
           <button type="button" role="tab" data-system-tab="tokens">API &amp; Tokens</button>
           <button type="button" role="tab" data-system-tab="maintenance">Wartungsabschluss</button>
+          <button type="button" role="tab" data-system-tab="notifications">E-Mail</button>
           <button type="button" role="tab" data-system-tab="firmware">Firmware</button>
+          <button type="button" role="tab" data-system-tab="updates">Updates <span id="updateBadge" class="diagnosis-tab-badge" hidden>Neu</span></button>
+        </div>
+
+        <div id="systemUpdatesTab" data-system-panel="updates" hidden>
+          <section class="panel update-panel">
+            <div class="section-head"><div><p class="eyebrow">SIGNIERTES GITHUB-RELEASE</p><h3>Open Dachs Manager aktualisieren</h3><p class="muted">Es werden ausschließlich stabile, Ed25519-signierte Wheels aus <code>x3muha/open-dachs-manager</code> akzeptiert. Kein git pull, kein Regler- oder Serialzugriff.</p></div><button id="updateCheck" type="button">Jetzt prüfen</button></div>
+            <div id="updateStatus" class="write-guard-status neutral" role="status">Release-Status wird geladen …</div>
+            <div id="updateRelease" class="restore-results"></div>
+            <form id="updateSettingsForm" class="system-create-form">
+              <label class="check-label"><input id="updateAutomatic" type="checkbox"> Automatische stabile Updates aktivieren</label>
+              <label class="check-label"><input id="updateAutomaticAck" type="checkbox"> Ich bestätige automatische Installationen im Wartungsfenster</label>
+              <label>Admin-Passwort zur Aktivierung<input id="updateAutomaticPassword" type="password" autocomplete="current-password"></label>
+              <label>Wartungsfenster von<input id="updateWindowStart" type="time" value="02:00" required></label>
+              <label>bis<input id="updateWindowEnd" type="time" value="04:00" required></label>
+              <input id="updateTimezone" type="hidden" value="Europe/Berlin">
+              <button type="submit">Einstellung speichern</button>
+            </form>
+            <form id="updatePreviewForm" class="system-create-form">
+              <label>Admin-Passwort<input id="updatePassword" type="password" autocomplete="current-password" required></label>
+              <button id="updatePreviewButton" class="primary" type="submit">Exakte Vorschau erzeugen</button>
+            </form>
+            <div id="updatePreview" class="service-reset-preview" hidden></div>
+            <label id="updateConfirmRow" hidden>Bestätigung exakt eingeben<input id="updateConfirmation" autocomplete="off"></label>
+            <button id="updateApply" class="danger" type="button" disabled>Signiertes Release installieren</button>
+          </section>
         </div>
 
         <div id="systemFirmwareTab" data-system-panel="firmware" hidden>
+          <section id="sc123LimitPanel" class="panel firmware-panel sc123-limit-panel">
+            <div class="section-head">
+              <div><p class="eyebrow">SC123 · AUTH 3 · PERSISTENT</p><h3>Abgas-Abschaltgrenze 180–240 °C</h3><p class="muted">Nur mit der passenden einstellbaren R 000.004.043-Firmware. ODM beweist sie fail-closed über den dynamischen Block-50-Heartbeat, prüft Block 60 doppelt stabil, schreibt höchstens einmal den versionierten Datensatz, bestätigt RAM und persistentes NVM, meldet Auth 0 ab und auditiert den Vorgang.</p></div>
+              <button id="sc123LimitRefresh" type="button">Firmwarefähigkeit prüfen</button>
+            </div>
+            <div id="sc123LimitStatus" class="write-guard-status neutral" role="status" aria-live="polite">Firmwarefähigkeit wurde noch nicht geprüft.</div>
+            <div class="restore-warning"><strong>Wichtiger Prüfstand</strong><span>Historische Herstellerbelege liegen nur für 180 °C und 200 °C vor. 201–240 °C sind technisch codierbar, aber nicht thermisch oder vom Hersteller freigegeben validiert.</span></div>
+            <form id="sc123LimitForm" class="sc123-limit-form">
+              <label>Neue SC123-Grenze<input id="sc123LimitValue" type="number" min="180" max="240" step="1" inputmode="numeric" value="200" required><span>°C</span></label>
+              <button id="sc123LimitPreviewButton" class="primary" type="submit" disabled>Änderung frisch prüfen</button>
+            </form>
+            <div id="sc123LimitPreview" class="service-reset-preview" hidden></div>
+            <label id="sc123LimitConfirmRow" class="check-label service-reset-confirm" hidden><input id="sc123LimitConfirm" type="checkbox"> Ich bestätige die einmalige persistente Änderung; oberhalb 200 °C fehlt eine belegte Hersteller-/Thermalfreigabe.</label>
+            <div class="service-reset-actions"><button id="sc123LimitApply" class="danger" type="button" disabled>Grenze einmalig schreiben</button></div>
+          </section>
           <section class="panel firmware-panel">
-            <div class="section-head"><div><p class="eyebrow">FIRMWARE-CENTER · OFFLINE-PRÜFUNG</p><h3>Senertec-MUC prüfen</h3><p class="muted">Die Datei wird im Arbeitsspeicher auf Header, Längen, SHA-256 und alle acht Modulabbilder geprüft. Sie wird nicht gespeichert und es wird kein serieller Zugriff ausgeführt.</p></div><label class="backup-file-picker">.muc auswählen<input id="firmwareFile" type="file" accept=".muc,application/octet-stream"></label></div>
+            <div class="section-head"><div><p class="eyebrow">FIRMWARE-CENTER · OFFLINE-PRÜFUNG</p><h3>Senertec-MUC prüfen</h3></div><label class="backup-file-picker">.muc auswählen<input id="firmwareFile" type="file" accept=".muc,application/octet-stream"></label></div>
             <div id="firmwareStatus" class="write-guard-status neutral">Noch keine Firmwaredatei geprüft.</div>
             <div id="firmwareResult" class="restore-results"></div>
-            <div class="restore-warning"><strong>Live-Flash absichtlich gesperrt</strong><span>Der erfolgreiche Windows-Lauf ist vollständig aufgezeichnet und die Nutzdaten sind zugeordnet. Framegrenzen, Loader-Kommandos, Baudwechsel, ACK-Regeln und der sichere Abschluss sind für einen nativen Flasher aber noch nicht vollständig verifiziert. Bis dahin bleibt der Hersteller-Updater über die kontrollierte COM3/RFC2217-Brücke der einzige freigegebene Flashweg.</span></div>
+            <div class="restore-warning"><strong>Live-Flash absichtlich gesperrt</strong></div>
           </section>
         </div>
 
         <div id="systemMaintenanceTab" data-system-panel="maintenance" hidden>
           <section id="maintenanceModeControls" class="panel maintenance-mode-controls" hidden>
-            <div><p class="eyebrow">WARTUNGSABSCHLUSS</p><h3>Testmodus</h3><p class="muted">Das Umschalten selbst schreibt nichts in den Regler. Die Einstellung wird lokal auf dem Pi gespeichert und bleibt nach einem Neustart erhalten.</p></div>
+            <div><p class="eyebrow">WARTUNGSABSCHLUSS</p><h3>Testmodus</h3></div>
             <label class="check-label maintenance-mode-toggle"><input id="maintenanceTestMode" type="checkbox" checked> Testmodus aktivieren (kein Schreiben beim Wartungsabschluss)</label>
             <div id="maintenanceModeStatus" class="write-guard-status ok">Testmodus aktiv: Wartungsberichte werden ausschließlich lokal abgeschlossen. Der Regler bleibt unverändert.</div>
           </section>
         </div>
 
+        <div id="systemNotificationsTab" data-system-panel="notifications" hidden>
+          <section class="panel email-notification-panel">
+            <div class="section-head"><div><p class="eyebrow">SMTP · EDGE-TRIGGER · OUTBOX</p><h3>E-Mail-Benachrichtigungen</h3><p class="muted">Standardmäßig aus. Kategorien und Temperaturgrenzen werden nur lokal ausgewertet; SMTP läuft getrennt vom Serialworker. Texte sind vollständig bearbeitbar.</p></div><button id="emailNotificationsRefresh" type="button">Neu laden</button></div>
+            <div id="emailNotificationStatus" class="write-guard-status neutral" role="status">Einstellungen werden geladen …</div>
+            <form id="emailNotificationForm" class="email-notification-form">
+              <label class="check-label email-master-toggle"><input id="emailNotificationsEnabled" type="checkbox"> E-Mail-Benachrichtigungen aktivieren</label>
+              <fieldset><legend>SMTP und Empfänger</legend><div class="email-settings-grid">
+                <label>SMTP-Server<input id="emailSmtpHost" maxlength="253" autocomplete="off" placeholder="smtp.example.de"></label>
+                <label>Port<input id="emailSmtpPort" type="number" min="1" max="65535" step="1" value="587"></label>
+                <label>Sicherheit<select id="emailSmtpSecurity"><option value="starttls">STARTTLS erforderlich · TLS ≥ 1.2</option><option value="plain-internal">Internes Relay · ohne TLS und ohne Anmeldung</option></select></label>
+                <label>SMTP-Benutzer<input id="emailSmtpUsername" maxlength="256" autocomplete="username"></label>
+                <label>SMTP-Passwort<input id="emailSmtpPassword" type="password" maxlength="1024" autocomplete="new-password" placeholder="unverändert"></label>
+                <label>Absenderadresse<input id="emailFromAddress" type="email" maxlength="254" placeholder="odm@example.test"></label>
+                <label>Absendername<input id="emailFromName" maxlength="128" value="Open Dachs Manager"></label>
+                <label class="email-wide">Empfänger, Komma oder Zeile<textarea id="emailRecipients" rows="2" placeholder="technik@example.test"></textarea><span class="muted">Jeder Empfänger erhält eine eigene Nachricht; Adressen werden nicht untereinander offengelegt.</span></label>
+                <label class="email-wide">Öffentliche ODM-Adresse für den Link<input id="emailPublicBaseUrl" type="url" maxlength="2048" placeholder="https://example.test/dachs"></label>
+              </div><label class="check-label"><input id="emailClearPassword" type="checkbox"> Gespeichertes SMTP-Passwort löschen</label><p class="muted">STARTTLS ist der Standard. Ein unverschlüsseltes Relay ist nur intern, ohne Zugangsdaten und mit einer getrennten rootverwalteten Host:Port-Allowlist erlaubt; die Weboberfläche kann diese Sperre nicht lockern.</p></fieldset>
+              <fieldset><legend>Benachrichtigungen auswählen</legend><div class="email-category-grid">
+                <label class="check-label"><input type="checkbox" data-email-category="maintenance"> Wartung nähert sich / fällig</label>
+                <label class="check-label"><input type="checkbox" data-email-category="fault"> Neuer aktiver Fehler</label>
+                <label class="check-label"><input type="checkbox" data-email-category="fault_cleared"> Fehler verschwindet ohne bestätigte ODM-Entstörung</label>
+                <label class="check-label"><input type="checkbox" data-email-category="temperature"> Konfigurierte Temperaturgrenze erreicht</label>
+              </div></fieldset>
+              <fieldset><legend>Temperaturgrenzen</legend><p class="muted">Keine Grenze wird erfunden oder automatisch freigegeben. Sensor, Richtung, absolute Schwelle und Hysterese müssen bewusst gesetzt werden.</p><div id="emailTemperatureRules" class="email-temperature-rules"></div></fieldset>
+              <fieldset><legend>Automatische Texte · bearbeitbar</legend><p class="muted">Platzhalter: {event}, {details}, {recorded_at}, {url}, {service_code}, {service_text}, {sensor}, {value}, {threshold}.</p><div id="emailTemplateEditors" class="email-template-editors"></div></fieldset>
+              <div class="email-notification-actions"><button id="emailNotificationsSave" class="primary" type="submit">Einstellungen speichern</button><button id="emailNotificationsTest" type="button" disabled>Testmail senden</button></div>
+            </form>
+          </section>
+          <section class="panel"><div class="section-head"><div><p class="eyebrow">PERSISTENTER AUSGANG</p><h3>Letzte E-Mail-Vorgänge</h3></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Zeit</th><th>Kategorie</th><th>Empfänger</th><th>Betreff</th><th>Status</th><th>Versuche</th><th>Fehler</th></tr></thead><tbody id="emailNotificationRows"><tr><td colspan="7" class="muted">Noch keine E-Mail-Vorgänge.</td></tr></tbody></table></div></section>
+        </div>
+
         <div id="systemUsersTab" data-system-panel="users">
-          <section class="panel system-create-panel local-access-panel"><div><p class="eyebrow">LOKALER BENUTZER</p><h3>Bedienplatz ohne Web-Login</h3><p class="muted">Öffnet einen zweiten HTTP-Listener ausschließlich auf <code>127.0.0.1</code>. Der normale Web-Port und der Reverse Proxy bleiben immer loginpflichtig. Dachs-Schreibvorgänge behalten Freigabe, MSR2-Authentifizierung, ACK und Readback.</p></div><form id="localAccessForm" class="system-create-form local-access-form"><label class="check-label"><input id="localAccessEnabled" type="checkbox"> Lokalen Benutzer aktivieren</label><label>Port<input id="localAccessPort" type="number" min="1" max="65535" step="1" value="80" inputmode="numeric" required></label><label>Rechte<select id="localAccessRole"><option value="admin" selected>Admin · lesen und schreiben</option><option value="guest">Gast · nur lesen</option></select></label><button class="primary" type="submit">Speichern</button><div id="localAccessStatus" class="write-guard-status ok">Deaktiviert · normaler Login bleibt aktiv.</div><a id="localAccessUrl" class="local-access-url" target="_blank" rel="noopener noreferrer" hidden></a></form></section>
+          <section class="panel system-create-panel local-access-panel"><div><p class="eyebrow">LOKALER BENUTZER</p><h3>Bedienplatz ohne Web-Login</h3><p class="muted">Öffnet einen zweiten HTTP-Listener ausschließlich auf 127.0.0.1.</p></div><form id="localAccessForm" class="system-create-form local-access-form"><label class="check-label"><input id="localAccessEnabled" type="checkbox"> Lokalen Benutzer aktivieren</label><label>Port<input id="localAccessPort" type="number" min="1" max="65535" step="1" value="80" inputmode="numeric" required></label><label>Rechte<select id="localAccessRole"><option value="admin" selected>Admin · lesen und schreiben</option><option value="guest">Gast · nur lesen</option></select></label><button class="primary" type="submit">Speichern</button><div id="localAccessStatus" class="write-guard-status ok">Deaktiviert · normaler Login bleibt aktiv.</div><a id="localAccessUrl" class="local-access-url" target="_blank" rel="noopener noreferrer" hidden></a></form></section>
           <section id="accountControls" class="panel account-controls"><div><p class="eyebrow">EIGENES KONTO</p><h3>Eigenes Passwort ändern</h3><p class="muted">Mindestens 12 Zeichen. Danach werden deine offenen Sitzungen beendet.</p></div><form id="passwordForm" class="password-form"><label>Bisheriges Passwort<input id="currentWebPassword" type="password" autocomplete="current-password" required></label><label>Neues Passwort<input id="newWebPassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Passwort ändern</button></form></section>
           <section class="panel system-create-panel"><div><p class="eyebrow">NEUER BENUTZER</p><h3>Konto anlegen</h3><p class="muted">Gäste dürfen lesen. Admins dürfen zusätzlich Systemeinstellungen und kontrollierte Dachs-Schreibvorgänge bedienen.</p></div><form id="userCreateForm" class="system-create-form"><label>Benutzername<input id="userCreateName" minlength="3" maxlength="32" pattern="[A-Za-z0-9._-]+" autocomplete="off" required></label><label>Rolle<select id="userCreateRole"><option value="guest">Gast · lesen</option><option value="admin">Admin · lesen und schreiben</option></select></label><label>Startpasswort<input id="userCreatePassword" type="password" minlength="12" autocomplete="new-password" required></label><button class="primary" type="submit">Benutzer anlegen</button></form></section>
           <section class="panel"><div class="section-head"><div><p class="eyebrow">BENUTZERVERWALTUNG</p><h3>Konten und Berechtigungen</h3></div><button id="usersRefresh" type="button">Aktualisieren</button></div><div class="table-wrap"><table class="data-table system-table"><thead><tr><th>Benutzer</th><th>Rolle</th><th>Status</th><th>Neues Passwort</th><th>Aktionen</th></tr></thead><tbody id="userRows"><tr><td colspan="5" class="muted">Benutzer werden geladen …</td></tr></tbody></table></div></section>
         </div>
 
         <div id="systemTokensTab" data-system-panel="tokens" hidden>
-          <section class="panel api-settings-panel"><div><p class="eyebrow">EDOMI-SCHREIBSCHUTZ</p><h3>Serverseitige API-Logik</h3><p class="muted">HTTP bleibt lokal aktiv. HTTPS kann extern durch nginx terminiert werden. EDOMI übergibt nur logische Keys und Werte; PW4, Blockkodierung, ACK und Readback bleiben im Dachs Manager.</p></div><form id="apiSettingsForm" class="api-settings-form"><label class="check-label"><input id="apiWriteEnabled" type="checkbox"> API-Schreibaktionen aktivieren</label><label>MSR2 Auth-Level<select id="apiAuthLevel"><option value="1">1 · Betreiber erweitert</option><option value="2">2 · Service</option><option value="3">3 · Werksservice</option><option value="4" selected>4 · Administrator</option><option value="5">5 · Legacy/V2</option></select></label><button class="primary" type="submit">API-Einstellung speichern</button><div id="apiWriteStatus" class="write-guard-status ok">API-Schreiben ist deaktiviert.</div></form></section>
+          <section class="panel api-settings-panel"><div><p class="eyebrow">EDOMI-SCHREIBSCHUTZ</p><h3>Serverseitige API-Logik</h3></div><form id="apiSettingsForm" class="api-settings-form"><label class="check-label"><input id="apiWriteEnabled" type="checkbox"> API-Schreibaktionen aktivieren</label><label>MSR2 Auth-Level<select id="apiAuthLevel"><option value="1">1 · Betreiber erweitert</option><option value="2">2 · Service</option><option value="3">3 · Werksservice</option><option value="4" selected>4 · Administrator</option><option value="5">5 · Legacy/V2</option></select></label><button class="primary" type="submit">API-Einstellung speichern</button><div id="apiWriteStatus" class="write-guard-status ok">API-Schreiben ist deaktiviert.</div></form></section>
           <section class="panel system-create-panel"><div><p class="eyebrow">NEUER API-TOKEN</p><h3>EDOMI-Zugang erzeugen</h3><p class="muted">Das Token wird nur einmal vollständig angezeigt. Danach speichert das System ausschließlich den Hash.</p></div><form id="tokenCreateForm" class="token-create-form"><label>Name<input id="tokenCreateName" minlength="3" maxlength="64" placeholder="EDOMI Heizung" required></label><fieldset><legend>Rechte</legend><label class="check-label"><input type="checkbox" name="tokenScope" value="read" checked> Lesen</label><label class="check-label"><input type="checkbox" name="tokenScope" value="history" checked> Historie</label><label class="check-label"><input type="checkbox" name="tokenScope" value="write"> Schreiben</label></fieldset><button class="primary" type="submit">Token erzeugen</button></form></section>
           <section id="tokenSecretPanel" class="panel token-secret-panel" hidden><div><p class="eyebrow">NUR EINMAL SICHTBAR</p><h3>Neues API-Token sichern</h3><p class="muted">Jetzt in den EDOMI-Logikbaustein übernehmen. Eine spätere Anzeige ist absichtlich nicht möglich.</p></div><code id="tokenSecret"></code><button id="tokenSecretCopy" type="button">Token kopieren</button></section>
           <section class="panel"><div class="section-head"><div><p class="eyebrow">TOKEN-MANAGER</p><h3>API-Zugänge</h3></div><button id="tokensRefresh" type="button">Aktualisieren</button></div><div class="table-wrap"><table class="data-table system-table"><thead><tr><th>Name</th><th>Token</th><th>Rechte</th><th>Status</th><th>Zuletzt benutzt</th><th>Aktionen</th></tr></thead><tbody id="tokenRows"><tr><td colspan="6" class="muted">Tokens werden geladen …</td></tr></tbody></table></div></section>
@@ -840,6 +936,49 @@
       <div class="dashboard-editor-actions"><button id="dashboardReset" type="button">Standard wiederherstellen</button><span class="muted">Maximal 24 Kacheln und 12 zusätzliche Blöcke.</span><button id="dashboardCancel" type="button">Abbrechen</button><button id="dashboardSave" class="primary" type="button">Speichern</button></div>
     </section>
   </div>
+  <div id="dachsControlModal" class="modal-backdrop" hidden>
+    <section class="modal-card service-reset-modal" role="dialog" aria-modal="true" aria-labelledby="dachsControlTitle" aria-describedby="dachsControlDescription">
+      <div class="section-head"><div><p class="eyebrow">CPU 0 · FLÜCHTIGE BETRIEBSFREIGABE · NUR ADMIN</p><h3 id="dachsControlTitle">Dachs Ein/Aus</h3></div><button id="dachsControlClose" class="icon-button" type="button" aria-label="Schließen">×</button></div>
+      <p id="dachsControlDescription" class="muted">ODM liest Block 22/24, das Ein/Aus-Byte 0x0ea1 und den Handbetrieb zweimal frisch über den exklusiven Serialworker. Ein bedeutet Automatikfreigabe und erzwingt keinen Start. Aus fordert den normalen Stoppablauf an und ist kein Not-Aus. Eine Änderung nutzt Auth 3, genau einen byteerhaltenden Schreibvorgang, exaktes ACK/Echo, doppelte Rücklesung, Auth-0-Cleanup und Audit. Der RAM-Zustand ist flüchtig.</p>
+      <div id="dachsControlPreview" class="service-reset-preview"><p class="muted">Noch keine frische Direktlesung.</p></div>
+      <div id="dachsControlStatus" class="write-guard-status neutral" role="status" aria-live="polite">Es wurde noch nichts geschrieben.</div>
+      <label class="check-label service-reset-confirm"><input id="dachsControlConfirm" type="checkbox"> <span id="dachsControlConfirmText">Ich bestätige diese einmalige Ein/Aus-Anforderung</span></label>
+      <div class="service-reset-actions"><button id="dachsControlReload" type="button">Zustand neu lesen</button><button id="dachsControlCancel" type="button">Abbrechen</button><button id="dachsControlSubmit" class="primary" type="button" disabled>Ausführen</button></div>
+    </section>
+  </div>
+  <div id="serviceResetModal" class="modal-backdrop" hidden>
+    <section class="modal-card service-reset-modal" role="dialog" aria-modal="true" aria-labelledby="serviceResetTitle" aria-describedby="serviceResetDescription">
+      <div class="section-head"><div><p class="eyebrow">CPU 0 · FLÜCHTIGE QUITTIERUNG · NUR ADMIN</p><h3 id="serviceResetTitle">Aktuelle Störung entstören</h3></div><button id="serviceResetClose" class="icon-button" type="button" aria-label="Schließen">×</button></div>
+      <p id="serviceResetDescription" class="muted">ODM liest Servicecode, Störereignis, Motorstatus und fünf sicherheitsrelevante Temperaturen zweimal frisch über den exklusiven Serialworker. Der Vorgang bleibt ohne ausdrücklich fachlich freigegebene Temperatur-/Wiederanlaufpolitik gesperrt. Nur bei Motorstatus 15/16 und sicheren Messwerten folgt genau eine Quittieranforderung an RAM 0x1c9e mit persistentem Neustartschutz, Auth 3, exaktem ACK/Echo, begrenztem Readback, Auth-0-Cleanup und Audit. Der Dachs kann nach erfolgreicher Entstörung bei anliegender Anforderung selbstständig wieder anlaufen.</p>
+      <div id="serviceResetPreview" class="service-reset-preview"><p class="muted">Noch keine frische Direktlesung.</p></div>
+      <div id="serviceResetStatus" class="write-guard-status neutral" role="status" aria-live="polite">Es wurde noch nichts geschrieben.</div>
+      <label class="check-label service-reset-confirm"><input id="serviceResetConfirm" type="checkbox"> Ich bestätige die einmalige Entstörung der frisch gelesenen aktuellen Störung</label>
+      <div class="service-reset-actions"><button id="serviceResetReload" type="button">Zustand neu lesen</button><button id="serviceResetCancel" type="button">Abbrechen</button><button id="serviceResetSubmit" class="danger" type="button" disabled>Einmalig entstören</button></div>
+    </section>
+  </div>
+  <div id="runtime24hModal" class="modal-backdrop" hidden>
+    <section class="modal-card runtime24h-modal" role="dialog" aria-modal="true" aria-labelledby="runtime24hTitle">
+      <div class="section-head"><div><p class="eyebrow">CPU 0 · FLÜCHTIGER RAM-ZÄHLER</p><h3 id="runtime24hTitle">Reglerzähler (0x0f0e) setzen</h3></div><button id="runtime24hClose" class="icon-button" type="button" aria-label="Schließen">×</button></div>
+      <form id="runtime24hForm" class="runtime24h-form">
+        <div class="runtime24h-current"><span>Frisch gelesener Istwert</span><strong id="runtime24hCurrent">Wird gelesen …</strong><small id="runtime24hPreviewStatus" class="muted">Noch kein kohärent gelesener Ausgangswert.</small></div>
+        <label>Absoluter Zielwert (HH:MM:SS)<input id="runtime24hValue" type="text" inputmode="numeric" placeholder="00:00:00" autocomplete="off" required><small>0 bis 23:59:29. Der Zielwert wird unverändert geschrieben; 23:59:30 und höher sind gesperrt.</small></label>
+        <label class="check-label"><input id="runtime24hWriteEnabled" type="checkbox"> Hardware-Schreiben ausdrücklich aktivieren</label>
+        <div id="runtime24hWriteStatus" class="write-guard-status neutral">Es wurde noch nichts geschrieben.</div>
+        <div class="runtime24h-actions"><button id="runtime24hReload" type="button">Istwert neu lesen</button><button id="runtime24hCancel" type="button">Abbrechen</button><button id="runtime24hSubmit" class="primary" type="submit" disabled>Zähler setzen</button></div>
+      </form>
+      <form id="runtimeAutoForm" class="runtime24h-form runtime-auto-form">
+        <div><p class="eyebrow">AUTOMATISCHE RÜCKSETZUNG · NUR ADMIN</p><h4>Wenn Zähler ≥ X, dann auf Y setzen</h4><p class="muted">Nur bei laufendem Motor (Status ≥ 30), ohne Servicecode und Handbetrieb, nach frischem kohärentem Doppel-Read; gleiche Sicherheitskette wie oben (Auth 3, Readback ±1 s, Deauth, Audit). Höchstens ein Write pro 10 min. Vorschlag X = 05:33:20 (20000 s), Y = 03:00:00 (10800 s), Z = 0: Der Zähler erreicht dann weder die 6-h-Schwelle der Nachtabschaltung noch die 24-h-Schwelle – der Dachs stoppt nicht mehr von sich aus täglich.</p></div>
+        <div id="runtimeAutoStatus" class="write-guard-status neutral">Status wird geladen …</div>
+        <label class="check-label"><input id="runtimeAutoEnabled" type="checkbox"> Automatik aktivieren</label>
+        <label>Schwelle X (HH:MM:SS)<input id="runtimeAutoThreshold" type="text" inputmode="numeric" value="05:33:20" autocomplete="off" required></label>
+        <label>Zielwert Y (HH:MM:SS)<input id="runtimeAutoTarget" type="text" inputmode="numeric" value="03:00:00" autocomplete="off" required></label>
+        <label>Nach Z Rücksetzungen je Lauf weiterlaufen lassen (0 = unbegrenzt)<input id="runtimeAutoResets" type="number" min="0" max="999" step="1" value="0" required></label>
+        <small id="runtimeAutoLimits" class="muted">Grenzen: Y ≥ max(1800 s, 60 · Mindestlaufzeit), X &gt; Y + 600 s, X ≤ 85470 s.</small>
+        <label class="check-label"><input id="runtimeAutoAcknowledge" type="checkbox"> Ich erlaube, dass ODM den Zähler 0x0f0e ohne Bediener mit Auth 3 schreibt</label>
+        <div class="runtime24h-actions"><button class="primary" type="submit">Regel speichern</button></div>
+      </form>
+    </section>
+  </div>
   <div id="changelogModal" class="modal-backdrop" hidden>
     <section class="modal-card changelog-modal" role="dialog" aria-modal="true" aria-labelledby="changelogTitle" aria-describedby="changelogIntro">
       <div class="section-head changelog-head">
@@ -848,8 +987,8 @@
       </div>
       <div class="changelog-list">
         <article class="changelog-entry current">
-          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-10-22">22.10.2026</time><span>Aktuell</span></header>
-          <ul><li>Die neue 250-h-Diagnose wertet ausschließlich die lokale SQLite-Historie aus und hält API und Oberfläche über einen persistenten Hintergrundcache responsiv.</li><li>B16, B20 und B21 beider Netzschutz-CPUs sind nach den abgeschlossenen Livebefunden strikt read/backup-only; nur 36 Reglerblöcke bleiben restaurierbar.</li><li>Das Offline-Firmware-Center begrenzt die Dekompressionsausgabe bereits während der Verarbeitung, räumt Timeout-/Fehlerprozesse sauber auf und lässt den nativen Flash weiter gesperrt.</li></ul>
+          <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-11-06">06.11.2026</time><span>Aktuell</span></header>
+          <ul><li>Das Prozessbild zeigt die Betriebsfreigabe und bietet Administratoren die getrennten, bestätigungspflichtigen Aktionen „Dachs Ein“ und „Dachs Aus“.</li><li>Ein bedeutet Automatikfreigabe und erzwingt keinen Start; Aus fordert den regulären Stopp an und ist kein Not-Aus.</li><li>Entstören bleibt ein eigener Vorgang. Beide Pfade lesen den Zustand frisch, nutzen feste serverseitige Adressen, Auth-Level 3, höchstens ein Schreibtelegramm, strenge Rücklesung und Abmeldung auf Auth-Level 0.</li><li>Betriebsstunden je Start stammen jetzt direkt aus Block 38 des Reglers statt aus einer ODM-Berechnung der Block-22-Lebenszeitzähler.</li><li>System → E-Mail bietet deaktivierte SMTP-Benachrichtigungen für Wartung, Fehler, ohne bestätigte ODM-Entstörung verschwundene Fehler und frei konfigurierte Temperaturgrenzen. Texte sind je Kategorie bearbeitbar.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.7.0</strong><time datetime="2026-08-24">24.08.2026</time></header>
@@ -889,7 +1028,7 @@
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.4.0</strong><time datetime="2026-08-17">17.08.2026</time></header>
-          <ul><li>Historischer Stand: Block 16 und Block 20 besaßen quellenseitig Schreibpfade; seit 1.8.0 sind beide nach den negativen Livebefunden read/backup-only.</li><li>Die originale Layout-4-Datenzuordnung belegt für Block 20 den Vollblock-Schreibdienst 21. Lesen, Kodierung, Authentifizierung, bytegenauer Ausgangszustandsvergleich, positive Bestätigung und exakte Vollblock-Rückleseprüfung bleiben zwingend.</li><li>Mehrdeutige Anzeigen werden nicht geraten und können nur ausdrücklich als <code>raw:&lt;Wert&gt;</code> eingegeben werden. Die Kodierung wurde schreibfrei geprüft; ein physischer Block-20-Schreibvorgang an der Anlage steht noch aus.</li><li>Block 21 bleibt ohne Schreibdienst strikt nur lesbar. Block 20 bleibt bis zur realen Abnahme außerhalb von Sicherung und Wiederherstellung; deren Umfang bleibt bei 38 Zielen.</li><li>Weitere Standardblöcke sind in den geprüften Definitionen nicht enthalten. Die zusätzlich gelesenen Diagnosedienste 17 und 18 bleiben mangels belegter Feldstruktur reine Rohdaten.</li></ul>
+          <ul><li>Historischer Stand: Block 16 und Block 20 besaßen quellenseitig Schreibpfade; seit 1.8.1 sind beide nach den negativen Livebefunden read/backup-only.</li><li>Die originale Layout-4-Datenzuordnung belegt für Block 20 den Vollblock-Schreibdienst 21. Lesen, Kodierung, Authentifizierung, bytegenauer Ausgangszustandsvergleich, positive Bestätigung und exakte Vollblock-Rückleseprüfung bleiben zwingend.</li><li>Mehrdeutige Anzeigen werden nicht geraten und können nur ausdrücklich als <code>raw:&lt;Wert&gt;</code> eingegeben werden. Die Kodierung wurde schreibfrei geprüft; ein physischer Block-20-Schreibvorgang an der Anlage steht noch aus.</li><li>Block 21 bleibt ohne Schreibdienst strikt nur lesbar. Block 20 bleibt bis zur realen Abnahme außerhalb von Sicherung und Wiederherstellung; deren Umfang bleibt bei 38 Zielen.</li><li>Weitere Standardblöcke sind in den geprüften Definitionen nicht enthalten. Die zusätzlich gelesenen Diagnosedienste 17 und 18 bleiben mangels belegter Feldstruktur reine Rohdaten.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.3.0</strong><time datetime="2026-08-17">17.08.2026</time></header>
@@ -897,7 +1036,7 @@
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.2.1</strong><time datetime="2026-08-16">16.08.2026</time></header>
-          <ul><li>Backups umfassen neben den 36 Reglerblöcken auch Block 16 beider Netzschutz-CPUs als eindeutig adressierte CPU-/Block-Ziele; seit 1.8.0 bleiben diese Netzschutz-Ziele vom Restore ausgeschlossen.</li><li>Abbilder binden Ziel, Payload und relevante Metadaten per SHA-256; vorhandene CPU-0-Abbilder aus 1.2.0 bleiben kompatibel.</li><li>Live-Wiederherstellung bleibt an Pack- und Reglerprüfung, Sicherheitsabbild, Authentifizierung, positives ACK und vollständige Rückleseprüfung gebunden.</li></ul>
+          <ul><li>Backups umfassen neben den 36 Reglerblöcken auch Block 16 beider Netzschutz-CPUs als eindeutig adressierte CPU-/Block-Ziele; seit 1.8.1 bleiben diese Netzschutz-Ziele vom Restore ausgeschlossen.</li><li>Abbilder binden Ziel, Payload und relevante Metadaten per SHA-256; vorhandene CPU-0-Abbilder aus 1.2.0 bleiben kompatibel.</li><li>Live-Wiederherstellung bleibt an Pack- und Reglerprüfung, Sicherheitsabbild, Authentifizierung, positives ACK und vollständige Rückleseprüfung gebunden.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.1.1</strong><time datetime="2026-08-13">13.08.2026</time></header>
@@ -956,6 +1095,6 @@
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="static/app.js?v=48"></script>
+  <script src="static/app.js?v=71"></script>
 </body>
 </html>

@@ -258,6 +258,65 @@ class Diagnosis250hTests(unittest.TestCase):
             for notice in result["notices"]
         ))
 
+    def test_status_10_events_are_listed_without_inferred_cause(self):
+        samples = self.samples()
+        samples[-1]["service_code"] = 31  # raw byte; displayed as SC 131
+        result = build_250h_diagnosis(
+            samples,
+            status_events=[
+                {"recorded_at": samples[-5]["recorded_at"], "status": 32},
+                {"recorded_at": samples[-2]["recorded_at"], "status": 10},
+                {"recorded_at": samples[-2]["recorded_at"], "status": 10},
+                {"recorded_at": samples[-1]["recorded_at"], "status": 15},
+            ],
+            history_complete=True,
+        )
+        current = result["intervals"][-1]
+        self.assertEqual(current["protection_shutdowns"], 1)
+        self.assertEqual(len(current["protection_shutdown_events"]), 1)
+        event = current["protection_shutdown_events"][0]
+        self.assertEqual(event["recorded_at"], samples[-2]["recorded_at"])
+        self.assertEqual((event["status"], event["status_label"]), (10, "Störabschaltung"))
+        self.assertEqual((event["previous_status"], event["previous_status_label"]), (32, "Generator am Netz"))
+        self.assertAlmostEqual(event["operating_hours"], samples[-2]["operating_seconds"] / 3600)
+        # Only the stored point at/after the transition supplies a service code.
+        self.assertIsNone(event["service_code_after"])
+
+    def test_service_and_warning_codes_use_format_adders(self):
+        samples = self.samples()
+        samples[-1]["service_code"] = 31
+        samples[-1]["warning_code"] = 61
+        samples[-1]["recorded_at"] = samples[-1]["recorded_at"]
+        result = build_250h_diagnosis(
+            samples,
+            status_events=[
+                {"recorded_at": samples[-2]["recorded_at"], "status": 32},
+                {"recorded_at": samples[-1]["recorded_at"], "status": 10},
+            ],
+            history_complete=True,
+        )
+        event = result["intervals"][-1]["protection_shutdown_events"][0]
+        self.assertEqual(event["service_code_after"], 131)
+        titles = {item["metric"]: item["title"] for item in result["notices"]}
+        self.assertTrue(titles["protection_shutdown"].startswith("Servicecode 131"))
+        self.assertEqual(titles["warning_code"], "Aktive Warnung 661")
+        self.assertTrue(all(item["protection_shutdown_events"] == [] for item in result["intervals"][:-1]))
+        notice = next(item for item in result["notices"] if item["metric"] == "protection_shutdown")
+        self.assertEqual(notice["title"], "Servicecode 131 · 1 Störabschaltung(en)")
+        self.assertEqual(result["metrics"]["inlet"]["normal"], "60–65 °C")
+
+    def test_status_10_list_is_clickable_in_ui_from_existing_response(self):
+        app = (WEB / "app.js").read_text(encoding="utf-8")
+        render = app[app.index("function renderDiagnosis250()"):app.index("async function refreshDiagnosis250(")]
+        self.assertIn("protection_shutdown_events", render)
+        self.assertIn('notice.metric === "protection_shutdown"', render)
+        self.assertIn("data-diagnosis-shutdowns", render)
+        self.assertIn('aria-controls="diagnosis250ShutdownList"', render)
+        self.assertIn("Servicecode danach", render)
+        self.assertNotIn("api(", render)
+        self.assertNotIn("fetch(", render)
+        self.assertIn('$("diagnosis250Notices").addEventListener("click", toggleDiagnosisShutdowns);', app)
+
     def test_exact_interval_boundary_starts_a_separate_running_interval(self):
         result = build_250h_diagnosis(self.samples(hours=250))
         self.assertEqual(len(result["intervals"]), 2)
@@ -450,7 +509,11 @@ class Diagnosis250hTests(unittest.TestCase):
         self.assertIn("Schutz / Störung", app)
         self.assertIn("Datenqualität", app)
         self.assertIn("dynamischer Sollwert ±150 W", index)
-        self.assertIn("Kondenser-Abgas wird nicht angezeigt", index)
+        self.assertNotIn("Kondenser-Abgas wird nicht angezeigt", index)
+        self.assertNotIn("NICHT SCHUTZGRENZEN", index)
+        self.assertNotIn("Grauzone", index)
+        self.assertIn("<dt>Dachs-Eintritt</dt><dd>60–65 °C</dd>", index)
+        self.assertIn('<p class="eyebrow">HERSTELLERHINWEISE</p>', index)
         self.assertIn("diagnosis-metric-badge", app)
         self.assertIn("action_count", app)
         self.assertIn("metricNoticeCounts", app)

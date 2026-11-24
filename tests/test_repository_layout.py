@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import hashlib
 import subprocess
+import tempfile
 import tomllib
 import unittest
 
@@ -23,7 +24,7 @@ class RepositoryLayoutTests(unittest.TestCase):
             project["tool"]["setuptools"]["dynamic"]["version"],
             {"attr": "open_dachs_manager.__version__"},
         )
-        self.assertEqual(__version__, "1.8.0")
+        self.assertEqual(__version__, "1.8.17")
         self.assertEqual(DachsRequestHandler.server_version, f"OpenDachsManager/{__version__}")
         scripts = project["project"]["scripts"]
         self.assertEqual(scripts["open-dachs"], "open_dachs_manager.cli:main")
@@ -83,6 +84,15 @@ class RepositoryLayoutTests(unittest.TestCase):
         self.assertIn("--exclude='build'", installer)
         self.assertIn("ODM_MAINTENANCE_LIVE_WRITES=0", installer)
         self.assertIn('! -f "$ODM_DATA_DIR/maintenance_settings.json"', installer)
+        self.assertIn("ODM_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=0", installer)
+        self.assertIn("OPEN_DACHS_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=%s", installer)
+        self.assertIn("ODM_EXISTING_SERVICE_RESET_POLICY", installer)
+        self.assertIn("ODM_SMTP_PRIVATE_ALLOWLIST=\"\"", installer)
+        self.assertIn("OPEN_DACHS_SMTP_PRIVATE_ALLOWLIST=%s", installer)
+        self.assertIn("ODM_EXISTING_SMTP_ALLOWLIST", installer)
+        self.assertIn("ODM_SMTP_PLAIN_ALLOWLIST=\"\"", installer)
+        self.assertIn("OPEN_DACHS_SMTP_PLAIN_ALLOWLIST=%s", installer)
+        self.assertIn("ODM_EXISTING_SMTP_PLAIN_ALLOWLIST", installer)
         for service in (
             "systemd/open-dachs-manager-serial.service",
             "systemd/open-dachs-manager-web.service",
@@ -96,6 +106,121 @@ class RepositoryLayoutTests(unittest.TestCase):
         )
         self.assertIn("CapabilityBoundingSet=CAP_NET_BIND_SERVICE", web_service)
         self.assertIn("AmbientCapabilities=CAP_NET_BIND_SERVICE", web_service)
+
+    def test_installer_service_reset_policy_is_fail_closed_and_preserved(self):
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        marker = "# Manual service-code reset remains fail-closed"
+        start = installer.index(marker)
+        end = installer.index("\n{\n", start)
+        policy_block = installer[start:end]
+
+        cases = (
+            (None, "0"),
+            ("OPEN_DACHS_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=1\n", "1"),
+            ("OPEN_DACHS_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=true\n", "1"),
+            ("OPEN_DACHS_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=0\n", "0"),
+            ("OPEN_DACHS_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=maybe\n", "0"),
+            (
+                "OPEN_DACHS_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=1\n"
+                "OPEN_DACHS_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=0\n",
+                "0",
+            ),
+            (
+                "OPEN_DACHS_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=0\n"
+                "OPEN_DACHS_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=on\n",
+                "1",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "open-dachs-manager.env"
+            for content, expected in cases:
+                with self.subTest(content=content, expected=expected):
+                    if content is None:
+                        config.unlink(missing_ok=True)
+                    else:
+                        config.write_text(content, encoding="utf-8")
+                    completed = subprocess.run(
+                        [
+                            "bash",
+                            "-c",
+                            policy_block
+                            + "\nprintf '%s' \"$ODM_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED\"",
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        env={**os.environ, "ODM_CONFIG_FILE": str(config)},
+                    )
+                    self.assertEqual(completed.stdout, expected)
+
+    def test_installer_smtp_private_allowlist_is_root_managed_and_preserved(self):
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        marker = "# Private SMTP targets are blocked"
+        start = installer.index(marker)
+        end = installer.index("\n{\n", start)
+        policy_block = installer[start:end]
+        cases = (
+            (None, ""),
+            ("OPEN_DACHS_SMTP_PRIVATE_ALLOWLIST=relay.intern:587\n", "relay.intern:587"),
+            (
+                "OPEN_DACHS_SMTP_PRIVATE_ALLOWLIST=old.intern:587\n"
+                "OPEN_DACHS_SMTP_PRIVATE_ALLOWLIST=10.0.0.2:587,new.intern:587\n",
+                "10.0.0.2:587,new.intern:587",
+            ),
+            ("OPEN_DACHS_SMTP_PRIVATE_ALLOWLIST=relay;touch /tmp/nope\n", ""),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "open-dachs-manager.env"
+            for content, expected in cases:
+                with self.subTest(content=content, expected=expected):
+                    if content is None:
+                        config.unlink(missing_ok=True)
+                    else:
+                        config.write_text(content, encoding="utf-8")
+                    completed = subprocess.run(
+                        [
+                            "bash", "-c", policy_block
+                            + "\nprintf '%s' \"$ODM_SMTP_PRIVATE_ALLOWLIST\"",
+                        ],
+                        check=True, capture_output=True, text=True,
+                        env={**os.environ, "ODM_CONFIG_FILE": str(config)},
+                    )
+                    self.assertEqual(completed.stdout, expected)
+                    self.assertFalse(Path("/tmp/nope").exists())
+
+    def test_installer_smtp_plain_allowlist_is_separate_and_preserved(self):
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        start = installer.index("# Plain SMTP is a separate")
+        end = installer.index("\n{\n", start)
+        policy_block = installer[start:end]
+        cases = (
+            (None, ""),
+            ("OPEN_DACHS_SMTP_PLAIN_ALLOWLIST=relay.intern:25\n", "relay.intern:25"),
+            (
+                "OPEN_DACHS_SMTP_PLAIN_ALLOWLIST=old.intern:25\n"
+                "OPEN_DACHS_SMTP_PLAIN_ALLOWLIST=10.0.0.2:25,new.intern:25\n",
+                "10.0.0.2:25,new.intern:25",
+            ),
+            ("OPEN_DACHS_SMTP_PLAIN_ALLOWLIST=relay;touch /tmp/nope\n", ""),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "open-dachs-manager.env"
+            for content, expected in cases:
+                with self.subTest(content=content, expected=expected):
+                    if content is None:
+                        config.unlink(missing_ok=True)
+                    else:
+                        config.write_text(content, encoding="utf-8")
+                    completed = subprocess.run(
+                        [
+                            "bash", "-c", policy_block
+                            + "\nprintf '%s' \"$ODM_SMTP_PLAIN_ALLOWLIST\"",
+                        ],
+                        check=True, capture_output=True, text=True,
+                        env={**os.environ, "ODM_CONFIG_FILE": str(config)},
+                    )
+                    self.assertEqual(completed.stdout, expected)
+                    self.assertFalse(Path("/tmp/nope").exists())
 
     def test_foreign_logo_and_runtime_secrets_are_not_bundled(self):
         self.assertFalse((ROOT / "src/open_dachs_manager/web/logo_small.png").exists())
@@ -125,6 +250,8 @@ class RepositoryLayoutTests(unittest.TestCase):
         self.assertEqual(
             {path.name for path in data_root.iterdir() if path.is_file()},
             {
+                "display_status_texts_de.json",
+                "update_release_public_key.pem",
                 "formats.json",
                 "fault_catalog_de.json",
                 "labels_master.properties",
@@ -246,23 +373,95 @@ class RepositoryLayoutTests(unittest.TestCase):
         self.assertNotIn('class="hmi-generator"', index)
         self.assertNotIn('class="tech95-generator-symbol"', index)
 
-    def test_overview_has_derived_hours_per_start_and_automatic_pw4(self):
+    def test_overview_reads_native_hours_per_start_and_keeps_automatic_pw4(self):
         app = (ROOT / "src/open_dachs_manager/web/app.js").read_text(encoding="utf-8")
         ratio_start = app.index("function operatingHoursPerStartDisplay()")
         ratio_end = app.index("\nfunction renderOverview()", ratio_start)
         ratio = app[ratio_start:ratio_end]
-        self.assertIn("state.live?.operating_hours_per_start", ratio)
+        self.assertIn(
+            "dashboardRow(OPERATING_HOURS_PER_START_BLOCK, OPERATING_HOURS_PER_START_KEY)",
+            ratio,
+        )
+        self.assertNotIn("state.live?.operating_hours_per_start", ratio)
+        self.assertIn('minimumFractionDigits: 1', ratio)
         self.assertIn('maximumFractionDigits: 1', ratio)
         self.assertIn("Bh/Start", ratio)
+        self.assertIn("Block 38 · direkt aus dem Regler", ratio)
+        self.assertNotIn("Block 22", ratio)
         self.assertIn("Betriebsstunden je Start", ratio)
         self.assertIn("function operatingHoursPerStartCard()", ratio)
         self.assertIn("function operatingHoursPerStartDetail()", ratio)
+        self.assertIn("function runtime24hCard()", ratio)
+        self.assertIn("state.live?.runtime_24h", ratio)
+        self.assertIn('<div class="metric-label">Laufzeit seit Start</div>', ratio)
+        self.assertNotIn("Laufzeit seit Start (24-h-Zähler)", ratio)
+        self.assertIn("realRuntimeDisplay()", ratio)
+        self.assertIn('title="Reglerzähler (0x0f0e) setzen"', ratio)
+        self.assertIn("6 h (Nachtabschaltung) in ", ratio)
+        self.assertIn('"24 h in "', ratio)
+        self.assertIn("nur aktive Laufzeit, Reset bei jedem Start", ratio)
+        # The removed runtime_24h_auto module stays gone; the new, separate
+        # rule is read from state.live.runtime_auto_reset only.
+        self.assertNotIn("metric?.auto_reset", ratio)
+        self.assertNotIn("runtime_24h?.auto_reset", ratio)
+        self.assertIn("state.live?.runtime_auto_reset", ratio)
+        self.assertNotIn("Autoreset", app)
+        self.assertNotIn("runtime-24h-auto", app)
+        self.assertIn('return "—"', ratio)
 
         card_start = app.index("function dashboardCardHtml(card)")
         card_end = app.index("\nfunction renderOverview()", card_start)
         card = app[card_start:card_end]
-        self.assertIn('field?.source === "operating_hours_per_start"', card)
+        self.assertIn("Number(card.block) === OPERATING_HOURS_PER_START_BLOCK", card)
+        self.assertIn("card.key === OPERATING_HOURS_PER_START_KEY", card)
+        self.assertNotIn('field?.source === "operating_hours_per_start"', card)
         self.assertIn("return operatingHoursPerStartCard();", card)
+        self.assertIn('field?.source === "runtime_24h_shutdown"', card)
+        self.assertIn("return runtime24hCard();", card)
+        self.assertIn('field?.source === "soot_filter_regeneration"', card)
+        self.assertIn("return sootRegenerationCard();", card)
+        self.assertIn('field?.source === "ram_telemetry"', card)
+        self.assertIn("return ramTelemetryCard();", card)
+
+        telemetry_start = app.index("function ramTelemetryValue(item)")
+        telemetry_end = app.index("\nfunction dashboardCardHtml(card)", telemetry_start)
+        telemetry = app[telemetry_start:telemetry_end]
+        self.assertIn("state.live?.ram_telemetry", telemetry)
+        self.assertIn('"nicht verfügbar"', telemetry)
+        self.assertNotIn("Deutung mittel", telemetry)
+        self.assertNotIn("Typzuordnung", telemetry)
+        self.assertNotIn("Zustandsdeutung", telemetry)
+        render = telemetry[telemetry.index("function renderSootRegeneration()"):]
+        self.assertNotIn("RAM 0x0d", render)
+        self.assertNotIn("recorded_at", render)
+        self.assertNotIn("detail-extra", telemetry[:telemetry.index("function ramTelemetryCard()")])
+        self.assertIn('$("ramTelemetryCards")', telemetry)
+        self.assertIn("function ramTelemetryCard()", telemetry)
+        self.assertIn("function sootRegenerationCard()", telemetry)
+        self.assertIn("function renderSootRegeneration()", telemetry)
+        self.assertIn("state.live?.soot_filter_regeneration", telemetry)
+        self.assertIn('"nicht unterstützt"', telemetry)
+        self.assertIn("pausiert bei Stillstand", telemetry)
+        self.assertNotIn("Füllstand", telemetry.replace("kein Füllstand", ""))
+        self.assertIn('$("sootRegenerationCards")', telemetry)
+        html = (ROOT / "src/open_dachs_manager/web/index.html").read_text(encoding="utf-8")
+        # Both sub-sections live inside the System panel "Status und Meldungen"
+        # of the overview; the former separate overview panel is gone.
+        system_start = html.index("<h3>Status und Meldungen</h3>")
+        system_end = html.index("</section>", system_start)
+        system_panel = html[system_start:system_end]
+        self.assertIn('id="systemStateCards"', system_panel)
+        self.assertIn("Rußfilterregeneration", system_panel)
+        self.assertIn('id="sootRegenerationCards"', system_panel)
+        self.assertIn("Interne Reglerwerte", system_panel)
+        self.assertIn('id="ramTelemetryCards"', system_panel)
+        self.assertLess(system_panel.index('id="sootRegenerationCards"'), system_panel.index('id="ramTelemetryCards"'))
+        self.assertNotIn('class="panel ram-telemetry"', html)
+        self.assertNotIn("Nur lesend aus CPU-0-RAM", html)
+        self.assertNotIn("Nur lesend über Dienst 0x02", html)
+        self.assertNotIn("Die Auswahl wird lokal auf dem Pi gespeichert. Zusätzliche Blöcke", html)
+        self.assertNotIn("Ruhige HMI-Darstellung", html)
+        self.assertEqual(html.count('id="ramTelemetryCards"'), 1)
 
         overview_start = app.index("function renderOverview()")
         overview_end = app.index("\nfunction allDashboardFields()", overview_start)
@@ -279,6 +478,49 @@ class RepositoryLayoutTests(unittest.TestCase):
         self.assertNotIn('authLevel', write)
         self.assertNotIn('pass4', write)
         self.assertIn('PW4 automatisch', app)
+
+    def test_display_status_lines_lead_system_status_panel(self):
+        app = (ROOT / "src/open_dachs_manager/web/app.js").read_text(encoding="utf-8")
+        html = (ROOT / "src/open_dachs_manager/web/index.html").read_text(encoding="utf-8")
+        system_start = html.index("<h3>Status und Meldungen</h3>")
+        system_end = html.index("</section>", system_start)
+        system_panel = html[system_start:system_end]
+        # The display list sits directly below the status entries, before the
+        # soot-regeneration and RAM sub-sections.
+        self.assertIn('id="displayStatusHistory"', system_panel)
+        self.assertLess(system_panel.index('id="systemStateCards"'), system_panel.index('id="displayStatusHistory"'))
+        self.assertLess(system_panel.index('id="displayStatusHistory"'), system_panel.index('id="sootRegenerationCards"'))
+        self.assertIn('static/app.js?v=71', html)
+        self.assertIn('static/style.css?v=50', html)
+
+        overview_start = app.index("function renderOverview()")
+        overview_end = app.index("\nfunction allDashboardFields()", overview_start)
+        overview = app[overview_start:overview_end]
+        self.assertIn('$("systemStateCards").innerHTML = displayStatusDetails() + controllerClockDetail()', overview)
+        clock_start = app.index("function controllerClockDetail()")
+        clock = app[clock_start:app.index("\nfunction displayStatusCard()", clock_start)]
+        self.assertIn('systemDetailItem("Regleruhr", value, available)', clock)
+        self.assertIn("clock?.available === true", clock)
+        self.assertLess(overview.index("displayStatusDetails()"), overview.index("system.map("))
+
+        details_start = app.index("function displayStatusLine(number)")
+        details_end = app.index("\nfunction displayStatusCard()", details_start)
+        details = app[details_start:details_end]
+        self.assertIn('systemDetailItem("Display Zeile 1"', details)
+        self.assertIn('systemDetailItem("Display Zeile 2"', details)
+        self.assertIn("data-display-status-history", details)
+        self.assertIn('"nicht verfügbar"', details)
+        # No addresses, confidences or explanatory text in the system view.
+        for forbidden in ("0x", "Konfidenz", "berechnet", "recorded_at", "Firmware"):
+            self.assertNotIn(forbidden, details)
+
+        card_start = app.index("function dashboardCardHtml(card)")
+        card_end = app.index("\nfunction renderOverview()", card_start)
+        self.assertIn('field?.source === "display_status"', app[card_start:card_end])
+        self.assertIn("return displayStatusCard();", app[card_start:card_end])
+        self.assertIn('api("/api/display-status/events?limit=50")', app)
+        self.assertIn('$("systemStateCards").addEventListener("click", toggleDisplayStatusHistory);', app)
+        self.assertNotIn('fetch("/api/display-status', app)
 
 
 if __name__ == "__main__":

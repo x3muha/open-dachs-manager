@@ -10,8 +10,8 @@ const state = {
   block: null,
   showReserved: false,
   histories: new Map(),
-  chartSeries: { temperature: [], motor: [], exhaust: [] },
-  chartHidden: { temperature: new Set(), motor: new Set(), exhaust: new Set() },
+  chartSeries: { temperature: [], motor: [], frequency: [], exhaust: [] },
+  chartHidden: { temperature: new Set(), motor: new Set(), frequency: new Set(), exhaust: new Set() },
   chartZoomRange: null,
   chartRunBands: [],
   motorStatusSegments: [],
@@ -23,15 +23,21 @@ const state = {
   historyWindow: null,
   chartRefresh: { inFlight: false, pending: false, lastCompletedAt: 0 },
   operator: { series: [], window: null, runBands: [], inFlight: false, lastCompletedAt: 0, previousSchematicMode: null },
-  diagnosis250: { data: null, inFlight: false, loadedAt: 0 },
+  diagnosis250: { data: null, inFlight: false, loadedAt: 0, shutdownsOpen: false },
+  displayStatusHistory: { open: false, items: [], inFlight: false, error: "", lines: "" },
   authPreview: null,
   authPreviewGeneration: 0,
   authPreviewClearTimer: null,
   maintenanceSettings: null,
   sootFilterSettings: null,
-  maintenance: { reports: [], current: null, autosaveTimer: null, pw4Generation: 0, pw4ClearTimer: null },
+  maintenance: { reports: [], current: null, autosaveTimer: null, pw4Generation: 0, pw4ClearTimer: null, reasonReportId: null },
   dashboard: { settings: null, editCards: [], draggedIndex: null },
-  system: { selectedTab: "users", users: [], tokens: [], apiSettings: null, localAccessSettings: null, firmware: null },
+  dachsControl: { action: null, preview: null, trigger: null, busy: false },
+  serviceReset: { preview: null, trigger: null, busy: false },
+  runtime24hWrite: { preview: null, trigger: null, busy: false },
+  runtimeAuto: null,
+  clockSync: null,
+  system: { selectedTab: "users", users: [], tokens: [], apiSettings: null, localAccessSettings: null, emailNotifications: null, emailOutbox: null, firmware: null, sc123Limit: null, sc123Preview: null, update: null, updatePreview: null },
   backup: { image: null, inspection: null, busy: false, importGeneration: 0, archive: [], archiveLoaded: false },
   serviceCatalogTimer: null,
   serviceCatalogLoaded: false,
@@ -46,6 +52,18 @@ const appView = $("appView");
 const BASE_PATH = document.querySelector('meta[name="open-dachs-base-path"]')?.content || "";
 const BACKUP_MAX_FILE_BYTES = 1024 * 1024;
 const RESTORE_CONFIRMATION = "SICHERUNG WIEDERHERSTELLEN";
+const OPERATING_HOURS_PER_START_BLOCK = 38;
+const OPERATING_HOURS_PER_START_KEY = "Motbel250[0].bQuotientBh_Start";
+const EMAIL_CATEGORY_LABELS = Object.freeze({
+  maintenance: "Wartung",
+  fault: "Fehler",
+  fault_cleared: "Automatisch verschwunden",
+  temperature: "Temperaturgrenze",
+  test: "Testmail",
+});
+const EMAIL_STATUS_LABELS = Object.freeze({
+  pending: "Wartet", sending: "Wird gesendet", sent: "Gesendet", failed: "Fehlgeschlagen", dead: "Aufgegeben", canceled: "Widerrufen",
+});
 const CHART_LEGEND_TONES = Object.freeze({
   "#dc2626": "red",
   "#2563eb": "blue",
@@ -83,6 +101,35 @@ function numeric(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function trapOpenModalFocus(event) {
+  if (event.key !== "Tab") return false;
+  const modals = Array.from(document.querySelectorAll(".modal-backdrop:not([hidden])"));
+  const modal = modals[modals.length - 1];
+  if (!modal) return false;
+  const focusable = Array.from(modal.querySelectorAll(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+  )).filter((element) => !element.hidden && element.getClientRects().length > 0);
+  if (!focusable.length) return false;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (!modal.contains(document.activeElement)) {
+    event.preventDefault();
+    first.focus();
+    return true;
+  }
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+    return true;
+  }
+  if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+    return true;
+  }
+  return false;
+}
+
 async function api(path, options = {}) {
   const { headers = {}, ...requestOptions } = options;
   const response = await fetch(appUrl(path), {
@@ -107,6 +154,16 @@ async function api(path, options = {}) {
 
 function showLogin(message = "") {
   state.user = null;
+  document.querySelectorAll(".modal-backdrop").forEach((modal) => { modal.hidden = true; });
+  document.body?.classList?.remove("modal-open");
+  Object.assign(state.dachsControl, { action: null, preview: null, trigger: null, busy: false });
+  Object.assign(state.serviceReset, { preview: null, trigger: null, busy: false });
+  state.system.updatePreview = null;
+  if ($("updatePreview")) { $("updatePreview").hidden = true; $("updatePreview").innerHTML = ""; }
+  if ($("updateConfirmation")) $("updateConfirmation").value = "";
+  if ($("updateConfirmRow")) $("updateConfirmRow").hidden = true;
+  if ($("dachsControlConfirm")) $("dachsControlConfirm").checked = false;
+  if ($("serviceResetConfirm")) $("serviceResetConfirm").checked = false;
   state.backup.image = null;
   state.backup.inspection = null;
   state.backup.busy = false;
@@ -121,7 +178,6 @@ function showLogin(message = "") {
   if ($("writeGuardStatus")) updateWriteGuard();
   if ($("restoreFile")) $("restoreFile").value = "";
   if ($("restorePass4")) $("restorePass4").value = "";
-  if ($("restoreConfirmation")) $("restoreConfirmation").value = "";
   if ($("restoreWriteEnabled")) $("restoreWriteEnabled").checked = false;
   if ($("restoreBlockList")) $("restoreBlockList").innerHTML = `<p class="muted">Noch kein geprüftes Backup-Image geladen.</p>`;
   if ($("restoreResults")) $("restoreResults").innerHTML = "";
@@ -156,6 +212,9 @@ function showApp(user) {
   $("sootFilterZeroTemperature").disabled = !isAdmin;
   $("sootFilterFullTemperature").disabled = !isAdmin;
   $("dashboardEdit").hidden = !isAdmin;
+  $("hmiDachsOn").hidden = !isAdmin;
+  $("hmiDachsOff").hidden = !isAdmin;
+  $("clockSyncPanel").hidden = !isAdmin;
   document.querySelectorAll(".maintenance-admin").forEach((element) => { element.hidden = !isAdmin; });
   document.querySelectorAll(".backup-admin").forEach((element) => { element.hidden = !isAdmin; });
   $("settingsRoleHint").textContent = isAdmin ? "Admin: lesen und schreiben" : "Gast: nur lesen";
@@ -189,6 +248,8 @@ async function boot() {
     renderBackupBlockList();
     updateRestoreMode();
     if (session.user.role === "admin") await refreshMaintenanceMode();
+    refreshUpdateBadge();
+    if (session.user.role === "admin") refreshClockSync();
     await refreshLive();
     refreshDiagnosis250(false);
     await refreshMaintenance(false);
@@ -253,10 +314,7 @@ function renderSootFilterSettings() {
   if (!settings) return;
   $("sootFilterZeroTemperature").value = settings.zero_temperature_c;
   $("sootFilterFullTemperature").value = settings.full_temperature_c;
-  const roleText = state.user?.role === "admin"
-    ? "Als Admin kannst du die Kennlinie ändern."
-    : "Gastzugang: Kennlinie nur lesbar.";
-  $("sootFilterSettingsStatus").textContent = `${settings.zero_temperature_c} °C = 0 % · ${settings.full_temperature_c} °C = 100 % · Grün < 60 % · Orange 60–89 % · Rot ab 90 %. ${roleText}`;
+  $("sootFilterSettingsStatus").textContent = `${settings.zero_temperature_c} °C = 0 % · ${settings.full_temperature_c} °C = 100 % · Grün < 60 % · Orange 60–89 % · Rot ab 90 %.`;
 }
 
 async function saveSootFilterSettings(event) {
@@ -393,6 +451,32 @@ function renderHmiMessages() {
   $("hmiWarningCode").textContent = warningActive ? `WARN ${warningCode}` : "WARN —";
   $("hmiFaultCount").textContent = rowText("anzahl_stoerungen");
   $("hmiWarningCount").textContent = rowText("anzahl_warnungen");
+  $("hmiResetServiceCode").hidden = !(
+    serviceActive && state.user?.role === "admin"
+  );
+
+  const release = valueIndex().get("22:Hka_Bd.UHka_Frei.usFreigabe");
+  const releaseRaw = release && release.raw !== null && release.raw !== undefined && release.raw !== ""
+    ? numeric(release.raw)
+    : null;
+  const monitor = state.live?.monitor || {};
+  const releaseKnown = releaseRaw !== null && liveRowMatchesMonitorCycle(release, monitor);
+  const dachsEnabled = releaseKnown && (Math.round(releaseRaw) & 0x4000) !== 0;
+  $("hmiDachsControl").className = "hmi-message-card hmi-control-card "
+    + (releaseKnown && dachsEnabled ? "normal enabled" : "normal");
+  $("hmiDachsControlText").textContent = releaseKnown
+    ? (dachsEnabled ? "Dachs Ein · Automatik" : "Dachs Aus")
+    : "Dachs-Zustand nicht verfügbar";
+  $("hmiDachsControlDetail").textContent = !releaseKnown
+    ? "Keine frische Block-22-Lesung · Bedienung bleibt gesperrt"
+    : dachsEnabled
+      ? "Automatikfreigabe gesetzt · ein Start bleibt von Anforderungen und Freigaben abhängig"
+      : "Automatikfreigabe nicht gesetzt · Dachs bleibt aus";
+  const controlAdmin = state.user?.role === "admin";
+  $("hmiDachsOn").hidden = !controlAdmin;
+  $("hmiDachsOff").hidden = !controlAdmin;
+  $("hmiDachsOn").disabled = !releaseKnown || dachsEnabled;
+  $("hmiDachsOff").disabled = !releaseKnown || !dachsEnabled;
 
   const level = serviceActive ? "alarm" : warningActive ? "warning" : "normal";
   const stateCode = serviceActive ? `SC ${serviceCode}` : warningActive ? `W ${warningCode}` : "OK";
@@ -402,6 +486,17 @@ function renderHmiMessages() {
   ["v95-overview-state-code", "v95-tech-state-code"].forEach((id) => {
     if ($(id)) $(id).textContent = stateCode;
   });
+}
+
+function liveRowMatchesMonitorCycle(row, monitor) {
+  const rowTime = Date.parse(String(row?.recorded_at || ""));
+  const completedCycleTime = Date.parse(String(monitor?.last_cycle || ""));
+  return monitor?.enabled === true
+    && monitor?.running === true
+    && monitor?.serial_enabled === true
+    && Number.isFinite(rowTime)
+    && Number.isFinite(completedCycleTime)
+    && rowTime >= completedCycleTime;
 }
 
 function setSchematicMode(mode) {
@@ -438,6 +533,328 @@ async function openCurrentFaultCatalog() {
   $("serviceCatalogResults").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+function dachsControlActionLabel(action) {
+  return action === "on" ? "Dachs Ein" : "Dachs Aus";
+}
+
+function updateDachsControlSubmit() {
+  const preview = state.dachsControl.preview;
+  $("dachsControlReload").disabled = state.dachsControl.busy;
+  $("dachsControlConfirm").disabled = state.dachsControl.busy;
+  $("dachsControlSubmit").disabled = Boolean(
+    state.dachsControl.busy
+    || preview?.eligible !== true
+    || !preview?.request_token
+    || !$("dachsControlConfirm").checked
+  );
+}
+
+function setDachsControlBusy(busy) {
+  state.dachsControl.busy = Boolean(busy);
+  updateDachsControlSubmit();
+}
+
+function renderDachsControlPreview(preview) {
+  state.dachsControl.preview = preview;
+  const current = preview?.enabled === true ? "Dachs Ein · Automatik" : "Dachs Aus";
+  const target = preview?.target_enabled === true ? "Dachs Ein · Automatik" : "Dachs Aus";
+  const service = Number(preview?.service_code) > 0 ? "SC " + Number(preview.service_code) : "keine";
+  const temperatures = preview?.action === "on" && preview?.transition_required === true
+    ? (preview?.temperatures || []).map((item) => {
+      const value = item.value_c === null || item.value_c === undefined
+        ? "nicht verfügbar"
+        : Number(item.value_c).toLocaleString("de-DE", { maximumFractionDigits: 1 }) + " °C";
+      return '<div class="service-reset-temperature ' + (item.safe === true ? "ok" : "blocked") + '"><dt>'
+        + escapeHtml(item.label) + '</dt><dd>' + escapeHtml(value)
+        + '<small>zulässig ' + escapeHtml(Number(item.minimum_c).toLocaleString("de-DE"))
+        + '–' + escapeHtml(Number(item.maximum_c).toLocaleString("de-DE")) + ' °C</small></dd></div>';
+    }).join("")
+    : "";
+  $("dachsControlPreview").innerHTML = '<dl><div><dt>Aktueller Zustand</dt><dd><strong>'
+    + escapeHtml(current) + '</strong><small>Byte ' + escapeHtml(preview?.release_byte_hex || "—") + '</small></dd></div>'
+    + '<div><dt>Ziel</dt><dd><strong>' + escapeHtml(target) + '</strong><small>'
+    + escapeHtml(preview?.semantics || "") + '</small></dd></div>'
+    + '<div><dt>Motorzustand</dt><dd><strong>' + escapeHtml(preview?.motor_status ?? "—")
+    + '</strong><small>' + escapeHtml(preview?.motor_status_text || "—") + '</small></dd></div>'
+    + '<div><dt>Störung / Handbetrieb</dt><dd><strong>' + escapeHtml(service)
+    + '</strong><small>Handbetrieb RAM 0x1b5a = ' + escapeHtml(preview?.manual_mode ?? "—") + '</small></dd></div>'
+    + temperatures + '</dl><p class="muted">' + escapeHtml(preview?.read_source || "")
+    + (preview?.read_at ? " · " + escapeHtml(localDateTime(preview.read_at)) : "") + '</p>';
+  const blockers = preview?.blockers || [];
+  $("dachsControlStatus").className = "write-guard-status " + (preview?.eligible === true ? "ok" : "warn");
+  $("dachsControlStatus").textContent = preview?.eligible === true
+    ? (preview?.unchanged === true
+      ? "Zielzustand ist bereits erreicht. Es wäre kein Schreibvorgang nötig."
+      : "Sicherheitsprüfung bestanden. Noch keine Authentifizierung und kein Schreibvorgang.")
+    : "Dachs Ein/Aus gesperrt: " + (blockers.join(" · ") || "Zustand nicht sicher bestätigt");
+  updateDachsControlSubmit();
+}
+
+async function refreshDachsControlPreview() {
+  if (state.user?.role !== "admin" || !state.dachsControl.action) return;
+  $("dachsControlConfirm").checked = false;
+  setDachsControlBusy(true);
+  state.dachsControl.preview = null;
+  $("dachsControlPreview").innerHTML = '<p class="muted">Lese Block 22/24 und die festen RAM-Adressen zweimal direkt über den Serialworker …</p>';
+  $("dachsControlStatus").className = "write-guard-status neutral";
+  $("dachsControlStatus").textContent = "Frische Sicherheitsprüfung läuft …";
+  try {
+    const query = new URLSearchParams({ action: state.dachsControl.action });
+    renderDachsControlPreview(await api("/api/dachs-control/preview?" + query.toString()));
+  } catch (error) {
+    $("dachsControlPreview").innerHTML = '<p class="muted">Direktlesung fehlgeschlagen.</p>';
+    $("dachsControlStatus").className = "write-guard-status error";
+    $("dachsControlStatus").textContent = error.message;
+  } finally {
+    setDachsControlBusy(false);
+  }
+}
+
+async function openDachsControlModal(event, action) {
+  if (state.user?.role !== "admin") return;
+  state.dachsControl.action = action === "off" ? "off" : "on";
+  state.dachsControl.trigger = event?.currentTarget || document.activeElement;
+  state.dachsControl.preview = null;
+  $("dachsControlConfirm").checked = false;
+  const label = dachsControlActionLabel(state.dachsControl.action);
+  $("dachsControlTitle").textContent = label;
+  $("dachsControlConfirmText").textContent = "Ich bestätige die einmalige Anforderung „" + label + "“";
+  $("dachsControlSubmit").textContent = label + " anfordern";
+  $("dachsControlSubmit").className = state.dachsControl.action === "off" ? "danger" : "primary";
+  $("dachsControlModal").hidden = false;
+  document.body.classList.add("modal-open");
+  $("dachsControlClose").focus();
+  await refreshDachsControlPreview();
+}
+
+function closeDachsControlModal() {
+  if ($("dachsControlModal").hidden || state.dachsControl.busy) return;
+  $("dachsControlModal").hidden = true;
+  document.body.classList.remove("modal-open");
+  if (state.dachsControl.trigger instanceof HTMLElement) state.dachsControl.trigger.focus();
+  state.dachsControl.action = null;
+  state.dachsControl.trigger = null;
+  state.dachsControl.preview = null;
+}
+
+async function submitDachsControl() {
+  if (state.dachsControl.busy || !state.dachsControl.action) return;
+  if (!$("dachsControlConfirm").checked) {
+    return toast("Bitte die einmalige Ein/Aus-Anforderung ausdrücklich bestätigen.", "error");
+  }
+  setDachsControlBusy(true);
+  $("dachsControlStatus").className = "write-guard-status warn";
+  $("dachsControlStatus").textContent = "Lese den Zustand erneut, authentifiziere und sende höchstens einen Schreibvorgang …";
+  try {
+    const query = new URLSearchParams({ action: state.dachsControl.action });
+    const preview = await api("/api/dachs-control/preview?" + query.toString());
+    renderDachsControlPreview(preview);
+    if (preview.eligible !== true) throw new Error("Frische Sicherheitsprüfung sperrt Dachs Ein/Aus.");
+    const result = await api("/api/dachs-control", {
+      method: "POST",
+      body: JSON.stringify({
+        action: state.dachsControl.action,
+        confirm: true,
+        request_token: preview.request_token,
+      }),
+    });
+    state.dachsControl.preview = null;
+    $("dachsControlStatus").className = "write-guard-status ok";
+    $("dachsControlStatus").textContent = result.unchanged
+      ? (Number(result.auth_level_granted) === 3
+        ? "Zielzustand war nach Auth 3 bereits erreicht: kein Schreibvorgang; Auth-Level 0 bestätigt."
+        : "Zielzustand war bereits erreicht: kein Schreibvorgang und keine Authentifizierung.")
+      : dachsControlActionLabel(state.dachsControl.action) + " bestätigt: Zielbyte zweimal rückgelesen und Auth-Level 0 bestätigt.";
+    $("dachsControlConfirm").checked = false;
+    toast(result.unchanged ? "Zielzustand war bereits erreicht." : dachsControlActionLabel(state.dachsControl.action) + " sicher bestätigt.");
+    await refreshLive();
+  } catch (error) {
+    const result = error.payload || {};
+    let message = error.message;
+    if (result.target_reached === true && result.deauthenticated !== true) {
+      message = "Zielzustand ist rückgelesen, aber Auth-Level 0 konnte nicht bestätigt werden. Nicht wiederholen; Audit und Reglerzustand prüfen.";
+    } else if (result.target_reached === true && result.write_confirmed !== true) {
+      message = "Zielzustand ist rückgelesen, aber ACK/Echo war nicht vollständig bestätigt. Nicht wiederholen; Audit prüfen.";
+    } else if (error.status === 409) {
+      message = error.message + " Keine automatische Wiederholung wurde gesendet.";
+    }
+    state.dachsControl.preview = null;
+    $("dachsControlConfirm").checked = false;
+    $("dachsControlStatus").className = "write-guard-status error";
+    $("dachsControlStatus").textContent = message;
+    toast(message, "error");
+    await refreshLive();
+  } finally {
+    setDachsControlBusy(false);
+  }
+}
+
+function updateServiceResetSubmit() {
+  const preview = state.serviceReset.preview;
+  $("serviceResetReload").disabled = state.serviceReset.busy;
+  $("serviceResetConfirm").disabled = state.serviceReset.busy;
+  $("serviceResetSubmit").disabled = Boolean(
+    state.serviceReset.busy
+    || preview?.eligible !== true
+    || !preview?.request_token
+    || !$("serviceResetConfirm").checked
+  );
+}
+
+function setServiceResetBusy(busy) {
+  state.serviceReset.busy = Boolean(busy);
+  updateServiceResetSubmit();
+}
+
+function renderServiceResetPreview(preview) {
+  state.serviceReset.preview = preview;
+  const temperatures = (preview?.temperatures || []).map((item) => {
+    const tone = item.safe === true ? "ok" : "blocked";
+    return '<div class="service-reset-temperature ' + tone + '"><dt>'
+      + escapeHtml(item.label) + '</dt><dd>'
+      + escapeHtml(Number(item.value_c).toLocaleString("de-DE", { maximumFractionDigits: 1 }))
+      + ' °C <small>zulässig ' + escapeHtml(Number(item.minimum_c).toLocaleString("de-DE"))
+      + '–' + escapeHtml(Number(item.maximum_c).toLocaleString("de-DE")) + ' °C</small></dd></div>';
+  }).join("");
+  const code = Number(preview?.service_code) > 0 ? "SC " + Number(preview.service_code) : "keine";
+  $("serviceResetPreview").innerHTML = '<dl><div><dt>Aktuelle Störung</dt><dd><strong>'
+    + escapeHtml(code) + '</strong><small>' + escapeHtml(preview?.service_text || "—") + '</small></dd></div>'
+    + '<div><dt>Motorzustand</dt><dd><strong>' + escapeHtml(preview?.motor_status ?? "—")
+    + '</strong><small>' + escapeHtml(preview?.motor_status_text || "—") + '</small></dd></div>'
+    + temperatures + '</dl><p class="muted">' + escapeHtml(preview?.read_source || "")
+    + (preview?.read_at ? " · " + escapeHtml(localDateTime(preview.read_at)) : "") + '</p>';
+  const blockers = preview?.blockers || [];
+  $("serviceResetStatus").className = "write-guard-status " + (preview?.eligible === true ? "ok" : "warn");
+  $("serviceResetStatus").textContent = preview?.eligible === true
+    ? "Sicherheitsprüfung bestanden. Noch keine Authentifizierung und kein Schreibvorgang."
+    : "Entstörung gesperrt: " + (blockers.join(" · ") || "Zustand nicht sicher bestätigt");
+  updateServiceResetSubmit();
+}
+
+async function refreshServiceResetPreview() {
+  if (state.user?.role !== "admin" || state.serviceReset.busy) return;
+  $("serviceResetConfirm").checked = false;
+  setServiceResetBusy(true);
+  state.serviceReset.preview = null;
+  $("serviceResetPreview").innerHTML = '<p class="muted">Lese Block 22 und 24 zweimal direkt über den Serialworker …</p>';
+  $("serviceResetStatus").className = "write-guard-status neutral";
+  $("serviceResetStatus").textContent = "Frische Sicherheitsprüfung läuft …";
+  try {
+    renderServiceResetPreview(await api("/api/service-reset/preview"));
+  } catch (error) {
+    $("serviceResetPreview").innerHTML = '<p class="muted">Direktlesung fehlgeschlagen.</p>';
+    $("serviceResetStatus").className = "write-guard-status error";
+    $("serviceResetStatus").textContent = error.message;
+  } finally {
+    setServiceResetBusy(false);
+  }
+}
+
+async function openServiceResetModal(event) {
+  if (state.user?.role !== "admin") return;
+  state.serviceReset.trigger = event?.currentTarget || document.activeElement;
+  state.serviceReset.preview = null;
+  $("serviceResetConfirm").checked = false;
+  $("serviceResetModal").hidden = false;
+  document.body.classList.add("modal-open");
+  $("serviceResetClose").focus();
+  await refreshServiceResetPreview();
+}
+
+function closeServiceResetModal() {
+  if ($("serviceResetModal").hidden || state.serviceReset.busy) return;
+  $("serviceResetModal").hidden = true;
+  document.body.classList.remove("modal-open");
+  if (state.serviceReset.trigger instanceof HTMLElement) state.serviceReset.trigger.focus();
+  state.serviceReset.trigger = null;
+  state.serviceReset.preview = null;
+}
+
+async function submitServiceReset() {
+  if (state.serviceReset.busy) return;
+  if (!$("serviceResetConfirm").checked) {
+    return toast("Bitte die einmalige Entstörung ausdrücklich bestätigen.", "error");
+  }
+  const preview = state.serviceReset.preview;
+  if (preview?.eligible !== true || !preview?.request_token
+      || !Number.isInteger(Number(preview?.service_code))) {
+    state.serviceReset.preview = null;
+    $("serviceResetConfirm").checked = false;
+    updateServiceResetSubmit();
+    return toast(
+      "Die bestätigte Vorschau ist nicht mehr gültig. Zustand neu lesen und erneut bestätigen.",
+      "error",
+    );
+  }
+  setServiceResetBusy(true);
+  $("serviceResetStatus").className = "write-guard-status warn";
+  $("serviceResetStatus").textContent = "Prüfe genau die bestätigte Vorschau serverseitig erneut, authentifiziere und sende höchstens eine Quittierung …";
+  try {
+    // Submit exactly the preview the operator confirmed.  The backend binds
+    // its one-shot token to this service code and performs the complete
+    // direct double-read again under the serial lock.  A changed state must
+    // return 409 and requires a new preview plus a new confirmation; the UI
+    // must never silently replace the confirmed fault with a newer one.
+    const result = await api("/api/service-reset", {
+      method: "POST",
+      body: JSON.stringify({
+        confirm: true,
+        expected_service_code: Number(preview.service_code),
+        request_token: preview.request_token,
+      }),
+    });
+    state.serviceReset.preview = null;
+    $("serviceResetStatus").className = "write-guard-status ok";
+    const authenticatedNoWrite = result.unchanged === true
+      && Number(result.auth_level_granted) === 3;
+    $("serviceResetStatus").textContent = result.unchanged
+      ? (authenticatedNoWrite
+        ? "Störung war bei der Prüfung nach Auth 3 bereits gelöscht: kein Schreibvorgang; Auth-Level 0 bestätigt."
+        : "Keine aktive Störung mehr: kein Schreibvorgang und keine Authentifizierung.")
+      : "SC " + Number(result.service_code_before) + " einmalig quittiert, zweimal als 0 rückgelesen und Auth-Level 0 bestätigt.";
+    $("serviceResetConfirm").checked = false;
+    toast(result.unchanged ? "Störung war bereits gelöscht." : "Störung sicher entstört.");
+    await refreshLive();
+  } catch (error) {
+    const result = error.payload || {};
+    let message = error.message;
+    if (result.restart_guard_pending === true) {
+      if (result.audit_persisted === false && result.deauthenticated !== true) {
+        message = "Auth-Level 0 wurde nicht bestätigt, der persistente Neustartschutz blieb offen und das Pflichtaudit konnte nicht dauerhaft gespeichert werden. Nicht wiederholen; Reglerzustand prüfen und Support hinzuziehen.";
+      } else if (result.audit_persisted === false) {
+        message = "Der persistente Neustartschutz blieb offen und das Pflichtaudit konnte nicht dauerhaft gespeichert werden. Nicht wiederholen; Reglerzustand prüfen und Support hinzuziehen.";
+      } else if (result.write_confirmed === true && result.deauthenticated !== true) {
+        message = "Störung ist bestätigt gelöscht, aber Auth-Level 0 wurde nicht bestätigt und der persistente Neustartschutz blieb offen. Nicht wiederholen; Audit prüfen und Support hinzuziehen.";
+      } else {
+        message = result.write_confirmed === true
+          ? "Störung ist bestätigt gelöscht, aber der persistente Neustartschutz blieb offen. Nicht wiederholen; Audit prüfen und Support hinzuziehen."
+          : "Ausgang des einmaligen Schreibversuchs ist unklar. Der persistente Neustartschutz blockiert weitere Versuche; nicht wiederholen, Audit und Reglerzustand prüfen.";
+      }
+    } else if (result.unchanged === true && result.deauthenticated !== true
+        && result.auth_level_granted !== null && result.auth_level_granted !== undefined) {
+      message = "Störung war vor dem Schreibvorgang bereits gelöscht, aber Auth-Level 0 konnte nicht bestätigt werden. Keine Quittierung senden; Audit und Reglerzustand prüfen.";
+    } else if (result.write_confirmed === true && result.deauthenticated !== true) {
+      message = result.post_cleanup_readback_ok === true
+        ? "Störung bleibt read-only als gelöscht bestätigt, aber Auth-Level 0 konnte nicht bestätigt werden. Keine zweite Quittierung senden; Audit und Reglerzustand prüfen."
+        : "Störung ist bestätigt gelöscht, aber Auth-Level 0 und die abschließende read-only Zustandsprüfung blieben unklar. Keine zweite Quittierung senden; Audit und Reglerzustand prüfen.";
+    } else if (result.service_code_cleared === true) {
+      message = "Servicecode ist als 0 rückgelesen, aber ACK/Echo war nicht vollständig bestätigt. Keine zweite Quittierung senden; Audit prüfen.";
+    } else if (result.write_uncertain === true) {
+      message = "Ausgang des einmaligen Schreibversuchs ist unklar. Nicht wiederholen; Audit und Reglerzustand prüfen.";
+    } else if (error.status === 409) {
+      message = error.message + " Keine automatische Wiederholung wurde gesendet. Zustand neu lesen und erneut bestätigen.";
+    }
+    state.serviceReset.preview = null;
+    $("serviceResetConfirm").checked = false;
+    $("serviceResetStatus").className = "write-guard-status error";
+    $("serviceResetStatus").textContent = message;
+    toast(message, "error");
+    await refreshLive();
+  } finally {
+    setServiceResetBusy(false);
+  }
+}
+
 function dashboardField(block, key) {
   const derived = dashboardDerivedFields().find((item) => Number(item.block) === Number(block) && item.key === key);
   if (derived) return { ...derived, label: derived.label || derived.key, reserved: false, derived: true };
@@ -461,15 +878,15 @@ function dashboardDerivedFields() {
 }
 
 function operatingHoursPerStartDisplay() {
-  const metric = state.live?.operating_hours_per_start;
-  const ratio = Number(metric?.value);
-  const available = metric?.available === true && Number.isFinite(ratio);
+  const row = dashboardRow(OPERATING_HOURS_PER_START_BLOCK, OPERATING_HOURS_PER_START_KEY);
+  const ratio = Number(row?.value);
+  const available = Boolean(row) && Number.isFinite(ratio) && ratio >= 0 && ratio <= 25.5;
   const value = available
-    ? `${ratio.toLocaleString("de-DE", { maximumFractionDigits: 1 })} Bh/Start`
+    ? `${ratio.toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} Bh/Start`
     : "—";
   const extra = available
-    ? `Block 22 · ${Number(metric.starts).toLocaleString("de-DE")} Starts`
-    : "Block 22 · wartet auf gültige Betriebssekunden und Starts";
+    ? "Block 38 · direkt aus dem Regler"
+    : "Block 38 · wartet auf Reglerwert";
   return { value, extra };
 }
 
@@ -480,13 +897,590 @@ function operatingHoursPerStartCard() {
 
 function operatingHoursPerStartDetail() {
   const { value } = operatingHoursPerStartDisplay();
-  return `<div class="detail-item detail-item-derived"><div class="detail-label">Betriebsstunden je Start</div><div class="detail-value">${escapeHtml(value)}</div></div>`;
+  return `<div class="detail-item"><div class="detail-label">Betriebsstunden je Start</div><div class="detail-value">${escapeHtml(value)}</div></div>`;
+}
+
+function durationHms(value) {
+  const total = Number(value);
+  if (!Number.isFinite(total) || total < 0) return "—";
+  const seconds = Math.floor(total);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  return [hours, minutes, remainder].map((part) => String(part).padStart(2, "0")).join(":");
+}
+
+function runtime24hCard() {
+  // Main value: real runtime since start (ODM history / operating seconds).
+  // Sub line: 0x0f0e = Hka_Mw1.ulMotorlaufsekunden, the controller counter
+  // that may be reset deliberately. From 6 h on the daily night shutdown can
+  // apply; the 24-h threshold (86.370 s) only in one uninterrupted run.
+  const real = realRuntimeDisplay();
+  const metric = state.live?.runtime_24h;
+  const available = metric?.available === true
+    && Number.isFinite(Number(metric.counter_seconds))
+    && Number.isFinite(Number(metric.remaining_run_seconds));
+  const nightGate = Number(metric?.night_shutdown_gate_seconds) || 21600;
+  const nightText = metric?.night_shutdown_gate_reached === true || Number(metric?.counter_seconds) >= nightGate
+    ? "6-h-Schwelle Nachtabschaltung erreicht"
+    : "6 h (Nachtabschaltung) in " + durationHms(nightGate - Number(metric?.counter_seconds));
+  const dayText = metric?.threshold_reached
+    ? "24-h-Schwelle erreicht"
+    : "24 h in " + durationHms(metric?.remaining_run_seconds);
+  const auto = state.live?.runtime_auto_reset;
+  const autoText = auto?.enabled === true
+    ? " · Automatik an (≥ " + durationHms(auto.threshold_seconds) + " → " + durationHms(auto.target_seconds) + ")"
+    : (auto?.disabled_reason ? " · Automatik aus: " + auto.disabled_reason : "");
+  const counter = available
+    ? realRuntimeCounterText(metric.counter_seconds) + " · " + nightText + " · " + dayText
+      + " · nur aktive Laufzeit, Reset bei jedem Start"
+    : "Reglerzähler: RAM 0x0f0e · " + (metric?.error || "wartet auf validierte Messung");
+  const settings = state.user?.role === "admin"
+    ? '<button class="runtime24h-settings" type="button" data-open-runtime24h aria-label="Reglerzähler (0x0f0e) setzen" title="Reglerzähler (0x0f0e) setzen">⚙</button>'
+    : "";
+  const warn = real.reset ? " metric-card-warning" : "";
+  return '<article class="metric-card metric-card-derived metric-card-runtime24h' + warn + '">' + settings + '<div class="metric-label">Laufzeit seit Start</div><div class="metric-value">'
+    + escapeHtml(real.value) + '</div><div class="metric-extra">' + escapeHtml(real.detail)
+    + '</div><div class="metric-extra metric-extra-counter">' + escapeHtml(counter + autoText)
+    + '</div></article>';
+}
+
+function runtime24hInputSeconds(value) {
+  const match = String(value || "").trim().match(/^([0-9]{1,2}):([0-9]{2}):([0-9]{2})$/);
+  if (!match) throw new Error("Bitte den Zähler als HH:MM:SS eingeben.");
+  const hours = Number(match[1]), minutes = Number(match[2]), seconds = Number(match[3]);
+  if (minutes > 59 || seconds > 59) throw new Error("Minuten und Sekunden müssen zwischen 00 und 59 liegen.");
+  const total = hours * 3600 + minutes * 60 + seconds;
+  if (total < 0 || total > 86369) throw new Error("Zulässig sind 00:00:00 bis 23:59:29.");
+  return total;
+}
+
+function setRuntime24hBusy(busy) {
+  state.runtime24hWrite.busy = Boolean(busy);
+  $("runtime24hReload").disabled = Boolean(busy);
+  $("runtime24hSubmit").disabled = Boolean(busy) || !state.runtime24hWrite.preview;
+}
+
+async function refreshRuntime24hWritePreview() {
+  if (state.user?.role !== "admin") return;
+  setRuntime24hBusy(true);
+  $("runtime24hPreviewStatus").textContent = "Lese zwei kohärente Werte über den Serialworker …";
+  $("runtime24hCurrent").textContent = "Wird gelesen …";
+  try {
+    const preview = await api("/api/runtime-24h/write-preview");
+    state.runtime24hWrite.preview = preview;
+    $("runtime24hCurrent").textContent = durationHms(preview.counter_seconds)
+      + " (" + Number(preview.counter_seconds).toLocaleString("de-DE") + " s)";
+    $("runtime24hPreviewStatus").textContent = Number(preview.validated_samples) + " kohärente Direktlesungen · Frischer Ausgangswert ist nur für diesen Dialog gültig.";
+    if (!$("runtime24hValue").value) $("runtime24hValue").value = durationHms(preview.counter_seconds);
+  } catch (error) {
+    state.runtime24hWrite.preview = null;
+    $("runtime24hCurrent").textContent = "Nicht verfügbar";
+    $("runtime24hPreviewStatus").textContent = error.message;
+  } finally {
+    setRuntime24hBusy(false);
+  }
+}
+
+async function openRuntime24hModal(event) {
+  if (state.user?.role !== "admin") return;
+  state.runtime24hWrite.trigger = event?.target || document.activeElement;
+  state.runtime24hWrite.preview = null;
+  $("runtime24hModal").hidden = false;
+  document.body.classList.add("modal-open");
+  $("runtime24hWriteEnabled").checked = false;
+  $("runtime24hWriteStatus").className = "write-guard-status neutral";
+  $("runtime24hWriteStatus").textContent = "Es wurde noch nichts geschrieben.";
+  refreshRuntimeAuto();
+  await refreshRuntime24hWritePreview();
+  $("runtime24hValue").focus();
+}
+
+function closeRuntime24hModal() {
+  if ($("runtime24hModal").hidden || state.runtime24hWrite.busy) return;
+  $("runtime24hModal").hidden = true;
+  document.body.classList.remove("modal-open");
+  if (state.runtime24hWrite.trigger instanceof HTMLElement) state.runtime24hWrite.trigger.focus();
+  state.runtime24hWrite.trigger = null;
+  state.runtime24hWrite.preview = null;
+}
+
+async function submitRuntime24hCounter(event) {
+  event.preventDefault();
+  let preview = state.runtime24hWrite.preview;
+  if (!preview) return toast("Bitte zuerst einen frischen Istwert lesen.", "error");
+  let seconds;
+  try { seconds = runtime24hInputSeconds($("runtime24hValue").value); }
+  catch (error) { return toast(error.message, "error"); }
+  setRuntime24hBusy(true);
+  $("runtime24hWriteStatus").className = "write-guard-status warn";
+  $("runtime24hWriteStatus").textContent = "Lese, vergleiche, authentifiziere und schreibe kontrolliert …";
+  try {
+    // Refresh immediately before the guarded POST so an actively ticking
+    // counter does not become stale while the admin fills out the dialog.
+    preview = await api("/api/runtime-24h/write-preview");
+    state.runtime24hWrite.preview = preview;
+    $("runtime24hCurrent").textContent = durationHms(preview.counter_seconds)
+      + " · " + Number(preview.counter_seconds).toLocaleString("de-DE") + " s";
+    const result = await api("/api/runtime-24h/counter", {
+      method: "POST",
+      body: JSON.stringify({
+        value: seconds,
+        expected_counter: Number(preview.counter_seconds),
+        write_enabled: $("runtime24hWriteEnabled").checked,
+      }),
+    });
+    $("runtime24hWriteStatus").className = "write-guard-status ok";
+    $("runtime24hWriteStatus").textContent = result.unchanged
+      ? "Wert war bereits gesetzt; kein Write und keine Authentifizierung."
+      : "Geschrieben, sicher rückgelesen und auf Auth-Level 0 abgemeldet.";
+    state.runtime24hWrite.preview = { ...preview, counter_seconds: Number(result.counter_seconds) };
+    await refreshLive();
+    toast(result.unchanged ? "Reglerzähler (0x0f0e) war bereits unverändert." : "Reglerzähler (0x0f0e) sicher gesetzt.");
+  } catch (error) {
+    state.runtime24hWrite.preview = null;
+    $("runtime24hWriteStatus").className = "write-guard-status error";
+    $("runtime24hWriteStatus").textContent = error.message + " · Istwert neu lesen.";
+    toast(error.message, "error");
+  } finally {
+    setRuntime24hBusy(false);
+  }
+}
+
+function localDateTime(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString("de-DE", { day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit", second:"2-digit" });
+}
+
+function realRuntimeCounterText(seconds) {
+  // 0x0f0e is only a sub line wherever the real runtime is shown.
+  const metric = state.live?.real_runtime;
+  const value = Number.isFinite(Number(seconds)) ? Number(seconds) : Number(metric?.counter_0f0e);
+  if (!Number.isFinite(value) || value < 0) return "Reglerzähler: —";
+  let text = "Reglerzähler: " + durationHms(value);
+  if (metric?.counter_reset_detected === true) {
+    text += " – zurückgesetzt (Abweichung " + durationHms(metric.counter_deviation_seconds) + ")";
+  }
+  return text;
+}
+
+function realRuntimeDisplay() {
+  // Real runtime since start from ODM history (status points) or the
+  // independent operating seconds; never falls back to 0x0f0e silently.
+  const metric = state.live?.real_runtime;
+  const result = { available: false, running: false, value: "—", short: "—", detail: metric?.error || "wartet auf Motorstatus und Historie", reset: metric?.counter_reset_detected === true };
+  if (metric?.available !== true) return result;
+  if (metric.running === true && Number.isFinite(Number(metric.seconds))) {
+    const value = durationHms(metric.seconds);
+    return { ...result, available: true, running: true, value, short: value,
+      detail: "läuft seit " + localDateTime(metric.since) + (metric.since_exact ? "" : " (geschätzt)") + " · Quelle: " + String(metric.source || "—") };
+  }
+  const value = metric.state === "startet" ? "startet" : "steht";
+  return { ...result, available: true, value, short: value,
+    detail: metric.since ? value + " seit " + localDateTime(metric.since) + (metric.since_exact ? "" : " (Datenlücke)") : "kein Stoppzeitpunkt in der Historie" };
+}
+
+function renderRealRuntimeValues() {
+  const real = realRuntimeDisplay();
+  // SVG process views: only the real value, no controller counter.
+  ["v95-overview-betriebsstunden", "v95-tech-betriebsstunden", "compact-value-betriebsstunden"].forEach((id) => {
+    if ($(id)) $(id).textContent = real.short;
+  });
+  const board = $("board-value-betriebsstunden");
+  if (board) {
+    board.innerHTML = escapeHtml(real.running || !real.available ? real.value : real.detail)
+      + '<small class="board-subvalue' + (real.reset ? " is-warning" : "") + '">' + escapeHtml(realRuntimeCounterText()) + "</small>";
+  }
+}
+
+function realRuntimeDetail() {
+  const real = realRuntimeDisplay();
+  return '<div class="detail-item detail-item-derived"><div class="detail-label">Laufzeit seit Start</div><div class="detail-value">'
+    + escapeHtml(real.value) + '</div><div class="detail-extra">' + escapeHtml(realRuntimeCounterText()) + '</div></div>';
+}
+
+function runtimeAutoSeconds(value, label) {
+  const text = String(value || "").trim();
+  if (/^[0-9]+$/.test(text)) return Number(text);
+  const match = text.match(/^([0-9]{1,2}):([0-9]{2}):([0-9]{2})$/);
+  if (!match || Number(match[2]) > 59 || Number(match[3]) > 59) throw new Error(label + " als HH:MM:SS oder Sekunden angeben.");
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+const RUNTIME_AUTO_PHASES = {
+  disabled: "aus", watching: "überwacht", blocked: "blockiert", limit: "Limit erreicht, läuft weiter",
+  executing: "schreibt", confirmed: "zuletzt bestätigt gesetzt", due: "fällig",
+};
+
+function renderRuntimeAuto() {
+  const status = state.runtimeAuto;
+  if (!status) return;
+  const settings = status.settings || {};
+  $("runtimeAutoEnabled").checked = settings.enabled === true;
+  $("runtimeAutoThreshold").value = durationHms(settings.threshold_seconds);
+  $("runtimeAutoTarget").value = durationHms(settings.target_seconds);
+  $("runtimeAutoResets").value = String(settings.max_resets_per_run ?? 0);
+  $("runtimeAutoAcknowledge").checked = false;
+  const limits = status.limits || {};
+  const minutes = limits.min_runtime_minutes;
+  $("runtimeAutoLimits").textContent = "Grenzen: Y ≥ " + durationHms(limits.min_target_seconds)
+    + (minutes == null ? " (Mindestlaufzeit nicht frisch gelesen → universell 3 h)" : " (Mindestlaufzeit " + minutes + " min)")
+    + " · X > Y + " + limits.min_gap_seconds + " s · X ≤ " + durationHms(limits.max_threshold_seconds)
+    + " · Z 0–" + limits.max_resets_per_run + " · höchstens 1 Write je " + Math.round(limits.rate_limit_seconds / 60) + " min.";
+  const parts = ["Zustand: " + (RUNTIME_AUTO_PHASES[status.phase] || status.phase || "—")];
+  if (status.reason) parts.push(status.reason);
+  if (settings.disabled_reason && settings.enabled !== true) parts.push("ausgeschaltet: " + settings.disabled_reason);
+  if (Number(settings.max_resets_per_run) > 0) parts.push(status.resets_in_run + " von " + settings.max_resets_per_run + " Rücksetzungen in diesem Lauf");
+  if (status.last_result) parts.push("letzter Lauf " + localDateTime(status.last_result.at) + ": " + status.last_result.result);
+  $("runtimeAutoStatus").textContent = parts.join(" · ");
+  $("runtimeAutoStatus").className = "write-guard-status " + (status.phase === "blocked" ? "warn" : settings.enabled ? "ok" : "neutral");
+}
+
+async function refreshRuntimeAuto() {
+  if (state.user?.role !== "admin") return;
+  try {
+    state.runtimeAuto = await api("/api/runtime-auto-reset");
+    renderRuntimeAuto();
+  } catch (error) {
+    $("runtimeAutoStatus").className = "write-guard-status error";
+    $("runtimeAutoStatus").textContent = error.message;
+  }
+}
+
+async function saveRuntimeAuto(event) {
+  event.preventDefault();
+  let payload;
+  try {
+    payload = {
+      enabled: $("runtimeAutoEnabled").checked,
+      threshold_seconds: runtimeAutoSeconds($("runtimeAutoThreshold").value, "Schwelle X"),
+      target_seconds: runtimeAutoSeconds($("runtimeAutoTarget").value, "Zielwert Y"),
+      max_resets_per_run: Number($("runtimeAutoResets").value),
+      acknowledge: $("runtimeAutoAcknowledge").checked,
+    };
+  } catch (error) { return toast(error.message, "error"); }
+  try {
+    state.runtimeAuto = await api("/api/runtime-auto-reset", { method: "POST", body: JSON.stringify(payload) });
+    renderRuntimeAuto();
+    toast(payload.enabled ? "Automatische Rücksetzung gespeichert und aktiv." : "Automatische Rücksetzung gespeichert (aus).");
+  } catch (error) {
+    $("runtimeAutoStatus").className = "write-guard-status error";
+    $("runtimeAutoStatus").textContent = error.message;
+    toast(error.message, "error");
+  }
+}
+
+function renderClockSync() {
+  const status = state.clockSync;
+  if (!status) return;
+  const settings = status.settings || {};
+  $("clockSyncEnabled").checked = settings.enabled === true;
+  $("clockSyncTime").value = settings.time || "12:00";
+  $("clockSyncThreshold").value = String(settings.threshold_seconds ?? 30);
+  $("clockSyncMaxOffset").value = String(settings.max_offset_seconds ?? 3600);
+  $("clockSyncAcknowledge").checked = false;
+  const last = status.last_run;
+  const parts = [settings.enabled ? "Aktiv, täglich " + settings.time + " ODM-Zeit" : "Aus"];
+  if (settings.disabled_reason && !settings.enabled) parts.push(settings.disabled_reason);
+  if (status.next_run) parts.push("nächster Lauf " + localDateTime(status.next_run));
+  if (last) {
+    parts.push("letzter Lauf " + localDateTime(last.at) + " (" + (last.trigger === "auto" ? "automatisch" : "manuell") + "): "
+      + last.result + (last.reason ? " – " + last.reason : ""));
+  } else parts.push("noch kein Lauf");
+  $("clockSyncStatus").textContent = parts.join(" · ");
+  $("clockSyncStatus").className = "write-guard-status " + (last?.result === "fehlgeschlagen" ? "error" : settings.enabled ? "ok" : "neutral");
+}
+
+async function refreshClockSync() {
+  if (state.user?.role !== "admin") return;
+  try {
+    state.clockSync = await api("/api/controller-clock/sync");
+    renderClockSync();
+  } catch (error) {
+    $("clockSyncStatus").className = "write-guard-status error";
+    $("clockSyncStatus").textContent = error.message;
+  }
+}
+
+async function saveClockSync(event) {
+  event.preventDefault();
+  const payload = {
+    enabled: $("clockSyncEnabled").checked,
+    time: $("clockSyncTime").value,
+    threshold_seconds: Number($("clockSyncThreshold").value),
+    max_offset_seconds: Number($("clockSyncMaxOffset").value),
+    acknowledge: $("clockSyncAcknowledge").checked,
+  };
+  try {
+    state.clockSync = await api("/api/controller-clock/sync/settings", { method: "POST", body: JSON.stringify(payload) });
+    renderClockSync();
+    toast("Uhrabgleich gespeichert.");
+  } catch (error) {
+    $("clockSyncStatus").className = "write-guard-status error";
+    $("clockSyncStatus").textContent = error.message;
+    toast(error.message, "error");
+  }
+}
+
+async function syncClockNow() {
+  const clock = state.live?.controller_clock;
+  const offset = clock?.available === true ? controllerClockOffsetText(Number(clock.offset_seconds)) : "unbekannt";
+  if (!window.confirm("Regleruhr jetzt auf die ODM-Zeit stellen?\nAktueller Versatz: " + offset
+    + "\nAuth 3 · schreibt Block 50 (Offset 36 + Kommando-Bit 5) · Firmware stellt RAM-Uhr und RTC · Readback ±3 s · Deauth · Audit.")) return;
+  const button = $("clockSyncNow");
+  button.disabled = true;
+  $("clockSyncStatus").className = "write-guard-status warn";
+  $("clockSyncStatus").textContent = "Prüfe NTP, lese Block 50/22, prüfe Zeitfenster, authentifiziere und schreibe …";
+  try {
+    const result = await api("/api/controller-clock/sync", { method: "POST", body: JSON.stringify({ confirm: true }) });
+    toast("Uhrabgleich: " + result.result + (result.reason ? " – " + result.reason : ""), result.result === "fehlgeschlagen" ? "error" : "neutral");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    await refreshClockSync();
+    await refreshLive();
+  }
+}
+
+function ramTelemetryValue(item) {
+  if (item?.available !== true || !Number.isFinite(Number(item.value))) return "nicht verfügbar";
+  const value = Number(item.value);
+  const sign = item.signed === true && value > 0 ? "+" : "";
+  return sign + value.toLocaleString("de-DE") + " " + String(item.unit || "");
+}
+
+function systemDetailItem(label, value, available = true, toggle = null) {
+  // Same label/value structure as the status entries of "Status und Meldungen".
+  // An optional toggle turns the label into a button for a detail list.
+  const labelHtml = toggle
+    ? '<button type="button" class="detail-label detail-label-toggle" ' + toggle.attribute + ' aria-expanded="'
+      + (toggle.expanded ? "true" : "false") + '" aria-controls="' + toggle.controls + '">' + escapeHtml(label)
+      + ' <span aria-hidden="true">' + (toggle.expanded ? "▴" : "▾") + '</span></button>'
+    : '<div class="detail-label">' + escapeHtml(label) + '</div>';
+  return '<div class="detail-item' + (available ? "" : " detail-item-unavailable") + '">'
+    + labelHtml + '<div class="detail-value">' + escapeHtml(value) + '</div></div>';
+}
+
+function displayStatusLine(number) {
+  // Display text as computed from controller data; never an older value.
+  const metric = state.live?.display_status;
+  const text = metric?.["line" + number];
+  const available = metric?.["line" + number + "_available"] === true && typeof text === "string";
+  return { available, value: available ? (text.trim() || "—") : "nicht verfügbar" };
+}
+
+function displayStatusDetails() {
+  const line1 = displayStatusLine(1);
+  const line2 = displayStatusLine(2);
+  return systemDetailItem("Display Zeile 1", line1.value, line1.available)
+    + systemDetailItem("Display Zeile 2", line2.value, line2.available, {
+      attribute: "data-display-status-history",
+      controls: "displayStatusHistory",
+      expanded: state.displayStatusHistory.open === true,
+    });
+}
+
+function controllerClockOffsetText(seconds) {
+  const sign = seconds < 0 ? "−" : "+";
+  const total = Math.abs(Math.round(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = String(total % 60).padStart(2, "0");
+  return hours
+    ? sign + hours + ":" + String(minutes).padStart(2, "0") + ":" + rest + " h"
+    : sign + minutes + ":" + rest + " min";
+}
+
+function controllerClockDetail() {
+  // Controller clock from the last fresh block-50 read; never an older value.
+  const clock = state.live?.controller_clock;
+  const date = new Date(clock?.controller_time || "");
+  const available = clock?.available === true && Number.isFinite(Number(clock.offset_seconds)) && !Number.isNaN(date.getTime());
+  const value = available
+    ? date.toLocaleString("de-DE", { day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit", second:"2-digit" })
+      + " · " + controllerClockOffsetText(Number(clock.offset_seconds)) + " zur ODM-Zeit"
+    : "nicht verfügbar";
+  return systemDetailItem("Regleruhr", value, available);
+}
+
+function displayStatusCard() {
+  // Optional overview tile with both display lines.
+  const metric = state.live?.display_status;
+  const line1 = displayStatusLine(1);
+  const line2 = displayStatusLine(2);
+  return '<article class="metric-card metric-card-derived metric-card-display-status"><div class="metric-label">Display-Status</div><div class="metric-value metric-value-lines">'
+    + escapeHtml(line1.value) + "<br>" + escapeHtml(line2.value) + '</div><div class="metric-extra">berechnet aus Reglerdaten'
+    + (metric?.recorded_at ? " · " + escapeHtml(String(metric.recorded_at)) : "") + '</div></article>';
+}
+
+function displayStatusEventTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || "—");
+  return date.toLocaleString("de-DE", { day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit", second:"2-digit" });
+}
+
+function renderDisplayStatusHistory() {
+  const target = $("displayStatusHistory");
+  if (!target) return;
+  const history = state.displayStatusHistory;
+  target.hidden = history.open !== true;
+  if (!history.open) return;
+  if (history.error) {
+    target.innerHTML = '<p class="muted">' + escapeHtml(history.error) + '</p>';
+    return;
+  }
+  if (!history.items.length) {
+    target.innerHTML = '<p class="muted">' + (history.inFlight ? "Lade Wechsel …" : "Noch keine Wechsel gespeichert.") + '</p>';
+    return;
+  }
+  const rows = history.items.map((item) => '<tr><td>' + escapeHtml(displayStatusEventTime(item.recorded_at)) + '</td><td>'
+    + escapeHtml(String(item.line1 || "").trim()) + '</td><td>' + escapeHtml(String(item.line2 || "").trim()) + '</td></tr>').join("");
+  target.innerHTML = '<table class="data-table"><thead><tr><th>Zeitpunkt</th><th>Display Zeile 1</th><th>Display Zeile 2</th></tr></thead><tbody>'
+    + rows + '</tbody></table>';
+}
+
+async function loadDisplayStatusHistory() {
+  const history = state.displayStatusHistory;
+  if (history.inFlight) return;
+  history.inFlight = true;
+  renderDisplayStatusHistory();
+  try {
+    const data = await api("/api/display-status/events?limit=50");
+    history.items = Array.isArray(data.items) ? data.items : [];
+    history.error = "";
+  } catch (error) {
+    history.error = "Verlauf nicht verfügbar: " + String(error.message || error);
+  } finally {
+    history.inFlight = false;
+    renderDisplayStatusHistory();
+  }
+}
+
+function toggleDisplayStatusHistory(event) {
+  const button = event.target.closest("[data-display-status-history]");
+  if (!button) return;
+  const history = state.displayStatusHistory;
+  history.open = !history.open;
+  button.setAttribute("aria-expanded", history.open ? "true" : "false");
+  const marker = button.querySelector("span");
+  if (marker) marker.textContent = history.open ? "▴" : "▾";
+  renderDisplayStatusHistory();
+  if (history.open) loadDisplayStatusHistory();
+}
+
+function refreshDisplayStatusHistoryOnChange() {
+  // While the list is open, reload it when the displayed text changes.
+  const metric = state.live?.display_status;
+  const lines = metric?.available === true ? String(metric.line1) + "\n" + String(metric.line2) : "";
+  const history = state.displayStatusHistory;
+  if (lines === history.lines) return;
+  history.lines = lines;
+  if (history.open && lines) loadDisplayStatusHistory();
+}
+
+function ramTelemetryDetail(item) {
+  const available = item?.available === true && Number.isFinite(Number(item.value));
+  return systemDetailItem(item?.label || item?.key || "RAM", ramTelemetryValue(item), available);
+}
+
+function renderRamTelemetry() {
+  const target = $("ramTelemetryCards");
+  if (!target) return;
+  const items = Array.isArray(state.live?.ram_telemetry) ? state.live.ram_telemetry : [];
+  target.innerHTML = items.map(ramTelemetryDetail).join("")
+    || '<p class="muted">Noch keine RAM-Telemetrie gelesen.</p>';
+}
+
+function ramTelemetryCard() {
+  // Optional overview tile: one compact line per allowlisted RAM value.
+  const items = Array.isArray(state.live?.ram_telemetry) ? state.live.ram_telemetry : [];
+  const lines = items.map((item) => escapeHtml(String(item?.label || item?.key || "RAM")) + ": " + escapeHtml(ramTelemetryValue(item)));
+  const recorded = items.find((item) => item?.available === true)?.recorded_at || "";
+  return '<article class="metric-card metric-card-derived metric-card-ram-telemetry"><div class="metric-label">Interne Reglerwerte</div><div class="metric-value metric-value-lines">'
+    + (lines.join("<br>") || "—") + '</div><div class="metric-extra">CPU-0-RAM · Dienst 0x02 · 10-s-Zyklus'
+    + (recorded ? " · " + escapeHtml(String(recorded)) : " · wartet auf validierte Messung") + '</div></article>';
+}
+
+function sootRegenerationDisplay() {
+  const metric = state.live?.soot_filter_regeneration;
+  if (!metric || metric.supported === null || metric.supported === undefined) {
+    return { available: false, value: "nicht verfügbar", extra: "Dachs-Typcode (Block 24) noch nicht gelesen" };
+  }
+  if (metric.supported === false) {
+    return { available: false, value: "nicht unterstützt", extra: "Typcode " + String(metric.type_code) + " ohne Rußfilterbit · keine RAM-Lesung" };
+  }
+  if (metric.available !== true || !Number.isFinite(Number(metric.state))) {
+    return { available: false, value: "nicht verfügbar", extra: "RAM 0x0db3/0x0de6/0x0d82 · " + String(metric.error || "wartet auf validierte Messung") };
+  }
+  const state_ = Number(metric.state);
+  let value = String(metric.state_label || "unbekannt");
+  let detail = "";
+  if (state_ === 1) {
+    detail = "noch " + String(metric.minutes_remaining) + " Betriebsminuten (" + String(metric.minutes_in_regeneration) + "/" + String(metric.duration_minutes) + ")";
+  } else if (state_ === 2) {
+    detail = "Fortsetzung mit vollen " + String(metric.duration_minutes) + " Betriebsminuten beim nächsten Lauf";
+  } else if (metric.regeneration_due === true) {
+    value = "inaktiv · fällig";
+    detail = "Intervall von " + String(metric.interval_minutes) + " Betriebsminuten erreicht";
+  } else {
+    detail = "nächste in " + String(metric.minutes_until_next) + " Betriebsminuten (" + String(metric.minutes_since_regeneration) + "/" + String(metric.interval_minutes) + ")";
+  }
+  const interruptions = "Unterbrechungen " + String(metric.interruptions) + " von " + String(metric.interruption_limit)
+    + (metric.interruption_latched ? " · Latch gesetzt" : "");
+  return {
+    available: true,
+    value,
+    detail,
+    interruptions,
+    extra: detail + " · " + interruptions + " · nur aktive Laufzeit, pausiert bei Stillstand · " + String(metric.recorded_at || ""),
+  };
+}
+
+function sootRegenerationCard() {
+  const { value, extra } = sootRegenerationDisplay();
+  return '<article class="metric-card metric-card-derived metric-card-soot"><div class="metric-label">Rußfilterregeneration</div><div class="metric-value">'
+    + escapeHtml(value) + '</div><div class="metric-extra">' + escapeHtml(extra) + '</div></article>';
+}
+
+function renderSootRegeneration() {
+  const target = $("sootRegenerationCards");
+  if (!target) return;
+  const metric = state.live?.soot_filter_regeneration;
+  const display = sootRegenerationDisplay();
+  if (!display.available) {
+    target.innerHTML = systemDetailItem("Zustand", display.value, false);
+    return;
+  }
+  const state_ = Number(metric.state);
+  const progress = state_ === 1
+    ? systemDetailItem("Restdauer", String(metric.minutes_remaining) + " min")
+    : systemDetailItem("Nächste Regeneration", metric.regeneration_due === true ? "fällig" : "in " + String(metric.minutes_until_next) + " min");
+  target.innerHTML = systemDetailItem("Zustand", display.value)
+    + progress
+    + systemDetailItem("Unterbrechungen", String(metric.interruptions) + " von " + String(metric.interruption_limit)
+      + (metric.interruption_latched ? " · Latch gesetzt" : ""))
+    + systemDetailItem("Dachs-Typcode", "0x" + Number(metric.type_code).toString(16).padStart(2, "0"));
 }
 
 function dashboardCardHtml(card) {
   const field = dashboardField(card.block, card.key);
-  if (field?.derived === true && field?.source === "operating_hours_per_start") {
+  if (Number(card.block) === OPERATING_HOURS_PER_START_BLOCK
+      && card.key === OPERATING_HOURS_PER_START_KEY) {
     return operatingHoursPerStartCard();
+  }
+  if (field?.derived === true && field?.source === "runtime_24h_shutdown") {
+    return runtime24hCard();
+  }
+  if (field?.derived === true && field?.source === "soot_filter_regeneration") {
+    return sootRegenerationCard();
+  }
+  if (field?.derived === true && field?.source === "ram_telemetry") {
+    return ramTelemetryCard();
+  }
+  if (field?.derived === true && field?.source === "display_status") {
+    return displayStatusCard();
   }
   const row = dashboardRow(card.block, card.key);
   const knownSeries = (state.schema?.series || []).find((item) => Number(item.block) === Number(card.block) && item.key === card.key);
@@ -500,12 +1494,18 @@ function renderOverview() {
   const cards = dashboardCards();
   const configuredCards = cards.map(dashboardCardHtml).join("");
   $("overviewCards").innerHTML = configuredCards || `<article class="metric-card metric-card-empty"><div class="metric-label">Keine Kacheln ausgewählt</div><div class="metric-extra">Als Admin über „Bearbeiten“ Werte hinzufügen.</div></article>`;
-  const motor = ["motorstatus", "drehzahl", "wirkleistung", "betriebsstunden", "kuehlwasser", "regler"].map((id) => seriesValue(id)).filter((row, index) => row && !isInvalidSensor(["motorstatus", "drehzahl", "wirkleistung", "betriebsstunden", "kuehlwasser", "regler"][index], row));
+  const motorIds = ["motorstatus", "drehzahl", "wirkleistung", "kuehlwasser", "regler"];
+  const motor = motorIds.map((id) => seriesValue(id)).filter((row, index) => row && !isInvalidSensor(motorIds[index], row));
   const motorCards = motor.map((row) => `<div class="detail-item"><div class="detail-label">${escapeHtml(row.label)}</div><div class="detail-value">${formatValue(row.value, row.unit)}</div></div>`);
+  motorCards.splice(Math.min(3, motorCards.length), 0, realRuntimeDetail());
   motorCards.push(operatingHoursPerStartDetail());
   $("motorStateCards").innerHTML = motorCards.join("");
   const system = ["servicecode", "warncode", "anzahl_warnungen", "anzahl_stoerungen"].map((id) => seriesValue(id)).filter(Boolean);
-  $("systemStateCards").innerHTML = system.map((row) => `<div class="detail-item"><div class="detail-label">${escapeHtml(row.label)}</div><div class="detail-value">${formatValue(row.value, row.unit)}</div></div>`).join("") || `<p class="muted">Noch keine Statusdaten.</p>`;
+  $("systemStateCards").innerHTML = displayStatusDetails() + controllerClockDetail()
+    + system.map((row) => `<div class="detail-item"><div class="detail-label">${escapeHtml(row.label)}</div><div class="detail-value">${formatValue(row.value, row.unit)}</div></div>`).join("");
+  refreshDisplayStatusHistoryOnChange();
+  renderSootRegeneration();
+  renderRamTelemetry();
   const ids = {
     "board-value-dachs-austritt":"dachs_austritt",
     "board-value-dachs-eintritt":"dachs_eintritt",
@@ -519,7 +1519,6 @@ function renderOverview() {
     "board-value-drehzahl":"drehzahl",
     "board-value-wirkleistung":"wirkleistung",
     "board-value-wirkleistung-soll":"wirkleistung_soll",
-    "board-value-betriebsstunden":"betriebsstunden",
     "board-value-motorstatus":"motorstatus",
     "board-value-betriebsstunden-gesamt":"betriebsstunden_gesamt",
     "board-value-starts":"starts",
@@ -536,7 +1535,6 @@ function renderOverview() {
     "v95-overview-drehzahl":"drehzahl",
     "v95-overview-wirkleistung":"wirkleistung",
     "v95-overview-wirkleistung-soll":"wirkleistung_soll",
-    "v95-overview-betriebsstunden":"betriebsstunden",
     "v95-overview-motorstatus":"motorstatus",
     "v95-overview-betriebsstunden-gesamt":"betriebsstunden_gesamt",
     "v95-overview-starts":"starts",
@@ -551,11 +1549,12 @@ function renderOverview() {
     "v95-tech-drehzahl":"drehzahl",
     "v95-tech-wirkleistung":"wirkleistung",
     "v95-tech-wirkleistung-soll":"wirkleistung_soll",
-    "v95-tech-betriebsstunden":"betriebsstunden",
     "v95-tech-motorstatus":"motorstatus",
     "v95-tech-betriebsstunden-gesamt":"betriebsstunden_gesamt",
   };
   Object.entries(ids).forEach(([elementId, seriesId]) => setText(elementId, seriesId));
+  // "Laufzeit seit Start" is the real runtime; 0x0f0e only as a sub line.
+  renderRealRuntimeValues();
   setElectricalText("spannung", "V", ["board-value-voltage", "v95-overview-voltage", "v95-tech-voltage"], 1);
   setElectricalText("strom", "A", ["board-value-current", "v95-overview-current", "v95-tech-current"], 1);
   setElectricalText("impedanz", "Ohm", ["board-value-impedance", "v95-tech-impedance"], 2);
@@ -807,7 +1806,7 @@ function refreshMonitorStatus() {
   $("monitorStats").innerHTML = [
     ["Web-Serialzugriff", serialEnabled ? "Aktiv" : "Pausiert"],
     ["Poll-Intervall", `${monitor.interval_seconds ?? "—"} s`],
-    ["Block 26", `alle ${monitor.slow_interval_seconds ?? 10} s`],
+    ["Block 26", `schnell · alle ${monitor.interval_seconds ?? 0.75} s`],
     ["Zyklen", monitor.cycles ?? 0],
     ["Gute Blöcke", monitor.ok_blocks ?? 0],
     ["Fehlerblöcke", monitor.failed_blocks ?? 0],
@@ -925,7 +1924,7 @@ function renderDiagnosis250() {
       const trend = data.trends_k_per_1000_bh?.[key];
       const latestValue = latest?.metrics?.[key];
       const trendText = trend === null || trend === undefined ? "Trend: erst ab fünf vollständigen Intervallen" : `Trend: ${trend >= 0 ? "+" : ""}${diagnosisNumber(trend, 1)} K/1000 Bh`;
-      const powerText = key === "power" && latest?.power_in_band_percent !== null ? ` · ${diagnosisNumber(latest.power_in_band_percent, 0, " % im Sollband")}` : "";
+      const powerText = key === "power" && latest?.power_in_band_percent !== null ? ` · ${diagnosisNumber(latest.power_in_band_percent, 0, " %")}` : "";
       const noticeCount = metricNoticeCounts.get(key) || 0;
       const noticeBadge = noticeCount > 0 ? `<b class="diagnosis-metric-badge">(${noticeCount})</b>` : "";
       return `<article class="diagnosis-metric-card"><header><span>${escapeHtml(definition.title || key)}${noticeBadge}</span><strong>${diagnosisNumber(latestValue, 2, definition.unit ? ` ${definition.unit}` : "")}</strong></header>${diagnosisSparkline(values)}<p>${escapeHtml(definition.normal || "")}${escapeHtml(powerText)}</p><small>${escapeHtml(trendText)}</small></article>`;
@@ -942,7 +1941,37 @@ function renderDiagnosis250() {
   const grouped = { hint: [], warning: [], protection: [], data: [] };
   for (const notice of data?.notices || []) (grouped[notice.category] || grouped.data).push(notice);
   const labels = { hint: "Herstellerhinweise", warning: "Warnungen", protection: "Schutz / Störung", data: "Datenqualität" };
-  $("diagnosis250Notices").innerHTML = Object.entries(grouped).map(([category, notices]) => `<section class="diagnosis-notice-group diagnosis-${category}"><h4>${labels[category]} <span>${notices.length}</span></h4>${notices.length ? notices.map((notice) => `<article><strong>${escapeHtml(notice.title)}</strong><p>${escapeHtml(notice.text)}</p></article>`).join("") : `<p class="muted">Keine aktuellen Einträge.</p>`}</section>`).join("");
+  const shutdownEvents = data?.available ? ((data.intervals || []).at(-1)?.protection_shutdown_events || []) : [];
+  const noticeHtml = (notice) => notice.metric === "protection_shutdown" && shutdownEvents.length
+    ? diagnosisShutdownNotice(notice, shutdownEvents)
+    : `<article><strong>${escapeHtml(notice.title)}</strong><p>${escapeHtml(notice.text)}</p></article>`;
+  $("diagnosis250Notices").innerHTML = Object.entries(grouped).map(([category, notices]) => `<section class="diagnosis-notice-group diagnosis-${category}"><h4>${labels[category]} <span>${notices.length}</span></h4>${notices.length ? notices.map(noticeHtml).join("") : `<p class="muted">Keine aktuellen Einträge.</p>`}</section>`).join("");
+}
+
+function diagnosisShutdownTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || "—");
+  return date.toLocaleString("de-DE", { day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit", second:"2-digit" });
+}
+
+function diagnosisShutdownNotice(notice, events) {
+  // Clickable count: lists the stored status-10 transitions of the running interval.
+  const open = state.diagnosis250.shutdownsOpen === true;
+  const rows = [...events].reverse().map((event) => {
+    const before = event.previous_status === null || event.previous_status === undefined
+      ? "—" : `${event.previous_status} · ${event.previous_status_label || ""}`;
+    const service = event.service_code_after ? `SC ${event.service_code_after}` : "—";
+    return `<tr><td>${escapeHtml(diagnosisShutdownTime(event.recorded_at))}</td><td>${escapeHtml(`${event.status} · ${event.status_label || ""}`)}</td><td>${escapeHtml(before)}</td><td>${diagnosisNumber(event.operating_hours, 1, " Bh")}</td><td>${escapeHtml(service)}</td></tr>`;
+  }).join("");
+  return `<article class="diagnosis-shutdown-notice"><button type="button" class="diagnosis-shutdown-toggle" data-diagnosis-shutdowns aria-expanded="${open}" aria-controls="diagnosis250ShutdownList"><strong>${escapeHtml(notice.title)}</strong><span aria-hidden="true">${open ? "▴" : "▾"}</span></button><p>${escapeHtml(notice.text)}</p><div id="diagnosis250ShutdownList" class="table-wrap diagnosis-shutdown-list"${open ? "" : " hidden"}><table class="data-table"><thead><tr><th>Zeitpunkt</th><th>Art</th><th>Vorher</th><th>Betriebsstunden</th><th>Servicecode danach</th></tr></thead><tbody>${rows}</tbody></table></div></article>`;
+}
+
+function toggleDiagnosisShutdowns(event) {
+  const button = event.target.closest("[data-diagnosis-shutdowns]");
+  if (!button) return;
+  state.diagnosis250.shutdownsOpen = !state.diagnosis250.shutdownsOpen;
+  renderDiagnosis250();
+  $("diagnosis250Notices").querySelector("[data-diagnosis-shutdowns]")?.focus();
 }
 
 async function refreshDiagnosis250(showErrors = true, force = false) {
@@ -1006,12 +2035,16 @@ function renderMaintenanceReports() {
     const exportLinks = item.status === "completing"
       ? `<span class="muted">Nach Abschluss verfügbar</span>`
       : `<a href="${escapeHtml(appUrl(`/api/maintenance/reports/${encodeURIComponent(item.id)}/export/html`))}">HTML</a><a href="${escapeHtml(appUrl(`/api/maintenance/reports/${encodeURIComponent(item.id)}/export/pdf`))}">PDF</a><a href="${escapeHtml(appUrl(`/api/maintenance/reports/${encodeURIComponent(item.id)}/export/json`))}">JSON</a>`;
-    return `<tr class="maintenance-report-${escapeHtml(item.status || "unknown")}"><td><button class="history-ring" type="button" data-maintenance-report="${escapeHtml(item.id)}">#${escapeHtml(item.id)}</button></td><td>${escapeHtml(formatArchiveDate(item.created_at))}${snapshotText}</td><td><span class="status-pill ${presentation.tone}">${escapeHtml(presentation.label)}</span></td><td>${escapeHtml(item.technician || "—")}</td><td>${formatValue(summary.operating_hours, "Bh")}</td><td>${backupCell}</td><td class="report-links">${exportLinks}</td><td>${deleteAction}</td></tr>`;
+    const displayNumber = item.maintenance_number || `#${item.id}`;
+    return `<tr class="maintenance-report-${escapeHtml(item.status || "unknown")}"><td><button class="history-ring" type="button" data-maintenance-report="${escapeHtml(item.id)}">${escapeHtml(displayNumber)}</button></td><td>${escapeHtml(formatArchiveDate(item.created_at))}${snapshotText}</td><td><span class="status-pill ${presentation.tone}">${escapeHtml(presentation.label)}</span></td><td>${escapeHtml(item.technician || "—")}</td><td>${formatValue(summary.operating_hours, "Bh")}</td><td>${backupCell}</td><td class="report-links">${exportLinks}</td><td>${deleteAction}</td></tr>`;
   }).join("") || `<tr><td colspan="8" class="muted">Noch keine Berichte.</td></tr>`;
 }
 
 function maintenanceStatusPresentation(item = {}) {
-  if (item.status === "completed") return { label: item.completion_mode === "demo" ? "Demo abgeschlossen" : "Abgeschlossen", tone: "ok" };
+  if (item.status === "completed") {
+    if (item.completion_mode === "local_intermediate") return { label: `Zwischenwartung${item.local_reason ? ` · ${item.local_reason}` : ""}`, tone: "ok" };
+    return { label: item.completion_mode === "demo" ? "Demo abgeschlossen" : "Abgeschlossen", tone: "ok" };
+  }
   if (item.status === "completing") return { label: "Abschluss läuft", tone: "warn" };
   if (item.status === "uncertain") return { label: "Zielzustand unklar – prüfen", tone: "error" };
   if (item.status === "draft") return { label: "Entwurf", tone: "warn" };
@@ -1056,7 +2089,7 @@ function renderMaintenanceBackupSummary(item) {
   if (!container) return;
   const backup = maintenanceBackupMetadata(item);
   if (!backup) {
-    container.innerHTML = `<div class="maintenance-backup-card legacy"><div><p class="eyebrow">SICHERHEITSBACKUP</p><strong>Altbericht ohne verknüpftes Pflichtbackup</strong><small>Berichte aus früheren Versionen bleiben weiterhin lesbar.</small></div></div>`;
+    container.innerHTML = `<div class="maintenance-backup-card legacy"><div><p class="eyebrow">SICHERHEITSBACKUP</p><strong>Altbericht ohne verknüpftes Pflichtbackup</strong></div></div>`;
     return;
   }
   const requested = archiveTargetCount(backup, "requested");
@@ -1130,7 +2163,7 @@ async function deleteMaintenanceReport(reportId) {
   const backupNotice = backup
     ? ` Das verknüpfte Backup #${backup.id} bleibt unverändert im geschützten Backup-Archiv erhalten.`
     : " Bereits vorhandene Sicherheitsbackups bleiben unverändert im geschützten Backup-Archiv erhalten.";
-  const question = `Wartung #${reportId} (${status}) wirklich dauerhaft löschen? Snapshot, Protokoll und Exporte werden aus dem lokalen Pi-Archiv entfernt. Ein bereits erfolgter MSR2-Abschluss wird dadurch nicht rückgängig gemacht.${backupNotice}`;
+  const question = `Wartung #${reportId} (${status}) wirklich dauerhaft löschen? Snapshot, Protokoll und Exporte werden aus dem lokalen ODM-Archiv entfernt. Ein bereits erfolgter MSR2-Abschluss wird dadurch nicht rückgängig gemacht.${backupNotice}`;
   if (!window.confirm(question)) return;
   clearTimeout(state.maintenance.autosaveTimer);
   state.maintenance.autosaveTimer = null;
@@ -1154,10 +2187,11 @@ function renderMaintenanceEditor() {
   const item = state.maintenance.current;
   if (!item) { clearMaintenancePw4(); $("maintenanceEditor").hidden = true; $("maintenanceBackupSummary").innerHTML = ""; return; }
   $("maintenanceEditor").hidden = false;
-  $("maintenanceReportNumber").textContent = `#${item.id}`;
+  $("maintenanceReportNumber").textContent = item.maintenance_number ? `Nr. ${item.maintenance_number}` : `#${item.id}`;
   $("maintenanceReportTitle").textContent = item.status === "draft" ? "Wartungsentwurf bearbeiten"
     : item.status === "completing" ? "Wartungsabschluss läuft"
     : item.status === "uncertain" ? "Zielzustand unklar – fachlich prüfen"
+    : item.completion_mode === "local_intermediate" ? `Zwischenwartung ${item.maintenance_number || ""}`
     : item.completion_mode === "demo" ? "Abgeschlossener Demo-Wartungsbericht" : "Abgeschlossener Wartungsbericht";
   const snapshot = item.snapshot || {};
   const snapshotText = (snapshot.attempted_blocks || []).length ? ` · Snapshot ${(snapshot.captured_blocks || []).length}/${snapshot.attempted_blocks.length} Blöcke` : "";
@@ -1181,6 +2215,10 @@ function renderMaintenanceEditor() {
   });
   const protocol = item.protocol || {};
   $("maintenanceFuelType").value = protocol.fuel_type || "gas";
+  const fuelCheck = item.fuel_check || {};
+  $("maintenanceFuelNote").hidden = !fuelCheck.message && !fuelCheck.locked;
+  $("maintenanceFuelNote").textContent = fuelCheck.message || (fuelCheck.locked ? "aus Regler-Typcode 0x000f0a" : "");
+  $("maintenanceFuelNote").classList.toggle("warn", Boolean(fuelCheck.message));
   $("maintenanceTechnician").value = protocol.technician || "";
   $("maintenanceNotes").value = protocol.notes || "";
   const statuses = item.checklist_status || [];
@@ -1194,12 +2232,20 @@ function renderMaintenanceEditor() {
   $("maintenanceSupplemental").innerHTML = (item.supplemental_definition || []).map((definition, index) => `<label><span><b>Z${index + 1}</b>${escapeHtml(definition.label)}</span><select data-supplemental-id="${escapeHtml(definition.id)}"><option value="">Noch offen …</option>${supplementalStatuses.map((status) => `<option value="${escapeHtml(status.value)}" ${protocol.supplemental?.[definition.id] === status.value ? "selected" : ""}>${escapeHtml(status.label)}</option>`).join("")}</select></label>`).join("");
   const editable = state.user?.role === "admin" && item.status === "draft";
   $("maintenanceForm").querySelectorAll("input,select,textarea,button").forEach((element) => { element.disabled = !editable; });
+  if (fuelCheck.locked) $("maintenanceFuelType").disabled = true;
   $("maintenanceCompletion").hidden = !editable;
+  $("maintenanceIntermediateCompletion").hidden = !editable;
+  $("maintenanceIntermediateReason").disabled = !editable;
+  $("maintenanceIntermediateComplete").disabled = !editable;
+  if (editable && Number(state.maintenance.reasonReportId) !== Number(item.id)) {
+    $("maintenanceIntermediateReason").value = "";
+    state.maintenance.reasonReportId = item.id;
+  }
   const liveCompletion = Boolean(item.maintenance_live_writes_enabled);
   $("maintenanceCompletion").classList.toggle("live", liveCompletion);
   $("maintenanceCompletionEyebrow").textContent = liveCompletion ? "REGLERABSCHLUSS" : "DEMOMODUS · HARDWARE GESPERRT";
   $("maintenanceCompletionTitle").textContent = liveCompletion ? "Wartung am MSR2 bestätigen" : "Testlauf lokal abschließen";
-  $("maintenanceCompletionDescription").textContent = liveCompletion ? "Schreibt Block 100 und setzt anschließend das Bestätigungsbit in Block 104. Beide Schritte benötigen ACK und Readback." : "Validiert und archiviert das Protokoll ausschließlich auf dem Pi. Block 100, Block 104 und das Bestätigungsbit bleiben unverändert.";
+  $("maintenanceCompletionDescription").textContent = liveCompletion ? "Schreibt Block 100 und setzt anschließend das Bestätigungsbit in Block 104. Beide Schritte benötigen ACK und Readback." : "Validiert und archiviert das Protokoll ausschließlich auf ODM. Block 100, Block 104 und das Bestätigungsbit bleiben unverändert.";
   $("maintenanceAuthLevelField").hidden = !liveCompletion;
   $("maintenancePass4Field").hidden = !liveCompletion;
   if (!liveCompletion) clearMaintenancePw4();
@@ -1207,9 +2253,10 @@ function renderMaintenanceEditor() {
   $("maintenanceComplete").textContent = liveCompletion ? "Wartung endgültig abschließen" : "Demolauf abschließen";
   $("maintenanceComplete").classList.toggle("danger", liveCompletion);
   $("maintenanceComplete").classList.toggle("primary", !liveCompletion);
-  $("maintenanceSaveHint").textContent = item.status === "draft" ? "Änderungen werden lokal auf dem Pi gespeichert."
+  $("maintenanceSaveHint").textContent = item.status === "draft" ? "Änderungen werden lokal auf ODM gespeichert."
     : item.status === "completing" ? "Abschluss läuft. Nicht neu laden, löschen oder erneut ausführen."
     : item.status === "uncertain" ? "Zielzustand unklar – vor jedem weiteren Schritt Regler, ACK, Readback und Audit fachlich prüfen."
+    : item.completion_mode === "local_intermediate" ? `Zwischenwartung ${item.maintenance_number} lokal abgeschlossen · Grund: ${item.local_reason} · MSR2 unverändert`
     : item.completion_mode === "demo" ? `Demolauf lokal abgeschlossen am ${new Date(item.completed_at).toLocaleString("de-DE")} · MSR2 unverändert` : `Abgeschlossen am ${new Date(item.completed_at).toLocaleString("de-DE")}`;
 }
 
@@ -1290,6 +2337,30 @@ async function completeMaintenance() {
   finally { button.disabled = state.maintenance.current?.status !== "draft"; }
 }
 
+async function completeLocalIntermediateMaintenance() {
+  const item = state.maintenance.current;
+  if (!item || item.status !== "draft" || state.user?.role !== "admin") return;
+  const reason = $("maintenanceIntermediateReason").value.trim();
+  if (!reason) { toast("Grund für die Zwischenwartung ist erforderlich.", "error"); return; }
+  if (!window.confirm("Zwischenwartung jetzt ausschließlich lokal speichern? Der MSR2-Regler und der Dachs bleiben unverändert.")) return;
+  clearTimeout(state.maintenance.autosaveTimer);
+  state.maintenance.autosaveTimer = null;
+  const button = $("maintenanceIntermediateComplete");
+  button.disabled = true;
+  try {
+    state.maintenance.current = await api(`/api/maintenance/reports/${item.id}/complete-local-intermediate`, {
+      method: "POST",
+      body: JSON.stringify({ protocol: maintenanceProtocolFromForm(), reason }),
+    });
+    renderMaintenanceEditor();
+    await refreshMaintenance(false);
+    toast(`Zwischenwartung ${state.maintenance.current.maintenance_number} lokal gespeichert. Der MSR2 blieb unverändert.`);
+  } catch (error) {
+    toast(error.message, "error");
+    button.disabled = false;
+  }
+}
+
 function renderRegisterTabs() {
   const regulatorTabs = (state.schema?.blocks || []).map((block) => {
     const visibleFields = (block.fields || []).filter((field) => state.showReserved || !field.reserved).length;
@@ -1364,9 +2435,9 @@ function renderMessageHistory() {
   }).join("");
   const admin = state.user?.role === "admin";
   const rawFields = (state.block?.fields || []).filter((field) => state.showReserved || !field.reserved);
-  const rawEditor = rawFields.length ? `<details class="message-history-raw"><summary>Rohfelder bearbeiten${admin ? " (Admin)" : " (nur lesen)"}</summary><p class="muted">Die Tabelle oben bleibt verständlich. Hier können die physikalischen Werte für Meldungswert, gepackten Typ/Modul und Zeitstempel wie bei den übrigen Feldern vorbereitet werden.</p><div class="register-grid">${rawFields.map((field) => `<div class="register-field ${admin ? "" : "readonly"}"><div class="register-field-head"><label for="field-${encodeURIComponent(field.key)}">${escapeHtml(field.label || field.key)}</label><small>${escapeHtml(field.type || "")} · ${field.size ?? "?"} B</small></div><input id="field-${encodeURIComponent(field.key)}" data-key="${escapeHtml(field.key)}" data-baseline="${escapeHtml(field.raw ?? "")}" value="${escapeHtml(field.raw ?? "")}" ${admin ? "" : "disabled"}><div class="field-meta">${escapeHtml(field.key)} · Offset ${field.offset ?? "?"}</div></div>`).join("")}</div></details>` : "";
+  const rawEditor = rawFields.length ? `<details class="message-history-raw"><summary>Rohfelder bearbeiten${admin ? " (Admin)" : " (nur lesen)"}</summary><div class="register-grid">${rawFields.map((field) => `<div class="register-field ${admin ? "" : "readonly"}"><div class="register-field-head"><label for="field-${encodeURIComponent(field.key)}">${escapeHtml(field.label || field.key)}</label><small>${escapeHtml(field.type || "")} · ${field.size ?? "?"} B</small></div><input id="field-${encodeURIComponent(field.key)}" data-key="${escapeHtml(field.key)}" data-baseline="${escapeHtml(field.raw ?? "")}" value="${escapeHtml(field.raw ?? "")}" ${admin ? "" : "disabled"}><div class="field-meta">${escapeHtml(field.key)} · Offset ${field.offset ?? "?"}</div></div>`).join("")}</div></details>` : "";
   $("settingsFields").innerHTML = `<div class="message-history-card">
-    <div class="message-history-summary"><span class="status-pill ok">Aktueller Ring: ${escapeHtml(currentText)}</span><span class="muted">10 Einträge · Anzeige und Rohwerte</span></div>
+    <div class="message-history-summary"><span class="status-pill ok">Aktueller Ring: ${escapeHtml(currentText)}</span></div>
     <div class="table-wrap"><table class="data-table message-history-table"><thead><tr><th>Ring</th><th>Zeitstempel</th><th>Meldung</th><th>Meldungs-ID</th><th>Typ</th><th>Modul</th></tr></thead><tbody>${rows || `<tr><td colspan="6" class="muted">Keine Meldungseinträge vorhanden.</td></tr>`}</tbody></table></div>
     ${rawEditor}
   </div>`;
@@ -1376,7 +2447,7 @@ function renderRawFieldsDetails(note="Die verständliche Auswertung bleibt oben;
   const admin = state.user?.role === "admin";
   const fields = (state.block?.fields || []).filter((field) => state.showReserved || !field.reserved);
   if (!fields.length) return "";
-  return `<details class="message-history-raw"><summary>Rohfelder bearbeiten${admin ? " (Admin)" : " (nur lesen)"}</summary><p class="muted">${escapeHtml(note)}</p><div class="register-grid">${fields.map((field) => {
+  return `<details class="message-history-raw"><summary>Rohfelder bearbeiten${admin ? " (Admin)" : " (nur lesen)"}</summary><div class="register-grid">${fields.map((field) => {
     const editValue = field.edit_value ?? field.value ?? field.raw ?? "";
     return `<div class="register-field ${admin ? "" : "readonly"}"><div class="register-field-head"><label for="field-${encodeURIComponent(field.key)}">${escapeHtml(field.label || field.key)}</label><small>${escapeHtml(field.type || "")} · ${field.size ?? "?"} B</small></div><input id="field-${encodeURIComponent(field.key)}" data-key="${escapeHtml(field.key)}" data-baseline="${escapeHtml(editValue)}" value="${escapeHtml(editValue)}" ${admin ? "" : "disabled"}><div class="field-meta">${escapeHtml(field.key)} · Offset ${field.offset ?? "?"} · ${escapeHtml(field.unit || "")}</div></div>`;
   }).join("")}</div></details>`;
@@ -1392,9 +2463,9 @@ function renderOilRefillHistory() {
     <td>${entry.has_event ? escapeHtml(entry.amount) : "—"}</td>
   </tr>`).join("");
   $("settingsFields").innerHTML = `<div class="message-history-card">
-    <div class="message-history-summary"><span class="status-pill ok">Nachfüllzähler: ${escapeHtml(history?.counter ?? "—")}</span><span class="muted">3 Einträge · je Zeitstempel, Betriebsstunden und Menge</span></div>
+    <div class="message-history-summary"><span class="status-pill ok">Nachfüllzähler: ${escapeHtml(history?.counter ?? "—")}</span></div>
     <div class="table-wrap"><table class="data-table"><thead><tr><th>Eintrag</th><th>Zeitstempel</th><th>Betriebsstunden beim Nachfüllen</th><th>Nachgefüllte Menge (Rohwert)</th></tr></thead><tbody>${rows || `<tr><td colspan="4" class="muted">Keine Einträge vorhanden.</td></tr>`}</tbody></table></div>
-    <p class="source-note">Für die Menge ist noch keine belastbare Einheit oder Skalierung bestätigt. Deshalb wird sie bewusst als Rohwert angezeigt.</p>
+    <p class="source-note">Wird als Rohwert angezeigt.</p>
     ${renderRawFieldsDetails("Block 102 besteht aus drei ineinander verschachtelten 10-Byte-Datensätzen. Änderungen werden wie alle Felder erst im Dry-Run vorbereitet und nur bei aktivierter Schreibfreigabe übertragen.")}
   </div>`;
 }
@@ -1408,7 +2479,7 @@ function renderMcStatus() {
   const actors = (controller) => (controller?.actors || []).map((actor) => `<span class="actor-chip ${actor.active ? "active" : ""}">${escapeHtml(actor.label)}: ${actor.active ? "EIN" : "AUS"}</span>`).join("");
   $("settingsFields").innerHTML = `<div class="message-history-card mc-status-card">
     <div class="mc-summary-grid">${summaries}</div>
-    <p class="source-note">Die 64 Statusbits werden einzeln dargestellt. Für die separaten Rohbytes „Fehlergrund“ und „Fehlercode“ ist noch keine belastbare Code-Tabelle dokumentiert; unbekannte Bedeutungen werden nicht geraten.</p>
+    <p class="source-note">Die 64 Statusbits werden einzeln dargestellt. Für die separaten Rohbytes „Fehlergrund“ und „Fehlercode“ ist noch keine belastbare Code-Tabelle dokumentiert.</p>
     <div class="mc-io-grid"><section><h4>MC1-Ausgänge</h4><div class="actor-list">${actors(controllers[0])}</div></section><section><h4>MC2-Ausgänge</h4><div class="actor-list">${actors(controllers[1])}</div></section><section><h4>Dachs-Zustand</h4><div class="actor-list"><span class="actor-chip ${status?.state?.oil_pressure ? "active" : ""}">Öldruck: ${status?.state?.oil_pressure ? "EIN" : "AUS"}</span><span class="actor-chip ${status?.state?.liquid_switch ? "active" : ""}">Flüssigkeitsschalter: ${status?.state?.liquid_switch ? "EIN" : "AUS"}</span></div></section></div>
     <details class="mc-flags" open><summary>Aufschlüsselung aller MC1-/MC2-Statusfelder</summary><div class="table-wrap"><table class="data-table mc-table"><thead><tr><th>Bit</th><th>Prüfung / Rückmeldung</th><th>MC1</th><th>MC2</th></tr></thead><tbody>${flagRows}</tbody></table></div></details>
     ${renderRawFieldsDetails("Die MC-Map enthält die beiden 8-Byte-Statusfelder, Zustand und Aktorausgänge. Fehlergrund, Fehlercode und Schutzart liegen an den Offsets 46–51.")}
@@ -1451,7 +2522,6 @@ function renderServiceHistory() {
     <div class="table-wrap"><table class="data-table message-history-table service-history-table"><thead><tr><th>Ring</th><th>Zeitstempel</th><th>Code</th><th>Bedeutung</th><th>Status</th><th>Diagnosehinweise</th></tr></thead><tbody>${serviceRows || `<tr><td colspan="6" class="muted">Keine Serviceeinträge vorhanden.</td></tr>`}</tbody></table></div>
     <h4>Warnhistorie</h4>
     <div class="table-wrap"><table class="data-table message-history-table"><thead><tr><th>Ring</th><th>Zeitstempel</th><th>Warncode</th><th>Bedeutung</th><th>Typ</th><th>Modul</th></tr></thead><tbody>${warningRows || `<tr><td colspan="6" class="muted">Keine Warneinträge vorhanden.</td></tr>`}</tbody></table></div>
-    <p class="source-note">Code, Zeitstempel, Status und Ringposition stammen direkt aus den gelesenen Blöcken. Nicht sicher dokumentierte Bedeutungen bleiben als Code sichtbar.</p>
     ${renderRawFieldsDetails(`Rohfelder des aktuell gewählten Teilblocks ${state.selectedBlock}; die Übersicht liest Block 80 und 82 immer gemeinsam.`)}
   </div>`;
 }
@@ -1466,9 +2536,15 @@ function renderMotorSnapshot() {
   $("settingsFields").innerHTML = `<div class="message-history-card motor-snapshot-card">
     <div class="snapshot-head"><div><span class="status-pill ok">Messwertspeicher ${escapeHtml(snapshot?.slot ?? "—")}</span><span class="status-pill">Netz/MC: Block ${escapeHtml(snapshot?.paired_mc_block ?? "—")}</span></div><div class="snapshot-service-context">${contextText}</div></div>
     <div class="snapshot-grid">${sections}</div>
-    <p class="source-note">Die Werte sind nach Betrieb, internen Temperaturen, Heizkreis/Speicher, Regelwerten sowie Aktoren/Hardware gruppiert. Der zugehörige Netz- und MC-Messwertspeicher liegt im angegebenen Folgeblock.</p>
     ${renderRawFieldsDetails(`Alle physikalischen Felder von Block ${state.selectedBlock} bleiben hier vollständig sichtbar und für Admins editierbar.`)}
   </div>`;
+}
+
+function runShutdownClass(severity) {
+  // Block 30 shutdown ring: 24-h safety shutdown orange, faults red, normal stops keep the run colour.
+  if (severity === "fault") return "shutdown-fault";
+  if (severity === "safety") return "shutdown-safety";
+  return "";
 }
 
 function renderRunHistory() {
@@ -1480,14 +2556,23 @@ function renderRunHistory() {
     ["Thermische Energie Kondenser", summary.thermal_work_condenser_kwh, "kWh"], ["Warmwassermenge", summary.hot_water_m3, "m³"],
   ];
   const metricCards = metrics.map(([label,value,unit]) => `<article class="run-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? "—")} ${escapeHtml(unit)}</strong></article>`).join("");
-  const dayRows = (history?.days || []).map((day) => `<div class="run-day-row"><div class="run-day-label"><strong>${escapeHtml(day.day_label)}</strong><span>${escapeHtml(day.date_text)} · Ring ${day.ring_slot}</span></div><div class="run-raster" title="${day.runtime_hours} Betriebsstunden">${(day.quarters || []).map((active,index) => `<i class="${active ? "active" : ""}" title="${String(Math.floor(index / 4)).padStart(2,"0")}:${String((index % 4) * 15).padStart(2,"0")}"></i>`).join("")}</div><div class="run-day-stats"><strong>${day.runtime_hours} h</strong><span>${day.starts} Starts</span></div></div>`).join("");
-  const shutdownRows = (history?.shutdowns || []).map((entry) => `<tr class="${entry.timestamp_plausible ? "" : "history-empty"}"><td>${entry.index}</td><td>${escapeHtml(entry.timestamp_text || "—")}</td><td>${entry.has_event ? `${escapeHtml(entry.code)} (${escapeHtml(entry.code_hex)})` : "—"}</td><td>${escapeHtml(entry.reason || "—")}</td></tr>`).join("");
+  const dayRows = (history?.days || []).map((day) => {
+    const marks = new Map((day.shutdown_marks || []).map((mark) => [Number(mark.quarter), mark]));
+    const cells = (day.quarters || []).map((active, index) => {
+      const time = `${String(Math.floor(index / 4)).padStart(2,"0")}:${String((index % 4) * 15).padStart(2,"0")}`;
+      const mark = marks.get(index);
+      const classes = [active ? "active" : "", runShutdownClass(mark?.severity)].filter(Boolean).join(" ");
+      const title = mark ? `${time} · Abschaltung ${mark.timestamp_text || ""} · ${mark.reason || ""}` : time;
+      return `<i class="${classes}" title="${escapeHtml(title)}"></i>`;
+    }).join("");
+    return `<div class="run-day-row"><div class="run-day-label"><strong>${escapeHtml(day.day_label)}</strong><span>${escapeHtml(day.date_text)} · Ring ${day.ring_slot}</span></div><div class="run-raster" title="${day.runtime_hours} Betriebsstunden">${cells}</div><div class="run-day-stats"><strong>${day.runtime_hours} h</strong><span>${day.starts} Starts</span></div></div>`;
+  }).join("");
+  const shutdownRows = (history?.shutdowns || []).map((entry) => `<tr class="${[entry.timestamp_plausible ? "" : "history-empty", runShutdownClass(entry.severity)].filter(Boolean).join(" ")}"><td>${entry.index}</td><td>${escapeHtml(entry.timestamp_text || "—")}</td><td>${entry.has_event ? `${escapeHtml(entry.code)} (${escapeHtml(entry.code_hex)})` : "—"}</td><td>${escapeHtml(entry.reason || "—")}</td></tr>`).join("");
   $("settingsFields").innerHTML = `<div class="message-history-card run-history-card">
     <div class="run-summary-grid">${metricCards}</div>
     <div class="run-axis"><span>00:00</span><span>04:00</span><span>08:00</span><span>12:00</span><span>16:00</span><span>20:00</span><span>24:00</span></div>
     <div class="run-days">${dayRows}</div>
     <section class="run-shutdowns"><h4>Letzte Abschaltgründe</h4><div class="table-wrap"><table class="data-table"><thead><tr><th>Eintrag</th><th>Zeitstempel</th><th>Abschaltcode</th><th>Text des Abschaltcodes</th></tr></thead><tbody>${shutdownRows}</tbody></table></div></section>
-    <p class="source-note">Gemeinsame Auswertung der Blöcke 28 (Ring/Starts/Tage 1–5), 30 (Tage 6–7/Abschaltungen), 31 (aktueller Tag) und 32 (Summenwerte).</p>
     ${renderRawFieldsDetails(`Rohfelder des aktuell gewählten Teilblocks ${state.selectedBlock}; das Diagramm liest immer alle vier zusammengehörigen Blöcke.`)}
   </div>`;
 }
@@ -1524,11 +2609,11 @@ function renderFieldEditor(field, admin) {
 function renderFieldHelp(field) {
   const notes = [];
   if (field.help) notes.push(field.help);
-  if (field.write !== false && Array.isArray(field.choices) && field.choices.length) notes.push("Bekannte Auswahlwerte; die manuelle Rohwert-Eingabe bleibt verfügbar.");
   if (!field.help && (field.min !== null && field.min !== undefined || field.max !== null && field.max !== undefined)) {
-    const lower = field.min !== null && field.min !== undefined ? field.min : "offen";
-    const upper = field.max !== null && field.max !== undefined ? field.max : "offen";
-    notes.push(`Dokumentierter Bereich: ${lower} bis ${upper}${field.step !== null && field.step !== undefined ? `, Schritt ${field.step}` : ""}.`);
+    const lower = field.min !== null && field.min !== undefined ? field.min : "";
+    const upper = field.max !== null && field.max !== undefined ? field.max : "";
+    const unit = field.unit ? ` ${field.unit}` : "";
+    notes.push(`${lower}–${upper}${unit}`);
   }
   return notes.length ? `<div class="field-help">${escapeHtml(notes.join(" "))}</div>` : "";
 }
@@ -1601,12 +2686,7 @@ function renderFields() {
   const fields = (state.block?.fields || []).filter((field) => state.showReserved || !field.reserved);
   const critical = Boolean(state.block?.critical);
   const readOnlyTarget = state.block?.writable === false;
-  const warningText = readOnlyTarget
-    ? `${state.block.read_only_reason || "Dieser Block ist nur lesbar."} Die Anzeige löst weder Authentifizierung noch ein Schreibtelegramm aus.`
-    : state.selectedBlock === 20
-      ? "Besonders sicherheitsrelevante Schutzkonfiguration. Der originale Vollblock-Schreibdienst ist belegt, am aktuellen Gerät aber noch nicht durch einen Live-Write erprobt. Schreiben erfolgt nur mit Admin-Haken, Auth, bytegenauem CAS, ACK und vollständigem Readback; für exakte Expertenwerte gibt es je Feld den Rohwert-Schalter."
-      : "Besonders sicherheitsrelevante Einstellungen. Die rote Markierung schützt vor Verwechslung mit normalen Reglerfeldern; Schreiben erfolgt wie bei allen Registern nur mit Admin-Haken, Auth, ACK und Readback.";
-  const warning = critical ? `<div class="network-protection-warning"><strong>NETZSCHUTZ · CPU ${state.selectedCpu} · BLOCK ${state.selectedBlock}${readOnlyTarget ? " · NUR LESEN" : ""}</strong><span>${escapeHtml(warningText)}</span></div>` : "";
+  const warning = critical ? `<div class="network-protection-warning"><strong>NETZSCHUTZ · CPU ${state.selectedCpu} · BLOCK ${state.selectedBlock}${readOnlyTarget ? " · NUR LESEN" : ""}</strong></div>` : "";
   $("settingsFields").innerHTML = warning + fields.map((field) => `<div class="register-field ${admin && field.write !== false ? "" : "readonly"} ${critical || field.critical ? "critical-field" : ""}">
     <div class="register-field-head"><label for="field-${encodeURIComponent(field.key)}">${escapeHtml(field.label || field.key)}</label><small>${escapeHtml(field.type || "")} · ${field.size} B</small></div>
     ${field.write === false ? renderReadOnlyFieldValue(field) : renderFieldEditor(field, admin)}
@@ -1822,7 +2902,7 @@ async function changePassword(event) {
 }
 
 function selectSystemTab(tab) {
-  const selected = ["users", "tokens", "maintenance", "firmware"].includes(tab) ? tab : "users";
+  const selected = ["users", "tokens", "maintenance", "notifications", "firmware", "updates"].includes(tab) ? tab : "users";
   state.system.selectedTab = selected;
   document.querySelectorAll("[data-system-tab]").forEach((button) => {
     button.classList.toggle("active", button.dataset.systemTab === selected);
@@ -1832,6 +2912,9 @@ function selectSystemTab(tab) {
   });
   if (selected === "tokens") refreshSystemTokens();
   else if (selected === "maintenance") refreshMaintenanceMode();
+  else if (selected === "notifications") refreshEmailNotifications();
+  else if (selected === "firmware") refreshSc123Limit();
+  else if (selected === "updates") refreshUpdateStatus();
   else if (selected === "users") refreshSystemUsers();
 }
 
@@ -1842,6 +2925,93 @@ function bytesToBase64(buffer) {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
   }
   return btoa(binary);
+}
+
+function renderUpdateStatus() {
+  const data = state.system.update;
+  if (!data) return;
+  const release = data.available;
+  $("updateBadge").hidden = !release;
+  $("updateAutomatic").checked = Boolean(data.settings?.automatic);
+  $("updateWindowStart").value = data.settings?.window_start || "02:00";
+  $("updateWindowEnd").value = data.settings?.window_end || "04:00";
+  const operation = data.operation;
+  let text = release ? "Version " + release.version + " ist verfügbar." : "Version " + data.current_version + " ist aktuell.";
+  let tone = release ? "warn" : "ok";
+  if (data.error) { text = "Updateprüfung: " + data.error; tone = "error"; }
+  if (operation) { text = "Update " + (operation.version || "") + ": " + (operation.status || operation.phase || "läuft"); tone = ["failed", "rolled-back"].includes(operation.status) ? "error" : (operation.status === "succeeded" ? "ok" : "warn"); }
+  $("updateStatus").textContent = text;
+  $("updateStatus").className = "write-guard-status " + tone;
+  $("updateRelease").innerHTML = release ? "<div class=\"backup-archive-metrics\"><div><span>Zielversion</span><strong>" + escapeHtml(release.version) + "</strong><small>" + escapeHtml(release.tag) + "</small></div><div><span>Signatur/Kompatibilität</span><strong>" + (release.compatible ? "Geprüft" : "Manuell erforderlich") + "</strong><small>" + escapeHtml(release.manual_required_reason || "Rollback-kompatibel") + "</small></div><div><span>Veröffentlicht</span><strong>" + escapeHtml(release.published_at) + "</strong><small>SHA-256 " + escapeHtml(String(release.wheel_sha256 || "").slice(0, 16)) + "…</small></div></div><pre class=\"update-notes\">" + escapeHtml(release.release_notes || "Keine Release Notes") + "</pre>" : "";
+  $("updatePreviewButton").disabled = !(release?.compatible);
+}
+
+async function refreshUpdateStatus(force = false) {
+  if (state.user?.role !== "admin") return;
+  try {
+    state.system.update = await api(force ? "/api/update/check" : "/api/update/status", force ? {method:"POST", body:"{}"} : {});
+    renderUpdateStatus();
+  } catch (error) { $("updateStatus").textContent = error.message; $("updateStatus").className = "write-guard-status error"; }
+}
+
+async function refreshUpdateBadge() {
+  try {
+    const data = await api("/api/update/status");
+    const available = Boolean(data.available || data.update_available);
+    $("updateHeaderBadge").hidden = !available;
+    if (state.user?.role === "admin") { state.system.update = data; renderUpdateStatus(); }
+  } catch (_) { $("updateHeaderBadge").hidden = true; }
+}
+
+async function saveUpdateSettings(event) {
+  event.preventDefault();
+  try {
+    state.system.update = await api("/api/update/settings", {method:"POST", body:JSON.stringify({automatic:$("updateAutomatic").checked, timezone:"Europe/Berlin", window_start:$("updateWindowStart").value, window_end:$("updateWindowEnd").value, password:$("updateAutomaticPassword").value, acknowledge:$("updateAutomaticAck").checked})});
+    $("updateAutomaticPassword").value = ""; $("updateAutomaticAck").checked = false;
+    renderUpdateStatus(); toast("Updateeinstellung gespeichert.");
+  } catch (error) { toast(error.message, "error"); }
+}
+
+async function previewUpdate(event) {
+  event.preventDefault(); state.system.updatePreview = null;
+  try {
+    const preview = await api("/api/update/preview", {method:"POST", body:JSON.stringify({password:$("updatePassword").value})});
+    $("updatePassword").value = ""; state.system.updatePreview = preview;
+    $("updatePreview").hidden = false;
+    $("updatePreview").innerHTML = "<strong>Exakte Vorschau: " + escapeHtml(preview.release.version) + "</strong><p>Wheel SHA-256: <code>" + escapeHtml(preview.release.wheel_sha256) + "</code></p><p>Bestätigung: <code>" + escapeHtml(preview.confirmation) + "</code></p>";
+    $("updateConfirmRow").hidden = false; $("updateConfirmation").value = ""; $("updateApply").disabled = true;
+  } catch (error) { toast(error.message, "error"); }
+}
+
+function updateRequestId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function pollUpdateAfterRestart(requestId) {
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      const status = await api("/api/update/status"); state.system.update = status; renderUpdateStatus();
+      if (status.operation?.request_id === requestId && ["succeeded", "failed", "rolled-back"].includes(status.operation.status)) return;
+    } catch (_) { /* Expected while both fixed services restart. */ }
+  }
+  toast("Update läuft weiter; Status nach erneutem Laden prüfen.", "warn");
+}
+
+async function applyUpdate() {
+  const preview = state.system.updatePreview;
+  if (!preview || $("updateConfirmation").value !== preview.confirmation) return;
+  const requestId = updateRequestId(); $("updateApply").disabled = true;
+  try {
+    const accepted = await api("/api/update/apply", {method:"POST", body:JSON.stringify({preview_token:preview.preview_token, confirmation:preview.confirmation, request_id:requestId})});
+    if (accepted?.status && accepted.status !== "requested") throw new Error("Updateanfrage wurde nicht angenommen");
+  } catch (error) {
+    const disconnected = error instanceof TypeError || error?.name === "AbortError";
+    if (!disconnected) { state.system.updatePreview = null; toast(error.message, "error"); return; }
+    /* Only a real transport disconnect is ambiguous after helper start. */
+  }
+  state.system.updatePreview = null; await pollUpdateAfterRestart(requestId);
 }
 
 function renderFirmwareInspection(result) {
@@ -1883,6 +3053,295 @@ async function inspectFirmwareFile(event) {
   } finally {
     $("firmwareFile").disabled = false;
   }
+}
+
+
+function clearSc123LimitPreview() {
+  state.system.sc123Preview = null;
+  $("sc123LimitPreview").hidden = true;
+  $("sc123LimitPreview").innerHTML = "";
+  $("sc123LimitConfirmRow").hidden = true;
+  $("sc123LimitConfirm").checked = false;
+  $("sc123LimitApply").disabled = true;
+}
+
+function renderSc123LimitStatus(data) {
+  state.system.sc123Limit = data;
+  const status = $("sc123LimitStatus");
+  const button = $("sc123LimitPreviewButton");
+  if (!data || !data.available) {
+    status.textContent = "Nicht verfügbar: " + ((data && data.blockers) || ["einstellbare Firmware nicht erkannt"]).join(" · ");
+    status.className = "write-guard-status error";
+    button.disabled = true;
+    return;
+  }
+  if (!$("sc123LimitValue").dataset.userEdited) {
+    $("sc123LimitValue").value = data.threshold_c == null ? 180 : data.threshold_c;
+  }
+  const fallback = data.fallback_active
+    ? " · Speicherdatensatz ungültig, Firmware-Fallback " + data.fallback_c + " °C aktiv"
+    : "";
+  const commands = (data.pending_commands || []).length
+    ? " · Schreiben gesperrt: " + data.pending_commands.join(", ")
+    : "";
+  status.textContent = "Einstellbare Firmware erkannt · aktuelle SC123-Grenze " + data.threshold_c + " °C" + fallback + commands;
+  status.className = "write-guard-status " + ((data.write_safe && !data.fallback_active) ? "ok" : "warn");
+  button.disabled = !data.write_safe;
+}
+
+async function refreshSc123Limit() {
+  if (state.user?.role !== "admin") return;
+  clearSc123LimitPreview();
+  const status = $("sc123LimitStatus");
+  $("sc123LimitRefresh").disabled = true;
+  $("sc123LimitPreviewButton").disabled = true;
+  status.textContent = "Lese Block 50 und Block 60 jeweils zweimal frisch …";
+  status.className = "write-guard-status neutral";
+  try {
+    renderSc123LimitStatus(await api("/api/sc123-temperature-limit"));
+  } catch (error) {
+    state.system.sc123Limit = null;
+    status.textContent = "SC123-Firmwareprüfung fehlgeschlagen: " + error.message;
+    status.className = "write-guard-status error";
+  } finally {
+    $("sc123LimitRefresh").disabled = false;
+  }
+}
+
+function renderSc123LimitPreview(preview) {
+  state.system.sc123Preview = preview;
+  const panel = $("sc123LimitPreview");
+  const blockers = preview.blockers || [];
+  panel.hidden = false;
+  panel.innerHTML = "<dl>"
+    + "<div><dt>Aktuell</dt><dd>" + escapeHtml(preview.threshold_c) + " °C" + (preview.fallback_active ? " (Fallback)" : "") + "</dd></div>"
+    + "<div><dt>Ziel</dt><dd>" + escapeHtml(preview.target_c) + " °C</dd></div>"
+    + "<div><dt>Firmwarebeweis</dt><dd>" + (preview.heartbeat_ok && preview.stable_reads && preview.storage_stable_reads ? "Heartbeat +1 und beide Blöcke stabil" : "nicht bestanden") + "</dd></div>"
+    + "<div><dt>Vorgang</dt><dd>" + (preview.transition_required ? "ein Block-60-Schreibvorgang mit RAM-/NVM-Prüfung" : "bereits eingestellt · kein Schreibvorgang") + "</dd></div>"
+    + "</dl>"
+    + (blockers.length ? '<p class="error-text">' + escapeHtml(blockers.join(" · ")) + "</p>" : "");
+  $("sc123LimitConfirmRow").hidden = !preview.eligible;
+  $("sc123LimitConfirm").checked = false;
+  $("sc123LimitApply").disabled = true;
+}
+
+async function previewSc123Limit(event) {
+  event.preventDefault();
+  clearSc123LimitPreview();
+  const value = Number($("sc123LimitValue").value);
+  const status = $("sc123LimitStatus");
+  $("sc123LimitPreviewButton").disabled = true;
+  status.textContent = "Prüfe Firmwarefähigkeit, Block-60-Datensatz und Befehlsbits frisch …";
+  status.className = "write-guard-status neutral";
+  try {
+    const preview = await api("/api/sc123-temperature-limit/preview", {
+      method: "POST",
+      body: JSON.stringify({ value }),
+    });
+    renderSc123LimitPreview(preview);
+    status.textContent = preview.eligible
+      ? "Vorschau gültig für " + preview.request_token_ttl_seconds + " s · noch nichts geschrieben."
+      : "Änderung blockiert: " + (preview.blockers || []).join(" · ");
+    status.className = "write-guard-status " + (preview.eligible ? "warn" : "error");
+  } catch (error) {
+    status.textContent = "SC123-Vorschau fehlgeschlagen: " + error.message;
+    status.className = "write-guard-status error";
+  } finally {
+    $("sc123LimitPreviewButton").disabled = !state.system.sc123Limit?.write_safe;
+  }
+}
+
+async function applySc123Limit() {
+  const preview = state.system.sc123Preview;
+  if (!preview?.request_token || !$("sc123LimitConfirm").checked) return;
+  const status = $("sc123LimitStatus");
+  $("sc123LimitApply").disabled = true;
+  $("sc123LimitPreviewButton").disabled = true;
+  status.textContent = "Auth 3 · frische Vorprüfung · höchstens ein Block-60-Schreibvorgang · RAM-/NVM-Prüfung · Deauth …";
+  status.className = "write-guard-status warn";
+  try {
+    const result = await api("/api/sc123-temperature-limit", {
+      method: "POST",
+      body: JSON.stringify({
+        value: preview.target_c,
+        confirm: true,
+        write_enabled: true,
+        request_token: preview.request_token,
+      }),
+    });
+    clearSc123LimitPreview();
+    $("sc123LimitValue").dataset.userEdited = "";
+    status.textContent = result.unchanged
+      ? "SC123-Grenze war bereits " + result.target_c + " °C · kein Schreibvorgang ausgeführt."
+      : "SC123-Grenze auf " + result.target_c + " °C geschrieben, in RAM und NVM bestätigt und Auth 0 abgemeldet.";
+    status.className = "write-guard-status ok";
+    toast("SC123-Grenze geprüft und übernommen.");
+    await refreshSc123Limit();
+  } catch (error) {
+    clearSc123LimitPreview();
+    status.textContent = "SC123-Schreiben nicht bestätigt: " + error.message + " · vor erneutem Versuch frisch prüfen.";
+    status.className = "write-guard-status error";
+    $("sc123LimitPreviewButton").disabled = !state.system.sc123Limit?.write_safe;
+  }
+}
+
+function renderEmailNotificationRows() {
+  const items = state.system.emailOutbox?.items || [];
+  $("emailNotificationRows").innerHTML = items.map((item) => {
+    const recorded = item.created_at ? new Date(item.created_at).toLocaleString("de-DE") : "—";
+    return `<tr><td>${escapeHtml(recorded)}</td><td>${escapeHtml(EMAIL_CATEGORY_LABELS[item.category] || item.category)}</td><td>${escapeHtml(item.recipient || "—")}</td><td>${escapeHtml(item.subject)}</td><td>${escapeHtml(EMAIL_STATUS_LABELS[item.status] || item.status)}</td><td>${escapeHtml(item.attempts ?? 0)}</td><td>${escapeHtml(item.last_error || "")}</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="muted">Noch keine E-Mail-Vorgänge.</td></tr>`;
+}
+
+function syncEmailSmtpSecurityFields() {
+  const plain = $("emailSmtpSecurity").value === "plain-internal";
+  $("emailSmtpUsername").disabled = plain;
+  $("emailSmtpPassword").disabled = plain;
+  if (plain) {
+    $("emailSmtpUsername").value = "";
+    $("emailSmtpPassword").value = "";
+    $("emailClearPassword").checked = Boolean(
+      state.system.emailNotifications?.smtp?.password_configured,
+    );
+  }
+}
+
+function renderEmailNotifications() {
+  const settings = state.system.emailNotifications;
+  if (!settings) return;
+  const smtp = settings.smtp || {};
+  $("emailNotificationsEnabled").checked = Boolean(settings.enabled);
+  $("emailSmtpHost").value = smtp.host || "";
+  $("emailSmtpPort").value = smtp.port ?? 587;
+  $("emailSmtpSecurity").value = smtp.security || "starttls";
+  $("emailSmtpUsername").value = smtp.username || "";
+  $("emailSmtpPassword").value = "";
+  $("emailSmtpPassword").placeholder = smtp.password_configured ? "gespeichert · leer lassen = unverändert" : "noch nicht gesetzt";
+  $("emailFromAddress").value = smtp.from_address || "";
+  $("emailFromName").value = smtp.from_name || "Open Dachs Manager";
+  $("emailRecipients").value = (settings.recipients || []).join("\n");
+  $("emailPublicBaseUrl").value = settings.public_base_url || "";
+  $("emailClearPassword").checked = false;
+  syncEmailSmtpSecurityFields();
+  document.querySelectorAll("[data-email-category]").forEach((input) => {
+    input.checked = Boolean(settings.categories?.[input.dataset.emailCategory]);
+  });
+  $("emailTemperatureRules").innerHTML = (settings.temperature_sources || []).map((source) => {
+    const rule = settings.temperature_rules?.[source.id] || {};
+    const minimum = Number(source.minimum_c);
+    const maximum = Number(source.maximum_c);
+    return `<div class="email-temperature-rule" data-email-temperature-rule="${escapeHtml(source.id)}"><label class="check-label"><input type="checkbox" data-email-rule-enabled ${rule.enabled ? "checked" : ""}> ${escapeHtml(source.label)}</label><label>Richtung<select data-email-rule-direction><option value="high" ${rule.direction !== "low" ? "selected" : ""}>ab / ≥</option><option value="low" ${rule.direction === "low" ? "selected" : ""}>bis / ≤</option></select></label><label>Schwelle °C<input data-email-rule-threshold type="number" min="${escapeHtml(minimum)}" max="${escapeHtml(maximum)}" step="0.1" value="${escapeHtml(rule.threshold_c ?? "")}" placeholder="${escapeHtml(minimum)} … ${escapeHtml(maximum)}"></label><label>Hysterese °C<input data-email-rule-hysteresis type="number" min="0.1" max="50" step="0.1" value="${escapeHtml(rule.hysteresis_c ?? "")}" placeholder="explizit setzen"></label></div>`;
+  }).join("");
+  $("emailTemplateEditors").innerHTML = (settings.categories_available || Object.keys(EMAIL_CATEGORY_LABELS)).map((category) => {
+    const template = settings.templates?.[category] || {};
+    return `<details class="email-template-editor" data-email-template="${escapeHtml(category)}" ${category === "fault" ? "open" : ""}><summary>${escapeHtml(EMAIL_CATEGORY_LABELS[category] || category)}</summary><label>Betreff<input data-email-template-subject maxlength="200" value="${escapeHtml(template.subject || "")}"></label><label>Text<textarea data-email-template-body rows="5" maxlength="8000">${escapeHtml(template.body || "")}</textarea></label></details>`;
+  }).join("");
+  const counts = settings.outbox?.counts || {};
+  const status = $("emailNotificationStatus");
+  if (settings.enabled) {
+    status.textContent = `Aktiv · ${settings.recipients?.length || 0} Empfänger · ${counts.pending || 0} wartend · ${counts.failed || 0} fehlgeschlagen · ${counts.dead || 0} aufgegeben`;
+    status.className = `write-guard-status ${counts.failed || counts.dead ? "warn" : "ok"}`;
+  } else {
+    status.textContent = `Deaktiviert · keine automatische E-Mail wird gesendet · ${settings.ready ? "SMTP vollständig" : "SMTP noch unvollständig"}`;
+    status.className = "write-guard-status neutral";
+  }
+  if (settings.runtime?.paused_reason) {
+    status.textContent += ` · Versand pausiert bis zur nächsten gespeicherten Konfigurationsänderung: ${settings.runtime.paused_reason}`;
+    status.className = "write-guard-status error";
+  } else if (settings.runtime?.last_send_error) {
+    status.textContent += ` · letzter Fehler: ${settings.runtime.last_send_error}`;
+  }
+  if (settings.runtime?.dispatcher_alive === false && settings.enabled) {
+    status.textContent += " · Dispatcher ist nicht aktiv";
+    status.className = "write-guard-status error";
+  }
+  $("emailNotificationsTest").disabled = !settings.ready;
+  renderEmailNotificationRows();
+}
+
+function collectEmailNotificationSettings() {
+  const categories = {};
+  document.querySelectorAll("[data-email-category]").forEach((input) => {
+    categories[input.dataset.emailCategory] = input.checked;
+  });
+  const temperatureRules = {};
+  document.querySelectorAll("[data-email-temperature-rule]").forEach((row) => {
+    const thresholdText = row.querySelector("[data-email-rule-threshold]").value.trim();
+    const hysteresisText = row.querySelector("[data-email-rule-hysteresis]").value.trim();
+    temperatureRules[row.dataset.emailTemperatureRule] = {
+      enabled: row.querySelector("[data-email-rule-enabled]").checked,
+      direction: row.querySelector("[data-email-rule-direction]").value,
+      threshold_c: thresholdText === "" ? null : Number(thresholdText),
+      hysteresis_c: hysteresisText === "" ? null : Number(hysteresisText),
+    };
+  });
+  const templates = {};
+  document.querySelectorAll("[data-email-template]").forEach((editor) => {
+    templates[editor.dataset.emailTemplate] = {
+      subject: editor.querySelector("[data-email-template-subject]").value,
+      body: editor.querySelector("[data-email-template-body]").value,
+    };
+  });
+  const smtpSecurity = $("emailSmtpSecurity").value;
+  const plainRelay = smtpSecurity === "plain-internal";
+  return {
+    enabled: $("emailNotificationsEnabled").checked,
+    smtp: {
+      host: $("emailSmtpHost").value,
+      port: Number($("emailSmtpPort").value),
+      security: smtpSecurity,
+      username: plainRelay ? "" : $("emailSmtpUsername").value,
+      password: plainRelay ? "" : $("emailSmtpPassword").value,
+      clear_password: plainRelay || $("emailClearPassword").checked,
+      from_address: $("emailFromAddress").value,
+      from_name: $("emailFromName").value,
+      timeout_seconds: state.system.emailNotifications?.smtp?.timeout_seconds || 10,
+    },
+    recipients: $("emailRecipients").value,
+    public_base_url: $("emailPublicBaseUrl").value,
+    categories,
+    temperature_rules: temperatureRules,
+    templates,
+  };
+}
+
+async function refreshEmailNotifications() {
+  if (state.user?.role !== "admin") return;
+  try {
+    const [settings, outbox] = await Promise.all([
+      api("/api/settings/email-notifications"),
+      api("/api/notifications/outbox?limit=50"),
+    ]);
+    state.system.emailNotifications = settings;
+    state.system.emailOutbox = outbox;
+    renderEmailNotifications();
+  } catch (error) { toast(error.message, "error"); }
+}
+
+async function saveEmailNotifications(event) {
+  event.preventDefault();
+  const button = $("emailNotificationsSave");
+  button.disabled = true;
+  try {
+    state.system.emailNotifications = await api("/api/settings/email-notifications", {
+      method: "POST", body: JSON.stringify(collectEmailNotificationSettings()),
+    });
+    state.system.emailOutbox = await api("/api/notifications/outbox?limit=50");
+    renderEmailNotifications();
+    toast(state.system.emailNotifications.enabled ? "E-Mail-Benachrichtigungen aktiviert." : "E-Mail-Einstellungen gespeichert; Versand bleibt deaktiviert.");
+  } catch (error) { toast(error.message, "error"); }
+  finally { button.disabled = false; }
+}
+
+async function sendEmailNotificationTest() {
+  const button = $("emailNotificationsTest");
+  button.disabled = true;
+  try {
+    await api("/api/notifications/test", { method: "POST", body: JSON.stringify({ request_id: crypto.randomUUID() }) });
+    toast("Testmail wurde sicher in den Versand eingereiht.");
+    await refreshEmailNotifications();
+  } catch (error) { toast(error.message, "error"); }
+  finally { button.disabled = !state.system.emailNotifications?.ready; }
 }
 
 async function refreshSystemView() {
@@ -2282,15 +3741,46 @@ function dynamicScale(values) {
   return { min: Math.floor(min / step) * step, max: Math.ceil(max / step) * step, step };
 }
 
-function lowerBoundScale(values, preferredMax) {
+function frequencyScale(values = []) {
+  const numbers = values.filter((value) => Number.isFinite(value));
+  if (!numbers.length) return { min: 49.9, max: 50.1, step: .05 };
+  const paddedMin = Math.min(...numbers) - .1;
+  const paddedMax = Math.max(...numbers) + .1;
+  // Aim for roughly six divisions, then align both limits to that exact
+  // tick step. The former implementation returned a nice step but rendered
+  // four unrelated fractions between unaligned limits (for example 50.167,
+  // 50.082, 49.996 …), so curve and labels looked inconsistent.
+  const step = niceStep((paddedMax - paddedMin) / 6);
+  const min = Math.round((Math.floor(paddedMin / step + 1e-9) * step) * 1000) / 1000;
+  const max = Math.round((Math.ceil(paddedMax / step - 1e-9) * step) * 1000) / 1000;
+  return { min, max, step };
+}
+
+function frequencyTicks(scale) {
+  const min = Number(scale?.min), max = Number(scale?.max), step = Number(scale?.step);
+  const intervals = Math.round((max - min) / step);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || !Number.isFinite(step)
+      || step <= 0 || intervals < 1 || intervals > 12
+      || Math.abs(min + intervals * step - max) > 1e-6) {
+    return Array.from({ length: 5 }, (_, index) => max - ((max - min) * index / 4));
+  }
+  return Array.from({ length: intervals + 1 }, (_, index) => (
+    Math.round((max - step * index) * 1000) / 1000
+  ));
+}
+
+function lowerBoundScale(values, preferredMax, includeNegative = false) {
   const actual = values.length ? Math.max(...values, 0) : 0;
+  const actualMin = values.length ? Math.min(...values, 0) : 0;
   let max = actual > 0 ? niceCeiling(actual * 1.08) : preferredMax;
   if (preferredMax && actual <= preferredMax) max = Math.min(max, preferredMax);
   if (!Number.isFinite(max) || max <= 0) max = preferredMax || 1;
-  return { min: 0, max, step: niceStep(max / 4) };
+  const min = includeNegative && actualMin < 0 ? -niceCeiling(Math.abs(actualMin) * 1.08) : 0;
+  return { min, max, step: niceStep((max - min) / 4) };
 }
 
-function formatAxisTick(value, step) {
+function formatAxisTick(value, step, group = "") {
+  if (group === "frequency") return Number(value).toFixed(3);
   const digits = step < 1 ? 2 : Number.isInteger(step) ? 0 : 1;
   return Number(value).toFixed(digits).replace(/\.0+$/, "");
 }
@@ -2312,7 +3802,7 @@ function nearestChartPoint(data, time) {
 
 function chartValueText(value, unit) {
   if (!Number.isFinite(value)) return "—";
-  const digits = unit === "kW" || unit === "φ" ? 2 : Number.isInteger(value) ? 0 : 1;
+  const digits = unit === "Hz" ? 3 : unit === "kW" || unit === "φ" ? 2 : Number.isInteger(value) ? 0 : 1;
   const text = Number(value).toFixed(digits).replace(/\.0+$/, "");
   return `${text}${unit ? ` ${unit}` : ""}`;
 }
@@ -2395,7 +3885,7 @@ function drawChart(canvas, series, rangeHours, group, requestedWindow = null) {
   canvas.width = width * dpr; canvas.height = height * dpr; const ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const colors = chartColors(); ctx.fillStyle = colors.background; ctx.fillRect(0, 0, width, height);
   const axisConfig = chartAxisConfig(group); const dualAxis = Boolean(axisConfig);
-  // Uniform margins align one timestamp vertically across all four charts.
+  // Uniform margins align one timestamp vertically across all five charts.
   const left = compact ? 52 : 78, right = compact ? 52 : 78, top = compact ? 22 : 20, bottom = compact ? 29 : 32, plotW = Math.max(80, width - left - right), plotH = Math.max(80, height - top - bottom);
   const visibleSeries = series.filter((item) => !chartSeriesHidden(group, item));
   const allPoints = chartPoints(series); const points = chartPoints(visibleSeries);
@@ -2427,22 +3917,26 @@ function drawChart(canvas, series, rangeHours, group, requestedWindow = null) {
   let leftScale, rightScale;
   if (dualAxis) {
     const valuesFor = (axis) => visibleSeries.flatMap((item) => axis.ids.includes(item.id) ? (dataById.get(item.id) || []).map((point) => point.number) : []);
-    leftScale = lowerBoundScale(valuesFor(axisConfig.left), axisConfig.left.preferredMax);
-    rightScale = lowerBoundScale(valuesFor(axisConfig.right), axisConfig.right.preferredMax);
+    leftScale = lowerBoundScale(valuesFor(axisConfig.left), axisConfig.left.preferredMax, axisConfig.left.includeNegative);
+    rightScale = lowerBoundScale(valuesFor(axisConfig.right), axisConfig.right.preferredMax, axisConfig.right.includeNegative);
   } else {
-    leftScale = dynamicScale(numbers);
+    leftScale = group === "frequency" ? frequencyScale(numbers) : dynamicScale(numbers);
   }
   ctx.strokeStyle=colors.grid; ctx.lineWidth=1; ctx.fillStyle=colors.ink; ctx.font=compact ? "10px system-ui" : "11px system-ui";
-  const leftTickStep = (leftScale.max - leftScale.min) / 4;
-  const rightTickStep = dualAxis ? (rightScale.max - rightScale.min) / 4 : null;
-  for (let i=0;i<=4;i++) {
-    const y=top+plotH*i/4;
+  const leftTicks = group === "frequency"
+    ? frequencyTicks(leftScale)
+    : Array.from({ length: 5 }, (_, index) => leftScale.max - ((leftScale.max - leftScale.min) * index / 4));
+  const gridIntervals = Math.max(1, leftTicks.length - 1);
+  const leftTickStep = group === "frequency" ? leftScale.step : (leftScale.max - leftScale.min) / 4;
+  const rightTickStep = dualAxis ? (rightScale.max - rightScale.min) / gridIntervals : null;
+  for (let i=0;i<leftTicks.length;i++) {
+    const y=top+plotH*i/gridIntervals;
     ctx.beginPath(); ctx.moveTo(left,y); ctx.lineTo(left+plotW,y); ctx.stroke();
-    const leftValue=leftScale.max-(leftScale.max-leftScale.min)*i/4;
-    ctx.textAlign="right"; ctx.fillText(formatAxisTick(leftValue,leftTickStep),left-8,y+4);
+    const leftValue=leftTicks[i];
+    ctx.textAlign="right"; ctx.fillText(formatAxisTick(leftValue,leftTickStep,group),left-8,y+4);
     if (dualAxis) {
-      const rightValue=rightScale.max-(rightScale.max-rightScale.min)*i/4;
-      ctx.textAlign="left"; ctx.fillText(formatAxisTick(rightValue,rightTickStep),left+plotW+8,y+4);
+      const rightValue=rightScale.max-(rightScale.max-rightScale.min)*i/gridIntervals;
+      ctx.textAlign="left"; ctx.fillText(formatAxisTick(rightValue,rightTickStep,group),left+plotW+8,y+4);
     }
   }
   if (dualAxis) {
@@ -2697,14 +4191,16 @@ function redrawChartGroup(group) {
   if (group === "motorStatus") {
     drawMotorStatusChart($("motorStatusChart"), range, state.historyWindow);
   } else {
-    const canvas = group === "temperature" ? $("temperatureChart") : group === "motor" ? $("motorChart") : $("exhaustChart");
+    const canvas = group === "temperature" ? $("temperatureChart")
+      : group === "motor" ? $("motorChart")
+      : group === "frequency" ? $("frequencyChart") : $("exhaustChart");
     drawChart(canvas, state.chartSeries[group] || [], range, group, state.historyWindow);
   }
   updateZoomControl();
 }
 
 function redrawAllCharts() {
-  ["temperature", "motor", "motorStatus", "exhaust"].forEach(redrawChartGroup);
+  ["temperature", "motor", "motorStatus", "frequency", "exhaust"].forEach(redrawChartGroup);
 }
 
 function updateZoomControl() {
@@ -2724,7 +4220,7 @@ function chartPointerPosition(canvas, event) {
 
 function resetChartZoom() {
   state.chartZoomRange = null;
-  ["temperatureChart", "motorChart", "motorStatusChart", "exhaustChart"].forEach((id) => state.chartPointers.delete($(id)));
+  ["temperatureChart", "motorChart", "motorStatusChart", "frequencyChart", "exhaustChart"].forEach((id) => state.chartPointers.delete($(id)));
   redrawAllCharts();
 }
 
@@ -2809,6 +4305,7 @@ async function refreshCharts() {
     const groups = {
       temperature: ["kuehlwasser", "dachs_eintritt", "kapsel", "regler"],
       motor: ["wirkleistung", "drehzahl"],
+      frequency: ["frequenz"],
       exhaust: ["abgas_motor", "abgas_hka"],
     };
     const ids = Object.values(groups).flat();
@@ -2831,6 +4328,7 @@ async function refreshCharts() {
     }).filter(Boolean);
     state.chartSeries.temperature = historyFor(groups.temperature);
     state.chartSeries.motor = historyFor(groups.motor);
+    state.chartSeries.frequency = historyFor(groups.frequency);
     state.chartSeries.exhaust = historyFor(groups.exhaust);
     state.chartRunBands = buildChartRunBands(batch.series?.drehzahl || [], state.historyWindow);
     state.motorStatusSegments = motorStatus.segments || [];
@@ -2838,8 +4336,9 @@ async function refreshCharts() {
     $("historyRangeStatus").textContent = `Aktiv: ${selection.label} · ${chartItems.length} Kurven · Motorstatus${state.motorStatusBackfillComplete ? "" : " · ältere Statusdaten werden nachgetragen"}`;
     renderChartLegend("temperature", "temperatureLegend");
     renderChartLegend("motor", "motorLegend");
+    renderChartLegend("frequency", "frequencyLegend");
     renderChartLegend("exhaust", "exhaustLegend");
-    bindChartZoom($("temperatureChart"), "temperature"); bindChartZoom($("motorChart"), "motor"); bindChartZoom($("motorStatusChart"), "motorStatus"); bindChartZoom($("exhaustChart"), "exhaust");
+    bindChartZoom($("temperatureChart"), "temperature"); bindChartZoom($("motorChart"), "motor"); bindChartZoom($("motorStatusChart"), "motorStatus"); bindChartZoom($("frequencyChart"), "frequency"); bindChartZoom($("exhaustChart"), "exhaust");
     redrawAllCharts();
   } catch (error) {
     $("historyRangeStatus").textContent = `Fehler: ${error.message}`;
@@ -3008,7 +4507,7 @@ function activateHistoryRequest(request) {
   state.chartZoomRange = null;
   state.chartRunBands = [];
   state.motorStatusSegments = [];
-  ["temperatureChart", "motorChart", "motorStatusChart", "exhaustChart"].forEach((id) => state.chartPointers.delete($(id)));
+  ["temperatureChart", "motorChart", "motorStatusChart", "frequencyChart", "exhaustChart"].forEach((id) => state.chartPointers.delete($(id)));
   refreshCharts();
 }
 
@@ -3327,8 +4826,7 @@ async function loadBackupArchiveForRestore(archiveId, button = null) {
     state.backup.image = image;
     state.backup.inspection = inspection;
     if ($("restoreWriteEnabled")) $("restoreWriteEnabled").checked = false;
-    if ($("restoreConfirmation")) $("restoreConfirmation").value = "";
-    if ($("restorePass4")) $("restorePass4").value = "";
+      if ($("restorePass4")) $("restorePass4").value = "";
     if ($("restoreResults")) $("restoreResults").innerHTML = "";
     renderRestoreBlockList();
     setBackupStatus("restoreImageStatus", inspectionSummary(inspection, archived?.filename || `Backup #${archiveId}`), "ok");
@@ -3461,7 +4959,6 @@ function clearRestoreImage(message = "Noch kein Backup-Image geprüft.") {
   state.backup.image = null;
   state.backup.inspection = null;
   if ($("restoreWriteEnabled")) $("restoreWriteEnabled").checked = false;
-  if ($("restoreConfirmation")) $("restoreConfirmation").value = "";
   if ($("restorePass4")) $("restorePass4").value = "";
   if ($("restoreBlockList")) $("restoreBlockList").innerHTML = `<p class="muted">Noch kein geprüftes Backup-Image geladen.</p>`;
   if ($("restoreResults")) $("restoreResults").innerHTML = "";
@@ -3535,7 +5032,7 @@ function updateRestoreActionAvailability() {
 
 function setRestoreBusy(busy) {
   state.backup.busy = busy;
-  ["restoreFile", "restoreAuthLevel", "restorePass4", "restoreConfirmation"].forEach((id) => {
+  ["restoreFile", "restoreAuthLevel", "restorePass4"].forEach((id) => {
     if ($(id)) $(id).disabled = busy;
   });
   $("restoreWriteEnabled").disabled = busy || (Boolean(state.backup.image) && state.backup.inspection?.live_restore_compatible === false);
@@ -3560,10 +5057,6 @@ function updateRestoreMode() {
   button.classList.toggle("danger", live);
   button.classList.toggle("primary", !live);
   if ($("restorePass4")) $("restorePass4").required = false;
-  if ($("restoreConfirmation")) {
-    $("restoreConfirmation").required = live;
-    $("restoreConfirmation").placeholder = live ? RESTORE_CONFIRMATION : "im Dry-Run nicht erforderlich";
-  }
   const panel = toggle.closest(".backup-restore-panel") || toggle.closest(".panel");
   panel?.classList.toggle("backup-live", live);
   if (state.backup.image && !state.backup.busy) {
@@ -3643,12 +5136,10 @@ async function restoreBackupImage(event) {
   if (state.user?.role !== "admin") return;
   const blocks = selectedBlocks("restore");
   const writeEnabled = Boolean($("restoreWriteEnabled").checked);
-  const confirmation = $("restoreConfirmation").value;
+  // The checked "Hardware-Wiederherstellung aktivieren" toggle is the confirmation; the API phrase is supplied for it.
+  const confirmation = writeEnabled ? RESTORE_CONFIRMATION : "";
   if (!state.backup.image) return setBackupStatus("restoreStatus", "Bitte zuerst ein Backup-Image einlesen und prüfen.", "warn");
   if (!blocks.length) return setBackupStatus("restoreStatus", "Bitte mindestens ein wiederherstellbares Blockziel auswählen.", "warn");
-  if (writeEnabled && confirmation.trim() !== RESTORE_CONFIRMATION) {
-    return setBackupStatus("restoreStatus", `Für den LIVE-Modus exakt ${RESTORE_CONFIRMATION} eingeben.`, "error");
-  }
   if (writeEnabled && !window.confirm(`LIVE-Wiederherstellung starten? ${blocks.length} ausgewählte Blockziele können am MSR2 verändert werden. Jedes Ziel wird anschließend zurückgelesen und geprüft.`)) return;
   const restoreGeneration = state.backup.importGeneration;
   const restoreImage = state.backup.image;
@@ -3716,7 +5207,35 @@ async function refreshAudit() {
       const scope = audit.readback_scope === "changed-fields" ? "FELD" : "BLOCK";
       const attempts = Number(audit.readback_attempts || 0);
       let result;
-      if (audit.operation === "backup-restore" && !audit.changed && !audit.error) {
+      if ((audit.operation === "manual-dachs-enable" || audit.operation === "manual-dachs-disable") && audit.unchanged && audit.auth_level_granted == null && !audit.error) {
+        result = (audit.target_enabled ? "DACHS EIN" : "DACHS AUS") + " · BEREITS ERREICHT · KEIN SCHREIBVORGANG";
+      } else if ((audit.operation === "manual-dachs-enable" || audit.operation === "manual-dachs-disable") && audit.unchanged && audit.deauthenticated === true && !audit.error) {
+        result = (audit.target_enabled ? "DACHS EIN" : "DACHS AUS") + " · NACH AUTH 3 BEREITS ERREICHT · KEIN SCHREIBVORGANG · AUTH 0";
+      } else if ((audit.operation === "manual-dachs-enable" || audit.operation === "manual-dachs-disable") && audit.write_confirmed && audit.deauthenticated === true) {
+        result = (audit.target_enabled ? "DACHS EIN" : "DACHS AUS") + " · RÜCKLESUNG BESTÄTIGT · AUTH 0";
+      } else if (audit.operation === "manual-dachs-enable" || audit.operation === "manual-dachs-disable") {
+        result = (audit.target_enabled ? "DACHS EIN" : "DACHS AUS") + " · NICHT VOLLSTÄNDIG BESTÄTIGT" + (audit.error ? " · " + audit.error : "");
+      } else if (audit.operation === "manual-servicecode-reset" && audit.unchanged && audit.auth_level_granted == null && !audit.error) {
+        result = "ENTSTÖRUNG · KEINE AKTIVE STÖRUNG · KEIN SCHREIBVORGANG";
+      } else if (audit.operation === "manual-servicecode-reset" && audit.unchanged && audit.deauthenticated === true && !audit.error) {
+        result = "ENTSTÖRUNG · NACH AUTH 3 BEREITS GELÖSCHT · KEIN SCHREIBVORGANG · AUTH 0";
+      } else if (audit.operation === "manual-servicecode-reset" && audit.unchanged) {
+        result = "ENTSTÖRUNG · BEREITS GELÖSCHT · AUTH-0-CLEANUP UNBESTÄTIGT"
+          + (audit.error ? " · " + audit.error : "");
+      } else if (audit.operation === "manual-servicecode-reset" && audit.restart_guard_pending === true) {
+        result = audit.write_confirmed === true
+          ? "ENTSTÖRT · SERVICECODE 0 BESTÄTIGT · NEUSTARTSCHUTZ OFFEN · KEIN RETRY"
+          : "ENTSTÖRUNG · AUSGANG UNKLAR · NEUSTARTSCHUTZ OFFEN · KEIN RETRY";
+        if (audit.error) result += " · " + audit.error;
+      } else if (audit.operation === "manual-servicecode-reset" && audit.write_confirmed && audit.deauthenticated === true) {
+        result = "ENTSTÖRT · SERVICECODE 0 BESTÄTIGT · AUTH 0";
+      } else if (audit.operation === "manual-servicecode-reset" && audit.write_confirmed) {
+        result = "ENTSTÖRT · SERVICECODE 0 BESTÄTIGT · AUTH-0-CLEANUP UNBESTÄTIGT";
+      } else if (audit.operation === "manual-servicecode-reset" && audit.service_code_cleared) {
+        result = "SERVICECODE 0 RÜCKGELESEN · ACK/ECHO UNBESTÄTIGT";
+      } else if (audit.operation === "manual-servicecode-reset") {
+        result = "ENTSTÖRUNG NICHT BESTÄTIGT" + (audit.error ? " · " + audit.error : "");
+      } else if (audit.operation === "backup-restore" && !audit.changed && !audit.error) {
         result = "WIEDERHERSTELLUNG · UNVERÄNDERT";
       } else if (audit.operation === "backup-restore" && audit.write_attempted && !audit.written) {
         result = `WIEDERHERSTELLUNG · ZUSTAND UNKLAR${audit.error ? ` · ${audit.error}` : ""}`;
@@ -3727,7 +5246,11 @@ async function refreshAudit() {
       } else {
         result = audit.error || "Fehler";
       }
-      const target = Number(audit.cpu || 0) ? `CPU ${audit.cpu} · ${item.block}` : item.block;
+      const target = audit.operation === "manual-servicecode-reset"
+        ? "CPU 0 · " + String(audit.address || "0x001c9e")
+        : (audit.operation === "manual-dachs-enable" || audit.operation === "manual-dachs-disable")
+        ? "CPU 0 · " + String(audit.address || "0x000ea1")
+        : (Number(audit.cpu || 0) ? `CPU ${audit.cpu} · ${item.block}` : item.block);
       return `<tr class="${audit.critical ? "critical-audit" : ""}"><td>${escapeHtml(new Date(item.recorded_at).toLocaleString("de-DE"))}</td><td>${escapeHtml(item.username)}</td><td>${escapeHtml(target)}</td><td>${escapeHtml(result)}</td><td>${escapeHtml((audit.changed_keys || []).join(", "))}</td></tr>`;
     }).join("") || `<tr><td colspan="5">Noch keine Schreibversuche.</td></tr>`;
   } catch (error) { toast(error.message); }
@@ -3772,6 +5295,18 @@ document.addEventListener("DOMContentLoaded", () => {
   else $("restoreSubmit").addEventListener("click", restoreBackupImage);
   updateRestoreMode();
   $("dashboardEdit").addEventListener("click", openDashboardEditor);
+  $("overviewCards").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-open-runtime24h]");
+    if (button) openRuntime24hModal(event);
+  });
+  $("runtime24hClose").addEventListener("click", closeRuntime24hModal);
+  $("runtime24hCancel").addEventListener("click", closeRuntime24hModal);
+  $("runtime24hReload").addEventListener("click", refreshRuntime24hWritePreview);
+  $("runtime24hForm").addEventListener("submit", submitRuntime24hCounter);
+  $("runtimeAutoForm").addEventListener("submit", saveRuntimeAuto);
+  $("clockSyncForm").addEventListener("submit", saveClockSync);
+  $("clockSyncNow").addEventListener("click", syncClockNow);
+  $("runtime24hModal").addEventListener("click", (event) => { if (event.target === $("runtime24hModal")) closeRuntime24hModal(); });
   $("dashboardClose").addEventListener("click", closeDashboardEditor);
   $("dashboardCancel").addEventListener("click", closeDashboardEditor);
   $("dashboardSave").addEventListener("click", saveDashboardEditor);
@@ -3810,16 +5345,37 @@ document.addEventListener("DOMContentLoaded", () => {
     state.serviceCatalogTimer = setTimeout(refreshServiceCatalog, 250);
   });
   $("hmiOpenFaultCatalog").addEventListener("click", openCurrentFaultCatalog);
+  $("hmiDachsOn").addEventListener("click", (event) => openDachsControlModal(event, "on"));
+  $("hmiDachsOff").addEventListener("click", (event) => openDachsControlModal(event, "off"));
+  $("dachsControlClose").addEventListener("click", closeDachsControlModal);
+  $("dachsControlCancel").addEventListener("click", closeDachsControlModal);
+  $("dachsControlReload").addEventListener("click", refreshDachsControlPreview);
+  $("dachsControlConfirm").addEventListener("change", updateDachsControlSubmit);
+  $("dachsControlSubmit").addEventListener("click", submitDachsControl);
+  $("dachsControlModal").addEventListener("click", (event) => { if (event.target === $("dachsControlModal")) closeDachsControlModal(); });
+  $("hmiResetServiceCode").addEventListener("click", openServiceResetModal);
+  $("serviceResetClose").addEventListener("click", closeServiceResetModal);
+  $("serviceResetCancel").addEventListener("click", closeServiceResetModal);
+  $("serviceResetReload").addEventListener("click", refreshServiceResetPreview);
+  $("serviceResetConfirm").addEventListener("change", updateServiceResetSubmit);
+  $("serviceResetSubmit").addEventListener("click", submitServiceReset);
+  $("serviceResetModal").addEventListener("click", (event) => { if (event.target === $("serviceResetModal")) closeServiceResetModal(); });
   document.querySelectorAll("[data-schematic-mode]").forEach((button) => button.addEventListener("click", () => setSchematicMode(button.dataset.schematicMode)));
   let initialSchematicMode = "overview";
   try { initialSchematicMode = localStorage.getItem("open-dachs-schematic-mode") || "overview"; } catch (_) { /* optional */ }
   setSchematicMode(initialSchematicMode);
   document.addEventListener("keydown", (event) => {
+    if (trapOpenModalFocus(event)) return;
     if (event.key !== "Escape") return;
     if (!$("changelogModal").hidden) closeChangelog();
+    else if (!$("dachsControlModal").hidden) closeDachsControlModal();
+    else if (!$("serviceResetModal").hidden) closeServiceResetModal();
+    else if (!$("runtime24hModal").hidden) closeRuntime24hModal();
     else if (!$("dashboardEditor").hidden) closeDashboardEditor();
   });
   $("diagnosis250Refresh").addEventListener("click", () => refreshDiagnosis250(true, true));
+  $("diagnosis250Notices").addEventListener("click", toggleDiagnosisShutdowns);
+  $("systemStateCards").addEventListener("click", toggleDisplayStatusHistory);
   $("maintenanceRefresh").addEventListener("click", () => refreshMaintenance(true));
   $("maintenanceCreate").addEventListener("click", createMaintenanceReport);
   $("maintenanceReportRows").addEventListener("click", (event) => {
@@ -3847,6 +5403,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   $("maintenancePw4Read").addEventListener("click", readMaintenancePw4);
   $("maintenanceComplete").addEventListener("click", completeMaintenance);
+  $("maintenanceIntermediateComplete").addEventListener("click", completeLocalIntermediateMaintenance);
   $("settingsTabs").addEventListener("click", (event) => { const button=event.target.closest("button[data-block]"); if (button) loadBlock(Number(button.dataset.block), Number(button.dataset.cpu || 0)); });
   $("showReserved").addEventListener("change", () => {
     state.showReserved = $("showReserved").checked;
@@ -3870,6 +5427,18 @@ document.addEventListener("DOMContentLoaded", () => {
     if (button) selectSystemTab(button.dataset.systemTab);
   });
   $("firmwareFile").addEventListener("change", inspectFirmwareFile);
+  $("sc123LimitRefresh").addEventListener("click", refreshSc123Limit);
+  $("sc123LimitForm").addEventListener("submit", previewSc123Limit);
+  $("sc123LimitValue").addEventListener("input", () => {
+    $("sc123LimitValue").dataset.userEdited = "1";
+    clearSc123LimitPreview();
+  });
+  $("sc123LimitConfirm").addEventListener("change", () => {
+    $("sc123LimitApply").disabled = !(
+      state.system.sc123Preview?.eligible && $("sc123LimitConfirm").checked
+    );
+  });
+  $("sc123LimitApply").addEventListener("click", applySc123Limit);
   $("localAccessForm").addEventListener("submit", saveLocalAccessSettings);
   $("userCreateForm").addEventListener("submit", createSystemUser);
   $("usersRefresh").addEventListener("click", refreshSystemUsers);
@@ -3895,6 +5464,17 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (_) { toast("Token konnte nicht automatisch kopiert werden."); }
   });
   $("maintenanceTestMode").addEventListener("change", changeMaintenanceMode);
+  $("emailNotificationForm").addEventListener("submit", saveEmailNotifications);
+  $("emailSmtpSecurity").addEventListener("change", syncEmailSmtpSecurityFields);
+  $("emailNotificationsTest").addEventListener("click", sendEmailNotificationTest);
+  $("emailNotificationsRefresh").addEventListener("click", refreshEmailNotifications);
+  $("updateCheck").addEventListener("click", () => refreshUpdateStatus(true));
+  $("updateSettingsForm").addEventListener("submit", saveUpdateSettings);
+  $("updatePreviewForm").addEventListener("submit", previewUpdate);
+  $("updateConfirmation").addEventListener("input", () => {
+    $("updateApply").disabled = !state.system.updatePreview || $("updateConfirmation").value !== state.system.updatePreview.confirmation;
+  });
+  $("updateApply").addEventListener("click", applyUpdate);
   $("sootFilterSettingsForm").addEventListener("submit", saveSootFilterSettings);
   $("temperatureRange").addEventListener("change", applyHistoryPreset);
   $("historyHoursForm").addEventListener("submit", applyHistoryHours);

@@ -51,6 +51,7 @@ HYDRAULIK_COMPONENTS = (
 
 SPECIAL_LABELS_DE = {
     HYDRAULIK_BASE: "Hydraulische Einbindung",
+    "Motbel250[0].bQuotientBh_Start": "Betriebsstunden je Start",
 }
 
 

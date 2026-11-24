@@ -169,7 +169,7 @@ SHUTDOWN_FLAG_TEXTS = (
     "Keine Anforderung Dachs",
     "25 Sek Abschaltzeit",
     "Stillstandszeit aktiv",
-    "Sicherheitsabschaltung nach 24h",
+    "Sicherheitsabschaltung nach 24h bzw. tägliche Nachtabschaltung nach ≥ 6 h Lauf",
     "Anlagenstörung",
     "Interne Temperatur > Soll",
     "Eintrittstemperatur > Soll",
@@ -183,6 +183,25 @@ SHUTDOWN_FLAG_TEXTS = (
     "Dachs ausgeschaltet",
     "Inbetriebnahme erforderlich",
 )
+
+
+# Display severity of a shutdown-ring entry, derived only from the named
+# Freigabe bits above: bit 3 is the 24-h safety shutdown (orange); plant
+# fault, open safety chain and supply-network fault are faults (red).  All
+# other combinations keep the normal run colour.
+SHUTDOWN_SAFETY_BITS = frozenset({3})
+SHUTDOWN_FAULT_BITS = frozenset({4, 7, 8})
+
+
+def shutdown_code_severity(code: int) -> str:
+    """Return ``fault``, ``safety`` or ``normal`` for an active-low ring code."""
+    value = int(code) & 0xFFFF
+    active = {bit for bit in range(16) if not value & (1 << bit)}
+    if active & SHUTDOWN_FAULT_BITS:
+        return "fault"
+    if active & SHUTDOWN_SAFETY_BITS:
+        return "safety"
+    return "normal"
 
 
 def shutdown_code_text(code: int) -> str:
@@ -1087,6 +1106,27 @@ def _quarter_hours(raw: bytes) -> list[bool]:
     return [bool(byte & (0x80 >> bit)) for byte in raw[:12] for bit in range(8)]
 
 
+def _day_shutdown_marks(shutdowns: list[dict], day: str) -> list[dict]:
+    """Place non-normal shutdown-ring entries on their quarter-hour cell."""
+    severity_rank = {"safety": 1, "fault": 2}
+    marks: dict[int, dict] = {}
+    for entry in shutdowns:
+        severity = entry.get("severity")
+        if entry.get("date") != day or severity not in severity_rank:
+            continue
+        quarter = int(entry["quarter"])
+        current = marks.get(quarter)
+        if current is None or severity_rank[severity] > severity_rank[current["severity"]]:
+            marks[quarter] = {
+                "quarter": quarter,
+                "severity": severity,
+                "index": entry["index"],
+                "timestamp_text": entry["timestamp_text"],
+                "reason": entry["reason"],
+            }
+    return [marks[quarter] for quarter in sorted(marks)]
+
+
 def decode_run_history(payloads: dict[int, bytes]) -> dict:
     """Combine day-chart blocks 28, 30, 31 and 32."""
     p28 = payloads.get(28, b"")
@@ -1111,6 +1151,33 @@ def decode_run_history(payloads: dict[int, bytes]) -> dict:
     for index in range(boundary, min(96, len(today_live))):
         today[index] = today_live[index] if index * 15 <= now.hour * 60 + now.minute else False
 
+    shutdowns = []
+    for index, offset in enumerate((26, 32, 38, 44, 50), start=1):
+        if offset + 6 > len(p30):
+            break
+        code = int.from_bytes(p30[offset:offset + 2], "little", signed=False)
+        timestamp = int.from_bytes(p30[offset + 2:offset + 6], "little", signed=False)
+        timestamp_text, plausible = _format_history_timestamp(timestamp) if timestamp else (None, False)
+        has_event = bool(code or timestamp)
+        date_text = quarter = None
+        if plausible and timestamp_text:
+            moment = datetime.strptime(timestamp_text, "%d.%m.%Y %H:%M:%S")
+            date_text = moment.date().isoformat()
+            quarter = moment.hour * 4 + moment.minute // 15
+        shutdowns.append({
+            "index": index,
+            "code": code,
+            "code_hex": f"0x{code:04X}",
+            "reason": shutdown_code_text(code) if has_event else None,
+            "severity": shutdown_code_severity(code) if has_event else None,
+            "timestamp": timestamp or None,
+            "timestamp_text": timestamp_text,
+            "timestamp_plausible": plausible,
+            "date": date_text,
+            "quarter": quarter,
+            "has_event": has_event,
+        })
+
     days = []
     for age in range(7):
         slot = (ring - age) % 7
@@ -1125,24 +1192,7 @@ def decode_run_history(payloads: dict[int, bytes]) -> dict:
             "starts": starts[slot],
             "runtime_hours": round(sum(points) * 0.25, 2),
             "quarters": [1 if point else 0 for point in points],
-        })
-
-    shutdowns = []
-    for index, offset in enumerate((26, 32, 38, 44, 50), start=1):
-        if offset + 6 > len(p30):
-            break
-        code = int.from_bytes(p30[offset:offset + 2], "little", signed=False)
-        timestamp = int.from_bytes(p30[offset + 2:offset + 6], "little", signed=False)
-        timestamp_text, plausible = _format_history_timestamp(timestamp) if timestamp else (None, False)
-        shutdowns.append({
-            "index": index,
-            "code": code,
-            "code_hex": f"0x{code:04X}",
-            "reason": shutdown_code_text(code) if code or timestamp else None,
-            "timestamp": timestamp or None,
-            "timestamp_text": timestamp_text,
-            "timestamp_plausible": plausible,
-            "has_event": bool(code or timestamp),
+            "shutdown_marks": _day_shutdown_marks(shutdowns, day_date.isoformat()),
         })
 
     def ulong(offset: int) -> int:

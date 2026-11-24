@@ -12,6 +12,7 @@ venv/
 .env
 *.key
 *.pem
+!src/open_dachs_manager/data/update_release_public_key.pem
 users.json
 *.sqlite
 *.sqlite-shm

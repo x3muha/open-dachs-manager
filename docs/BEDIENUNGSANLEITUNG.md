@@ -1,6 +1,6 @@
 # Open Dachs Manager – Bedienungsanleitung
 
-Stand: 22.10.2026 · Version V3 1.8.0
+Stand: 24.11.2026 · Version V3 1.8.17
 
 Diese Anleitung beschreibt den täglichen Betrieb der Weboberfläche, CLI und
 TUI. Installation und Migration stehen ausführlich in
@@ -72,18 +72,172 @@ Auth-Level 4 an. Positive Reglerbestätigung und Rückleseprüfung bleiben
 zwingend; der Browser übermittelt weder PW4 noch Auth-Level.
 
 `Betriebsstunden je Start` steht fest unten im Motorbereich
-`Leistungszustand`. Der Wert verwendet die rohen Betriebssekunden und Starts
-aus demselben Block-22-Telegramm und löst keinen zusätzlichen seriellen Zugriff
-aus. Bei null Starts, ungültigen Zählern oder nicht zusammengehörigen
-Messzeitpunkten zeigt er bewusst keinen Wert.
+`Leistungszustand`. ODM liest dafür direkt den vom Regler bereitgestellten
+250-Bh-Rasterwert `Motbel250[0].bQuotientBh_Start` aus Block 38. Das Rohbyte
+ist in 0,1 Bh/Start skaliert und wird im langsamen 10-s-Zyklus aktualisiert;
+fehlt der Block-38-Wert oder ist die Dekodierung inkonsistent, zeigt ODM
+bewusst keinen Wert.
 
 Admins können die Live-Kacheln über `Bearbeiten` frei sortieren, entfernen und
-mit `+` aus allen gemappten Werten ergänzen. Auch der berechnete Wert
+mit `+` aus allen gemappten Werten ergänzen. Auch der gelesene Reglerwert
 `Betriebsstunden je Start` steht dort optional zur Auswahl, wird aber nicht
-ungefragt als obere Kachel eingeblendet. Die Pfeile funktionieren auch auf
-Touch-Geräten. Die gemeinsame Auswahl wird lokal auf dem Pi gespeichert und
-gilt auch für den Gastzugang. Werte aus zusätzlichen Blöcken werden alle zehn
-Sekunden gelesen; sie vergrößern nicht automatisch die Zeitreihen-Datenbank.
+ungefragt als obere Kachel eingeblendet. Die Kachel `Laufzeit seit Start`
+wird beim Update einmalig ergänzt. Ihr Hauptwert ist die **reale** Laufzeit
+seit dem letzten Start (siehe unten); fehlt sie, steht dort `—`. Die
+Unterzeile `Reglerzähler: …` zeigt den internen CPU-0-RAM-Zähler `0x0f0e`,
+den ODM zweimal über den reinen Lesedienst liest und bei nicht kohärenten
+Werten mit einem dritten Kontrollread verwirft. Der Zähler ist identisch mit
+`Hka_Mw1.ulMotorlaufsekunden`, wird vom Regler bei jedem Start auf 0 gesetzt
+und kann bewusst zurückgesetzt werden. Hinter dem Reglerzähler stehen die
+beiden Firmwareschwellen, die sich auf diesen Zähler beziehen: ab 6 h (21.600 s) kann die tägliche Nachtabschaltung des
+Reglers greifen (Reglerzeit 03:00 plus `Starts mod 100` Minuten), ab 24 h
+(86.370 s) die 24-h-Abschaltung in einem ununterbrochenen Lauf. Die Restzeiten
+sind ausschließlich aktive Laufzeit und keine Wanduhrprognose. Andere
+Reglerbedingungen können die Anlage außerdem vorher stoppen. Die Kachel bleibt
+frei entfernbar.
+Ganz oben in der Systemkarte `Status und Meldungen` stehen `Display Zeile 1`
+und `Display Zeile 2`: die beiden Statuszeilen der Startseite des
+MSR2-Bediendisplays (zum Beispiel `Der Dachs läuft ...` und
+`Rußfilterregeneration` oder bei einer Störung `Anlagenstörung` und der
+Servicecode-Text). ODM rechnet sie aus Reglerdaten mit derselben
+Prioritätsreihenfolge wie die Hauptfirmware nach; die Texte sind die
+Originaltexte des Displays. Weil die Lesungen nicht synchron zum Display
+erfolgen, kann die Anzeige bei Zustandswechseln kurz um einen Messzyklus
+abweichen. Fehlt ein benötigter Wert oder ist er veraltet, erscheint `nicht
+verfügbar` statt eines alten Texts. Ein Klick auf `Display Zeile 2` öffnet
+die letzten 50 gespeicherten Wechsel der beiden Zeilen. Als optionale Kachel
+steht `Display-Status` (Block 22) im Kacheleditor; sie ist standardmäßig
+nicht eingeblendet. `/api/live` liefert die Zeilen im Feld `display_status`.
+
+Im Prozessbild zeigt die Karte `Betriebsfreigabe` den aus Block 22 gelesenen
+Zustand `Dachs Ein · Automatik` oder `Dachs Aus`. Administratoren erhalten
+die beiden getrennten Knöpfe `Dachs Ein` und `Dachs Aus`; für Gäste bleiben
+sie verborgen. `Dachs Ein` setzt nur die normale Automatikfreigabe. Es ist
+kein Zwangsstart: Laufanforderung, übrige Freigaben und Reglerverzögerungen
+gelten weiterhin. `Dachs Aus` nimmt diese Freigabe zurück und fordert den
+regulären Stoppablauf an; der Knopf ist kein Not-Aus.
+
+Der Bestätigungsdialog liest Block 22/24 sowie die festen RAM-Adressen
+`0x0ea1` (Ein/Aus) und `0x1b5a` (Hand-/Aktortest) zweimal frisch über den
+Serialworker. Einschalten ist nur bei Motorstatus 15/16, Servicecode 0,
+inaktivem Handbetrieb und sicheren kohärenten Temperaturen möglich. Ausschalten
+bleibt auch während Lauf oder Störung als kontrollierte Stoppanforderung
+möglich, wird bei aktivem Hand-/Aktortest aber gesperrt. Eine Änderung erfolgt
+als byteerhaltendes Lesen-Ändern-Schreiben von Bit 6 in `0x0ea1` mit Auth 3,
+genau einem Schreibtelegramm, exaktem ACK/Echo, zweimaliger exakter Rücklesung,
+Auth-0-Cleanup, Einmaltoken und Prüfprotokoll ohne PW4. Der Zustand liegt im
+flüchtigen RAM und wird nicht als dauerhaft über einen Reglerneustart zugesagt.
+`Entstören` bleibt absichtlich ein eigener Vorgang; die Oberfläche verkettet
+Entstörung und Einschalten niemals automatisch.
+
+Bei einer aktiven Störung erscheint für Administratoren daneben der Knopf
+`Entstören`, sofern die Temperatur-/Wiederanlaufpolitik für die konkrete
+Installation fachlich geprüft und vom Betreiber freigeschaltet wurde. Ohne
+diese ausdrückliche Freigabe bleibt der Vorgang sicher gesperrt. Der Dialog
+führt zunächst nur eine frische doppelte Direktlesung von Block 22 und 24 aus
+und zeigt Servicecode, Motorstatus sowie die fünf geprüften Temperaturen.
+Freigegeben wird ausschließlich bei Motorstatus 15 oder 16 und innerhalb der
+angezeigten konservativen Grenzen. Nach dem Haken sendet ODM exakt die
+bestätigte Vorschau; eine zwischenzeitlich andere Störung wird nicht still
+übernommen. Der Server liest den Zustand erneut und bindet zusätzlich
+Störungszähler und Zeitpunkt im Reglerlauf; selbst nach Auth 3 erfolgt
+unmittelbar vor dem einzigen möglichen Write eine weitere vollständige
+Prüfung. Quittiert wird
+nur flüchtig über CPU 0, RAM `0x1c9e`; es werden keine Parameter oder
+NVM-Werte geschrieben. Erfolg bedeutet: exaktes positives ACK/Echo, zweimal
+hintereinander Servicecode 0 und bestätigte Abmeldung auf Auth 0. Der Dialog
+weist ausdrücklich darauf hin, dass die Anlage bei weiter anliegender
+Anforderung anschließend selbstständig anlaufen kann.
+
+Jede Vorschau besitzt ein kurzlebiges serverseitiges Einmaltoken; Vorschau und
+Ausführung sind anlagenweit nacheinander geschaltet. Nach dem Erwerb der
+seriellen Web-Sperre prüft ODM den Verbindungsschalter erneut, sodass eine beim
+Warten getrennte Verbindung keinen Schreibvorgang mehr beginnen kann. Nach
+einem Schreibversuch sperrt ODM denselben Servicecode 30 Sekunden gegen einen
+weiteren Versuch; Browser und Server senden niemals automatisch erneut. Bei
+unklarem ACK, Rücklesen oder Auth-0-Aufräumen steht das im Dialog und im
+Prüfprotokoll. Dann nicht noch einmal klicken, sondern zuerst Reglerzustand und
+Prüfprotokoll prüfen. Vor dem einzigen Telegramm speichert ODM zusätzlich einen
+Neustartschutz in seiner Datenbank. Bleibt der Ausgang unklar, sperrt dieser
+auch nach einem Webdienst-Neustart jeden weiteren Entstörversuch. Er läuft
+nicht automatisch ab und darf nur nach fachlicher Prüfung von Reglerzustand
+und Audit durch den Support beziehungsweise einen kontrollierten manuellen
+Wartungseingriff aufgelöst werden.
+
+Die Systemkarte `Status und Meldungen` enthält zwei Unterabschnitte mit rein
+lesend über denselben Dienst 0x02 und im selben 10-s-Zyklus gelesenen
+CPU-0-RAM-Werten. `Rußfilterregeneration` zeigt den Regenerationszustand
+(`0x000db3`: inaktiv, Regeneration läuft, unterbrochen und beim nächsten Lauf
+fortgesetzt), die Betriebsminuten seit der letzten Regeneration mit der
+Restzeit bis zur nächsten (`0x000de6`, Intervall 180 Betriebsminuten, ab 180
+`fällig`), die Restdauer einer laufenden Regeneration (`0x000de7`, Dauer 12
+Betriebsminuten), den Zähler aufeinanderfolgender Unterbrechungen samt Latch
+(`0x000d82`, Servicecode 180 ab fünf) und den Dachs-Typcode. Alle Minuten sind
+aktive Betriebsminuten und pausieren bei Stillstand; es gibt bewusst keinen
+Prozentfüllstand. Die Anzeige wird nur bei gesetztem Rußfilterbit (Bit 3) des
+bereits in Block 24 gelesenen Typcodes `Hka_Mw1.bKraftstofftyp` gelesen;
+sonst steht dort `nicht unterstützt` bzw. `nicht verfügbar`, und es wird kein
+RAM-Read ausgelöst. Die Zustandsdeutung stammt aus der statischen
+Firmwareanalyse (Konfidenz hoch, Typzuordnung mittel-hoch); ein read-only
+Live-Abgleich auf der Anlage steht noch aus. `/api/live` liefert den Block als
+`soot_filter_regeneration` getrennt von der Abgastemperatur-Schätzung
+`soot_filter`.
+`Interne Reglerwerte` zeigt darunter drei weitere Werte: `Internes
+Leistungsziel` (`0x00222e`, W), `Abgas-Regelkorrektur` (`0x000dca`, W mit
+Vorzeichen) und `Verfügbare Leistungsgrenze` (`0x001ad4`, W). Es sind interne
+Firmwaregrößen ohne Bedienfunktion; Adresse und Schrittweite sind belegt, die
+vollständige Zustandsdeutung der Abgas-Regelkorrektur ist nur mit mittlerer
+Konfidenz bekannt (ihre Vorzeichenwirkung hängt vom Regenerationszustand
+`0x000db3` ab). Bei Lesefehler oder ungültiger Antwort erscheint `nicht
+verfügbar` statt eines alten Werts. Die Werte werden nicht historisiert und
+sind über `/api/live` im Feld `ram_telemetry` abrufbar.
+Beide Gruppen stehen zusätzlich als optionale Kacheln `Rußfilterregeneration`
+und `Interne Reglerwerte` über `Bearbeiten` → `+ Wert hinzufügen` (Block 24)
+zur Auswahl. Sie sind standardmäßig nicht eingeblendet und werden beim Update
+nicht in bestehende Kachelauswahlen eingefügt.
+Admins öffnen über das Zahnrad den Schreibdialog. Die Kachelanzeige stammt aus
+dem 10-s-Zyklus; der Dialog liest beim Öffnen und unmittelbar beim Absenden
+zweimal kohärent direkt aus dem Regler. Eingegeben wird ein absoluter Zielwert
+von `00:00:00` bis `23:59:29`, der unverändert geschrieben wird. Der Browser
+sendet nur Zielwert, frischen erwarteten Istwert und die ausdrücklich gesetzte
+Hardware-Schreibfreigabe. Auth-Level 3 und PW4 werden serverseitig aus frisch
+gelesenen Anlagendaten bestimmt. Eine monotone Bewegung des Ausgangswerts bis 30 s ist
+zulässig; Rückwärtsbewegung oder mehr als 30 s brechen vor Authentifizierung
+und Schreiben ab. Die unmittelbare Rücklesung muss zwischen Zielwert und
+Zielwert plus einer Sekunde liegen.
+
+Der manuelle Schreibdialog ist für Tests gedacht. Ein gesetzter Wert verändert
+die Anzeige `Laufzeit seit Start` am Regler und die Unterzeile `Reglerzähler`
+in ODM; die reale Laufzeit in ODM bleibt davon unberührt.
+
+Unter dem manuellen Write steht im selben Dialog die **automatische
+Rücksetzung** (nur Admin, standardmäßig aus): „Wenn Zähler ≥ X, dann auf Y
+setzen“, nach Z Rücksetzungen je Motorlauf weiterlaufen lassen (0 =
+unbegrenzt; der Zähler beginnt bei jedem neuen Start neu). Grenzen: Y ≥
+max(1800 s, 60 · Mindestlaufzeit), X > Y + 600 s, X ≤ 85.470 s. Mit dem
+Vorschlag X = 05:33:20, Y = 03:00:00, Z = 0 erreicht der Zähler weder die
+6-h-Schwelle der Nachtabschaltung noch die 24-h-Schwelle; der Dachs stoppt
+dann nicht mehr von sich aus. Geschrieben wird nur bei laufendem Motor
+(Status ≥ 30), ohne Servicecode und Handbetrieb, höchstens einmal je 10 min;
+jeder Write steht im Audit (`runtime-auto-reset`). Das Aktivieren verlangt
+eine eigene Bestätigung. Nach einem unsicheren Ergebnis schaltet sich die
+Automatik ab und muss nach Prüfung neu aktiviert werden.
+
+**Laufzeit seit Start** ist überall (Kachel, Board-Tabelle,
+Motorstatus-Details, Prozessbild, Kompaktansicht) die tatsächliche Laufzeit
+seit dem letzten Start aus der ODM-Historie, unabhängig von 0x0f0e. Bei einer
+Aufzeichnungslücke wird sie aus den Betriebssekunden geschätzt
+(`geschätzt`); im Stillstand steht dort „steht“ bzw. „steht seit …“. Der
+Reglerzähler 0x0f0e erscheint nur als Unterzeile `Reglerzähler: …` (im
+Prozessbild gar nicht); ist er deutlich kleiner, erscheint der Hinweis
+`zurückgesetzt`. In der Historie heißt die gespeicherte Reihe des Zählers
+`Reglerzähler (0x0f0e)`; die reale Laufzeit steht als abgeleitete Reihe
+`Laufzeit seit Start (real)` über die History-API bereit.
+Die Pfeile funktionieren auch auf Touch-Geräten. Die gemeinsame Auswahl wird
+lokal gespeichert und gilt auch für den Gastzugang. Werte aus zusätzlichen
+Blöcken und der 24-h-Zähler werden alle zehn Sekunden gelesen; sie vergrößern
+nicht automatisch die Zeitreihen-Datenbank. Block 26 mit der Netzfrequenz
+gehört dagegen zum schnellen 0,75-s-Zyklus.
 
 Die technische Anlagenansicht zeigt am Waben-Rußfilter links die
 Motorabgastemperatur und rechts die Dachs-Abgastemperatur nach dem Filter.
@@ -181,7 +335,7 @@ Der daraus erzeugte Entwurf wird lokal gespeichert. Checkliste, zusätzliche
 lokale Arbeitsliste, Monteur, Messwerte und Bemerkungen lassen sich fortlaufend
 ergänzen. HTML-, dreiseitiger PDF-Bericht und JSON-Export stehen zur Verfügung.
 
-V3 1.8.0 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
+V3 1.8.17 wird standardmäßig im **Testmodus** ausgeliefert. Beim Abschluss verlangt
 die Oberfläche die exakte Eingabe `DEMO ABSCHLIESSEN`. Danach wird der Bericht
 lokal validiert, unveränderlich archiviert und deutlich als Demo gekennzeichnet.
 Der Abschluss öffnet keine Serialworker-Sitzung, schreibt weder Block 100 noch
@@ -211,6 +365,12 @@ Erst in diesem ausdrücklich freigeschalteten Echtbetrieb würden die gemappten
 Wartungswerte übertragen, zurückgelesen und danach das Bestätigungsbit separat
 gesetzt und nochmals gelesen. Freitext, Zusatzarbeiten und vollständige
 Historie verbleiben immer lokal.
+
+### Lokale Zwischenwartung
+
+Im Wartungseditor steht Admins bei einem offenen Entwurf unter dem normalen Abschluss ein eigener Bereich **Zwischenwartung** zur Verfügung. Der Grund ist ein Pflichtfeld (maximal 500 Zeichen). **Zwischenwartung speichern** archiviert den aktuellen – ausdrücklich auch nur teilweise ausgefüllten – Protokollstand, Snapshot, Pflichtbackup und Exporte lokal. Offene reguläre Prüfpunkte werden nicht als erledigt ausgegeben. Dabei werden keine Zugangsdaten benötigt, keine Serialworker-Sitzung geöffnet und weder Block 100 noch Block 104 verändert.
+
+Die Nummer wird dauerhaft aus dem beim Start eingefrorenen Regler-Wartungszähler gebildet: bei Stand 4 zuerst `4.1`, danach `4.2`. Fehlt der Zähler, verwendet ODM den höchsten bereits gespeicherten lokalen oder erfassten Basisstand; ohne solchen Stand beginnt die Reihe bei `0.1`. Liste, Detailansicht sowie HTML-, PDF- und JSON-Ausgabe kennzeichnen die Zwischenwartung und zeigen den Grund.
 
 Admins können im lokalen Archiv offene Entwürfe und abgeschlossene Wartungen
 über `Löschen` entfernen. Vorher erscheint eine Sicherheitsabfrage. Gelöscht
@@ -294,7 +454,46 @@ Bestätigung oder Rückleseprüfung erhalten, wird der Block ausdrücklich als
 `Zustand unklar` gekennzeichnet und muss vor jedem weiteren Versuch neu gelesen
 und geprüft werden.
 
+### SC123-Abgasgrenze (nur passende Patch-Firmware)
+
+Unter `System → Firmware` befindet sich die Karte
+`Abgas-Abschaltgrenze 180–240 °C`. Zuerst `Firmwarefähigkeit prüfen`
+wählen. ODM liest Block 50 und Block 60 jeweils zweimal frisch. Nur wenn der
+Patch-Heartbeat in Block 50 exakt um eins weiterläuft, die übrigen relevanten
+Block-50-Bytes stabil bleiben und Block 60 bytegenau stabil ist, werden Wert
+und Schaltfläche freigegeben. Bei Stock-Firmware oder einem Rückflash bleibt
+die Karte gesperrt; die sichtbare Firmwareversionsnummer allein genügt nicht.
+
+Dann eine ganze Temperatur zwischen 180 und 240 °C wählen und
+`Änderung frisch prüfen` drücken. Die Vorschau zeigt Istwert, Zielwert und den
+Firmwarebeweis. Erst nach Setzen des Bestätigungshakens kann
+`Grenze einmalig schreiben` ausgeführt werden. ODM authentifiziert sich mit
+Level 3, prüft beide Blöcke und den vollständigen Ausgangszustand nochmals,
+setzt in Block 60 ausschließlich den sechs Byte langen Datensatz aus Kennung,
+Wert und Komplement und schreibt höchstens einmal. Danach folgen genau eine
+bytegenaue Block-60-RAM-Rücklesung, eine begrenzte Lesekontrolle des
+persistenten NVM-Datensatzes und Auth 0. Bei Fehler oder unklarem Ergebnis nicht
+sofort wiederholen; zuerst Status und Prüfprotokoll kontrollieren.
+
+Die Firmware wertet weiterhin `Dachs-Abgastemperatur > Grenzwert` für länger
+als elf Sekunden aus. Eine falsche Kennung, ein Wert außerhalb 180–240 °C oder
+ein falsches Komplement aktiviert den sicheren Fallback 180 °C. Historisch
+belegt sind nur 180 °C und 200 °C. Werte von 201 bis 240 °C sind zwar technisch
+codierbar, aber nicht durch eine Herstellerfreigabe oder thermische
+Liveprüfung validiert. Die Oberfläche installiert oder flasht keine Firmware.
+
 ### Einstellung und Register
+
+**Täglicher Uhrabgleich (nur Admin).** Das Panel `Regleruhr` stellt die
+Regleruhr einmal täglich zur gewählten ODM-Zeit (06:00–22:00) auf die
+ODM-Zeit, wenn der Versatz die Schwelle (Standard 30 s) erreicht. Es ist
+standardmäßig aus; das Aktivieren verlangt eine eigene Bestätigung.
+`Jetzt synchronisieren` führt nach Rückfrage dieselben Prüfungen sofort aus.
+Übersprungen wird ohne NTP-Synchronität, unter der Schwelle, über dem
+Maximalversatz oder wenn der Sprung Mitternacht, die Nachtabschalt-Sekunde
+(03:00 + Starts mod 100 min) oder eine Zeitumstellung ±15 min berührt.
+Status, letzter Lauf und Grund stehen im Panel; jeder Stellversuch steht im
+Audit (`controller-clock-sync`). Die Firmware stellt dabei RAM-Uhr und RTC.
 
 Der integrierte `Fehlerkatalog` löst bekannte Service- und Warncodes direkt in
 deutschen Klartext auf. Die Suche nimmt Code oder Text an; beispielsweise wird
@@ -435,6 +634,36 @@ Write aus. Für die Generatornennleistung prüft der Server vor Auth und Write
 zusätzlich den vom Regler gelesenen Kraftstofftyp und dessen dokumentierten
 Leistungsbereich. HTTP bleibt für das lokale Netz verfügbar; eine externe
 TLS-Terminierung erfolgt bei Bedarf vor dem Dienst durch nginx.
+
+### E-Mail-Benachrichtigungen
+
+Unter `System → E-Mail` kann ein regulär angemeldeter Admin SMTP und Empfänger
+einrichten. Der Hauptschalter ist zunächst aus. Auswählbar sind `Wartung`,
+`Neuer aktiver Fehler`, `Fehler verschwindet ohne bestätigte ODM-Entstörung`
+und `Temperaturgrenze`. Betreff und Nachrichtentext jeder Kategorie lassen
+sich direkt bearbeiten; die Oberfläche zeigt die erlaubten Platzhalter.
+
+Temperaturmeldungen besitzen absichtlich keine Vorgabeschwelle. Für jeden
+Sensor werden Aktivierung, Richtung, absolute °C-Schwelle und Hysterese
+festgelegt. Eine Mail entsteht erst nach drei frischen Grenzmessungen; nach
+einer Meldung gilt zusätzlich eine Stunde Cooldown. Nach dem Speichern kann
+eine Testmail eingereiht werden, auch wenn
+der automatische Hauptschalter noch aus ist. Der Ausgang zeigt Empfänger,
+Status, Versuche und Fehler. `Gesendet` bestätigt die Annahme durch das Relay;
+`Aufgegeben` bedeutet acht erfolglose Versuche. Mehrere Empfänger erhalten
+getrennte Nachrichten und sehen die anderen Adressen nicht.
+
+Die öffentliche ODM-Adresse muss mit `https://` beginnen und einen
+gegebenenfalls verwendeten Base Path enthalten. STARTTLS mit TLS ≥1.2 ist der
+Standard. Ein privates TLS-Relay benötigt eine rootseitige Allowlist. Für ein
+internes Relay ohne TLS gibt es den gesonderten Modus `plain-internal`; er
+erlaubt weder SMTP-Benutzer noch Passwort, nur interne Zieladressen und eine
+separate rootseitige Host:Port-Freigabe. Beide Sperren können nicht aus der
+Weboberfläche gelockert werden. Passwortfelder bleiben nach dem Laden leer;
+leer lassen erhält im STARTTLS-Modus das gespeicherte Secret, das gesonderte
+Löschhäkchen entfernt es. Ein Authentifizierungs-, TLS- oder Zielpolicyfehler pausiert alle weiteren
+Versuche, bis ein Admin die Konfiguration korrigiert und erneut speichert.
+Entfernte Empfänger oder abgewählte Kategorien widerrufen wartende Mails.
 
 ### Audit
 
@@ -606,13 +835,13 @@ Speichern sind jeweils eigene kurze Sitzungen.
 
 ## 10. Updates und Datensicherung
 
-Update:
+Normale Aktualisierung: Als angemeldeter Administrator `System → Updates` öffnen.
+ODM zeigt neue stabile, signierte Versionen immer an; installiert wird erst nach
+Passwort, exakter Vorschau und Klick. Automatische Aktualisierungen sind
+standardmäßig aus und können dort ausdrücklich aktiviert werden.
 
-```bash
-cd open-dachs-manager
-git pull --ff-only
-sudo ./install.sh
-```
+Der Aufruf `sudo ./install.sh` aus einem separat geprüften Quellbaum bleibt
+ausschließlich als manueller Wiederherstellungsweg erhalten.
 
 Dateisicherung der lokalen Webdaten:
 
@@ -647,3 +876,11 @@ fuser -v /dev/ttyUSB0
 Im Normalbetrieb darf nur der Open-Dachs-Worker erscheinen. Weitere
 Fehlerbilder und der direkte Wartungsfallback stehen in
 [OPERATIONS.md](OPERATIONS.md).
+
+## Open Dachs Manager aktualisieren
+
+Unter **System → Updates** ist jederzeit sichtbar, ob eine neuere stabile
+Version vorliegt. Für ein manuelles Update zuerst **Jetzt prüfen**, dann das
+Admin-Passwort für die exakte Vorschau eingeben. Erst die vollständig
+übernommene Bestätigungszeile schaltet die Installation frei. Automatische
+Updates sind ab Werk aus und können sichtbar ein- oder ausgeschaltet werden.

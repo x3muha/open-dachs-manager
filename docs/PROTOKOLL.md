@@ -214,6 +214,23 @@ JSON-RPC-Aufträge über einen lokalen Unix-Socket. Jede Socket-Sitzung ist ein
 FIFO-Auftrag und behält den seriellen Zugriff bis zum Sitzungsende. Dadurch
 werden mehrstufige Abläufe nicht von einem zweiten Client unterbrochen.
 
+## Lokale E-Mail-Ereignisse
+
+E-Mail-Benachrichtigungen sind kein MSR2-Dienst und erzeugen keine zusätzlichen
+seriellen Telegramme. Erst nach Ende der exklusiven Serialworker-Sitzung wertet
+der Webprozess die frisch zeitgestempelten Werte des abgeschlossenen Zyklus
+aus. Event-Edge und Empfänger-Outbox werden in einer SQLite-Transaktion
+persistiert; ein eigener SMTP-Thread verarbeitet anschließend genau einen
+Empfänger pro Outbox-Zeile. DNS, optionales TLS und SMTP laufen daher niemals innerhalb
+eines seriellen Lese-, Auth- oder Schreibablaufs.
+
+Die Admin-Endpunkte liegen Base-Path-sicher unter
+`GET/POST /api/settings/email-notifications`,
+`GET /api/notifications/outbox` und `POST /api/notifications/test`. Sie geben
+kein SMTP-Passwort zurück. Einstellungsänderung und Testmail benötigen
+Admin-Sitzung sowie `X-Open-Dachs-Request: 1`; der lokale Login-Override darf
+diese beiden POST-Pfade nicht verwenden.
+
 ## Wartungsbackup und Anlagenstand
 
 Ein Wartungsstart liest die 36 freigegebenen Blöcke der Regler-CPU 0 sowie
@@ -244,3 +261,9 @@ prüft dessen Schema, Zielpaare, Prüfsummen, Pack- und Gerätebindung erneut.
 
 Die zugehörige Implementierung liegt in `transport.py`, `serial_worker.py`,
 `service.py` und `network_protection.py`.
+
+## 24.11.2026 · Updateprotokoll 1.8.17
+
+Der Updater protokolliert nur Request-ID, Benutzer, Version, Zeitpunkt, Phase
+und Ergebnis; Passwörter und Vorschautoken erscheinen nicht im Status. Der
+Updatepfad berührt weder Serialworker-Protokoll noch Controller-Write-Audit.

@@ -19,7 +19,13 @@ from itertools import pairwise
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .decoder import MOTOR_STATUS_MAP
+
 INTERVAL_SECONDS = 250 * 3600
+# History stores the raw controller bytes; the displayed codes add the
+# formats.json adders (Hka_Bd.bStoerung +100, Hka_Bd.bWarnung +600).
+SERVICE_CODE_ADDER = 100
+WARNING_CODE_ADDER = 600
 MAX_TRUSTED_GAP_SECONDS = 30 * 60
 MIN_CURRENT_EVALUATION_HOURS = 10.0
 SUFFICIENT_COVERAGE = 0.90
@@ -36,20 +42,20 @@ METRICS = {
     "motor_exhaust": {
         "title": "Motorabgas vor Rußfilter",
         "unit": "°C",
-        "normal": "HR-Beispiel: 420–490 °C",
+        "normal": "420–490 °C",
         "trend_limit": 20.0,
     },
     "dachs_exhaust": {
         "title": "Dachs-Abgas nach Rußfilter",
         "unit": "°C",
-        "normal": "Wartungshinweis: <170 °C",
+        "normal": "<170 °C",
         "maximum": 170.0,
         "trend_limit": 15.0,
     },
     "coolant": {
         "title": "Kühlwasser Motor",
         "unit": "°C",
-        "normal": "Herstellerbereich: 72–85 °C",
+        "normal": "72–85 °C",
         "minimum": 72.0,
         "maximum": 85.0,
         "trend_limit": 10.0,
@@ -57,19 +63,19 @@ METRICS = {
     "inlet": {
         "title": "Dachs-Eintritt",
         "unit": "°C",
-        "normal": "Hinweiszone 60–65 °C (Dokumentwiderspruch)",
+        "normal": "60–65 °C",
         "hint_minimum": 60.0,
     },
     "controller": {
         "title": "Reglertemperatur MSR2",
         "unit": "°C",
-        "normal": "Herstellerhinweis: <40 °C",
+        "normal": "<40 °C",
         "maximum": 40.0,
     },
     "power": {
         "title": "Generatorleistung",
         "unit": "kW",
-        "normal": "Dynamischer Sollwert ±0,15 kW",
+        "normal": "Sollwert ±0,15 kW",
     },
 }
 
@@ -409,8 +415,44 @@ def _new_interval(index: int, latest_seconds: int) -> dict:
         }),
         "gap_count": 0,
         "protection_shutdowns": 0,
+        "protection_shutdown_events": [],
         "status_events": 0,
         "status_gap": False,
+    }
+
+
+def _shutdown_event(
+    at: datetime,
+    status: int,
+    previous_status: int | None,
+    clean: list[dict],
+    position: int,
+) -> dict:
+    """Describe one stored status-10 transition without inferring a cause.
+
+    The service code is taken only from the first stored history point at or
+    after the transition within the trusted gap; otherwise it stays absent.
+    """
+    service_code = None
+    for sample in clean[position:]:
+        if sample["at"] < at:
+            continue
+        if (sample["at"] - at).total_seconds() > MAX_TRUSTED_GAP_SECONDS:
+            break
+        code = _number(sample.get("service_code"))
+        service_code = int(code) + SERVICE_CODE_ADDER if code else None
+        break
+    return {
+        "recorded_at": at.isoformat(),
+        "status": status,
+        "status_label": MOTOR_STATUS_MAP.get(status, f"Status {status}"),
+        "previous_status": previous_status,
+        "previous_status_label": (
+            MOTOR_STATUS_MAP.get(previous_status, f"Status {previous_status}")
+            if previous_status is not None else None
+        ),
+        "operating_hours": clean[position]["operating_seconds"] / 3600,
+        "service_code_after": service_code,
     }
 
 
@@ -547,6 +589,7 @@ def build_250h_diagnosis(
         status_code = int(status)
         if status_code == previous_status:
             continue
+        before = previous_status
         previous_status = status_code
         position = bisect_right(sample_times, at) - 1
         if position < 0:
@@ -558,6 +601,9 @@ def build_250h_diagnosis(
         interval["status_events"] += 1
         if status_code == 10:
             interval["protection_shutdowns"] += 1
+            interval["protection_shutdown_events"].append(
+                _shutdown_event(at, status_code, before, clean, position)
+            )
 
     output = []
     for index in sorted(intervals):
@@ -598,6 +644,7 @@ def build_250h_diagnosis(
             "failed_start_reliable": False,
             "failed_start_reason": "Die gespeicherten ODM-Reihen enthalten keinen belegten Fehlstartzähler; Motorstatus 14 wird nicht als Fehlstart gezählt.",
             "protection_shutdowns": item["protection_shutdowns"],
+            "protection_shutdown_events": item["protection_shutdown_events"],
             "metrics": metrics,
             "power_in_band_percent": (
                 item["power_in_band_seconds"] * 100 / item["power_evaluated_seconds"]
@@ -658,9 +705,14 @@ def build_250h_diagnosis(
     warning_code = next((int(value) for value in reversed([_number(item.get("warning_code")) for item in clean]) if value is not None), 0)
     service_code = next((int(value) for value in reversed([_number(item.get("service_code")) for item in clean]) if value is not None), 0)
     if warning_code:
-        notices.append({"category": "warning", "metric": "warning_code", "title": f"Aktive Warnung {warning_code}", "text": "Gespeicherter letzter Warncode; getrennt von den 250-Bh-Herstellerhinweisen."})
+        notices.append({"category": "warning", "metric": "warning_code", "title": f"Aktive Warnung {warning_code + WARNING_CODE_ADDER}", "text": "Gespeicherter letzter Warncode; getrennt von den 250-Bh-Herstellerhinweisen."})
     if service_code or latest["protection_shutdowns"]:
-        detail = f"Servicecode {service_code}" if service_code else f"{latest['protection_shutdowns']} Störabschaltung(en)"
+        parts = []
+        if service_code:
+            parts.append(f"Servicecode {service_code + SERVICE_CODE_ADDER}")
+        if latest["protection_shutdowns"]:
+            parts.append(f"{latest['protection_shutdowns']} Störabschaltung(en)")
+        detail = " · ".join(parts)
         notices.append({"category": "protection", "metric": "protection_shutdown", "title": detail, "text": "Schutz-/Störungskontext aus der gespeicherten Historie; keine Ableitung aus einer Trendgrenze."})
 
     action_count = sum(1 for item in notices if item["category"] in {"hint", "warning", "protection"})

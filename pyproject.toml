@@ -39,7 +39,7 @@ where = ["src"]
 version = {attr = "open_dachs_manager.__version__"}
 
 [tool.setuptools.package-data]
-open_dachs_manager = ["data/*.json", "data/*.properties", "web/*.html", "web/*.css", "web/*.js", "web/*.png", "web/*.txt"]
+open_dachs_manager = ["data/*.json", "data/*.properties", "data/*.pem", "web/*.html", "web/*.css", "web/*.js", "web/*.png", "web/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

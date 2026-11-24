@@ -14,6 +14,7 @@ import re
 
 from .auth import validate_auth_level
 from .mapping import WriteAllowlist, is_reserved_key
+from .service import validate_generic_write_payload
 from .transport import validate_block
 
 
@@ -138,6 +139,12 @@ def _save(service, state):
     if not state["changed"]:
         state["message"] = "nothing changed"
         return
+    validate_generic_write_payload(
+        0,
+        state["block"],
+        state["baseline"],
+        bytes(state["payload"]),
+    )
     with service.session() as session:
         if state["write_enabled"]:
             state["auth"] = service.authenticate(

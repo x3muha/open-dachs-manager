@@ -249,7 +249,6 @@ class WebBackupRestoreTests(unittest.TestCase):
             "restoreSelectAll",
             "restoreSelectNone",
             "restoreWriteEnabled",
-            "restoreConfirmation",
             "restoreSubmit",
             "restoreResults",
         ):
@@ -759,6 +758,50 @@ class WebBackupRestoreTests(unittest.TestCase):
         self.assertFalse(
             (Path(self.temporary.name) / "restore-preimages").exists()
         )
+
+    def test_record_only_block60_difference_is_rebased_before_auth_or_reporting(self):
+        cases = (
+            bytes.fromhex("53 43 31 01 C8 37"),
+            bytes(6),
+        )
+        for current_record in cases:
+            with self.subTest(current_record=current_record.hex()):
+                current = bytearray(70)
+                current[40:46] = current_record
+                archived = bytearray(current)
+                archived[40:46] = bytes.fromhex("53 43 31 01 DC 23")
+                self.service.device_payloads[60] = bytes(current)
+                image = self.service.image_for({60: bytes(archived)})
+
+                result = self.app.restore_backup(
+                    "admin",
+                    image,
+                    image["image_sha256"],
+                    [60],
+                    4,
+                    "1234",
+                    True,
+                    BACKUP_RESTORE_CONFIRMATION,
+                )
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["differing_blocks"], 0)
+                self.assertEqual(result["written_blocks"], 0)
+                self.assertEqual(result["summary"]["restored"], 0)
+                self.assertEqual(result["summary"]["unchanged"], 1)
+                self.assertEqual(result["results"][0]["status"], "unchanged")
+                self.assertFalse(result["results"][0]["changed"])
+                self.assertIn(
+                    "Waermef_Ew.Reserve[0..5]/SC123-Datensatz",
+                    result["results"][0]["preserved_fields"],
+                )
+                self.assertEqual(self.service.identity_calls, 0)
+                self.assertEqual(self.service.auth_calls, [])
+                self.assertEqual(self.service.wire_writes, [])
+                self.assertEqual(self.service.restore_calls[0][2], bytes(current))
+                self.assertFalse(
+                    (Path(self.temporary.name) / "restore-preimages").exists()
+                )
 
     def test_changed_live_batch_preflights_once_authenticates_once_and_writes_auth_blocks_last(self):
         targets = {20: payload(20), 22: payload(22), 24: payload(24)}

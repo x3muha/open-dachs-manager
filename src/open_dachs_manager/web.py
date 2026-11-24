@@ -28,14 +28,26 @@ import re
 import secrets
 import sqlite3
 import stat
+import subprocess
 import tempfile
 import threading
 import time
 from urllib.parse import parse_qs, urlparse
 import zlib
+from zoneinfo import ZoneInfo
 
 from . import __version__
 from .diagnosis_250h import Diagnosis250hCache, build_250h_diagnosis
+from .display_status import (
+    DISPLAY_STATUS_BLOCK_INPUTS,
+    DISPLAY_STATUS_FAST_BLOCKS,
+    DISPLAY_STATUS_RAM_ADDRESSES,
+    DISPLAY_STATUS_SLOW_BLOCKS,
+    compute_display_status,
+    display_status_unavailable,
+    inputs_from_payloads,
+    ram_reads_needed,
+)
 from .firmware import MUC_MAX_FILE_BYTES, inspect_muc
 from .auth import (
     auth_inputs_from_payloads,
@@ -53,7 +65,10 @@ from .maintenance import (
     MAINTENANCE_REQUIRED_BLOCKS,
     SUPPLEMENTAL_STATUS,
     checklist_definition,
-    fuel_type_from_raw,
+    FUEL_TYPE_ADDRESS,
+    FUEL_TYPE_KEY,
+    fuel_type_from_block24,
+    maintenance_fuel_check,
     json_export,
     maintenance_status,
     new_protocol,
@@ -65,6 +80,24 @@ from .maintenance import (
     validate_protocol,
 )
 from .mapping import PackRepository, WriteAllowlist, is_reserved_key
+from .email_notifications import (
+    EMAIL_AUDIT_RETENTION_DAYS,
+    EMAIL_MAX_ATTEMPTS,
+    EMAIL_OUTBOX_MAX_ACTIVE,
+    EMAIL_OUTBOX_RETENTION_DAYS,
+    EMAIL_RETRY_SECONDS,
+    EMAIL_TEST_RATE_LIMIT_SECONDS,
+    default_email_notification_settings,
+    detect_notification_events,
+    email_settings_ready,
+    normalize_email_notification_settings,
+    public_email_notification_settings,
+    render_notification,
+    sanitized_smtp_error,
+    send_smtp_email,
+    smtp_error_policy,
+    stable_message_id,
+)
 from .network_protection import (
     NETWORK_PROTECTION_BACKUP_BLOCKS,
     NETWORK_PROTECTION_BLOCK,
@@ -78,6 +111,7 @@ from .network_protection import (
     validate_network_block,
     validate_network_cpu,
 )
+from .phase6_verify import SLOW_FAST_CYCLE_SECONDS, Phase6Verifier
 from .serial_worker import DEFAULT_SERIAL_WORKER_SOCKET
 from .service import (
     BACKUP_LEGACY_TARGETS,
@@ -85,18 +119,498 @@ from .service import (
     BACKUP_RESTORE_TARGETS,
     BACKUP_TARGETS,
     DachsService,
+    restore_target_preserving_firmware_owned,
+    sc123_firmware_owned_offsets,
+    validate_generic_write_payload,
     write_json_atomic,
     write_json_exclusive,
 )
 from .transport import TransportError, validate_block
+from .updater import UpdateManager
+from .controller_automation import (
+    CLOCK_SYNC_AUTH_LEVEL,
+    CLOCK_SYNC_BLOCK,
+    CLOCK_SYNC_COMMAND_BIT,
+    CLOCK_SYNC_COMMAND_OFFSET,
+    CLOCK_SYNC_DEFAULTS,
+    CLOCK_SYNC_GUARD_OFFSET,
+    CLOCK_SYNC_GUARD_REFUSED_VALUE,
+    CLOCK_SYNC_PAYLOAD_LENGTH,
+    CLOCK_SYNC_READBACK_TOLERANCE_SECONDS,
+    CLOCK_SYNC_TIME_OFFSET,
+    REAL_RUNTIME_RUNNING_STATUS,
+    REAL_RUNTIME_SAMPLE_WINDOW_SECONDS,
+    RUNTIME_AUTO_DEFAULTS,
+    RUNTIME_AUTO_MAX_RESETS,
+    RUNTIME_AUTO_MAX_THRESHOLD_SECONDS,
+    RUNTIME_AUTO_MIN_GAP_SECONDS,
+    RUNTIME_AUTO_RATE_LIMIT_SECONDS,
+    RUNTIME_AUTO_UNIVERSAL_TARGET_SECONDS,
+    clock_sync_due,
+    clock_sync_payload,
+    clock_sync_window_reason,
+    controller_naive,
+    controller_raw,
+    decode_controller_time,
+    next_clock_sync,
+    night_shutdown_second,
+    normalize_clock_sync_settings,
+    normalize_runtime_auto_rule,
+    odm_local_naive,
+    real_runtime_status,
+    runtime_auto_eligibility,
+    runtime_auto_min_target,
+    runtime_auto_precheck,
+    stable_block50_equal,
+)
+from .sc123_limit import (
+    SC123_LIMIT_AUTH_LEVEL,
+    SC123_LIMIT_CAPABILITY_BLOCK,
+    SC123_LIMIT_NVM_POLL_ATTEMPTS,
+    SC123_LIMIT_NVM_POLL_DELAY_SECONDS,
+    SC123_LIMIT_NVM_READ_REQUEST,
+    SC123_LIMIT_PAYLOAD_LENGTH,
+    SC123_LIMIT_RECORD_LENGTH,
+    SC123_LIMIT_RECORD_OFFSET,
+    SC123_LIMIT_RETRY_GUARD_SECONDS,
+    SC123_LIMIT_SCHEMA,
+    SC123_LIMIT_STORAGE_BLOCK,
+    SC123_LIMIT_THRESHOLD_OFFSET,
+    SC123_LIMIT_TOKEN_TTL_SECONDS,
+    parse_sc123_limit_c,
+    sc123_limit_capability,
+    sc123_limit_nvm_record,
+    sc123_limit_payload,
+    sc123_limit_pending_commands,
+    sc123_limit_readback,
+)
 
 
 WEB_DIR = Path(__file__).with_name("web")
-DEFAULT_MONITOR_BLOCKS = (20, 22, 24, 26, 50, 104)
-DEFAULT_FAST_MONITOR_BLOCKS = (22, 24)
-DEFAULT_SLOW_MONITOR_BLOCKS = (20, 26, 50, 104)
+OPERATING_HOURS_PER_START_BLOCK = 38
+OPERATING_HOURS_PER_START_KEY = "Motbel250[0].bQuotientBh_Start"
+DEFAULT_MONITOR_BLOCKS = (20, 22, 24, 26, 38, 50, 104)
+DEFAULT_FAST_MONITOR_BLOCKS = (22, 24, 26)
+DEFAULT_SLOW_MONITOR_BLOCKS = (20, 38, 50, 104)
 DEFAULT_SLOW_MONITOR_INTERVAL = 10.0
 DEFAULT_HISTORY_SAMPLE_INTERVAL = 0.0
+RUNTIME_24H_COUNTER_ADDRESS = 0x0F0E
+RUNTIME_24H_COUNTER_LENGTH = 4
+RUNTIME_24H_SHUTDOWN_SECONDS = 0x15162
+# 0x0f0e is Hka_Mw1.ulMotorlaufsekunden ("Laufzeit seit Start"). From 6 h on
+# the firmware's daily night shutdown (03:00 + Starts mod 100 min controller
+# time) can clear release bit 3; read-only display threshold, never a write gate.
+RUNTIME_NIGHT_SHUTDOWN_GATE_SECONDS = 0x5460
+RUNTIME_24H_MAX_SETTABLE_SECONDS = RUNTIME_24H_SHUTDOWN_SECONDS - 1
+RUNTIME_24H_PREWRITE_TOLERANCE_SECONDS = 30
+RUNTIME_24H_READBACK_TOLERANCE_SECONDS = 1
+RUNTIME_24H_WRITE_AUTH_LEVEL = 3
+RUNTIME_24H_REQUEST = bytes([
+    0x02,
+    (RUNTIME_24H_COUNTER_ADDRESS >> 8) & 0xFF,
+    RUNTIME_24H_COUNTER_ADDRESS & 0xFF,
+    RUNTIME_24H_COUNTER_LENGTH,
+])
+RUNTIME_24H_WRITE_PREFIX = bytes([
+    0x03,
+    (RUNTIME_24H_COUNTER_ADDRESS >> 8) & 0xFF,
+    RUNTIME_24H_COUNTER_ADDRESS & 0xFF,
+    RUNTIME_24H_COUNTER_LENGTH,
+])
+# Manual service-code acknowledgement.  The live-confirmed firmware contract
+# is one volatile CPU-0 RAM write; it is deliberately kept separate from all
+# mapped block/NVM writes and cannot be parameterised by an HTTP client.
+SERVICE_RESET_SCHEMA = "open-dachs-servicecode-reset/v1"
+SERVICE_RESET_ADDRESS = 0x1C9E
+SERVICE_RESET_AUTH_LEVEL = 3
+SERVICE_RESET_REQUEST = bytes([0x03, 0x1C, 0x9E, 0x01, 0x01])
+SERVICE_RESET_RESPONSE = bytes([0x83, 0x1C, 0x9E, 0x01])
+SERVICE_RESET_SAFE_MOTOR_STATUSES = frozenset({15, 16})
+SERVICE_RESET_TEMPERATURE_COHERENCE_C = 2.0
+SERVICE_RESET_MAX_STATE_READ_SECONDS = 10.0
+SERVICE_RESET_MAX_PREWRITE_AGE_SECONDS = 1.0
+SERVICE_RESET_READBACK_ATTEMPTS = 6
+SERVICE_RESET_READBACK_DELAY_SECONDS = 0.25
+SERVICE_RESET_STABLE_ZERO_SAMPLES = 2
+SERVICE_RESET_TOKEN_TTL_SECONDS = 30.0
+SERVICE_RESET_RETRY_GUARD_SECONDS = 30.0
+# Conservative standstill limits below the evidenced firmware trip points.
+# A broken/unavailable sensor blocks acknowledgement instead of being ignored.
+SERVICE_RESET_TEMPERATURE_LIMITS = (
+    ("Hka_Mw1.Temp.sbMotor", "Kühlwasser Motor", 0.0, 90.0),
+    ("Hka_Mw1.Temp.sbGen", "Dachs-Eintritt", 0.0, 72.0),
+    ("Hka_Mw1.Temp.sAbgasMotor", "Motorabgas", 0.0, 450.0),
+    ("Hka_Mw1.Temp.sAbgasHKA", "Dachs-Abgas", 0.0, 170.0),
+    ("Hka_Mw1.Temp.sKapsel", "Kapsel", 0.0, 110.0),
+)
+# Manual Dachs on/off control.  This is the firmware's volatile operator
+# release bit (fTasteOnOff), not a forced motor start and not an emergency
+# stop.  The browser can choose only the semantic action; CPU, address, mask,
+# authentication level and telegrams remain fixed server-side.
+DACHS_CONTROL_SCHEMA = "open-dachs-on-off/v1"
+DACHS_CONTROL_ADDRESS = 0x0EA1
+DACHS_CONTROL_LENGTH = 1
+DACHS_CONTROL_MASK = 0x40
+DACHS_CONTROL_AUTH_LEVEL = 3
+DACHS_CONTROL_READ_REQUEST = bytes([0x02, 0x0E, 0xA1, 0x01])
+DACHS_CONTROL_WRITE_PREFIX = bytes([0x03, 0x0E, 0xA1, 0x01])
+DACHS_CONTROL_WRITE_RESPONSE = bytes([0x83, 0x0E, 0xA1, 0x01])
+DACHS_CONTROL_MANUAL_MODE_ADDRESS = 0x1B5A
+DACHS_CONTROL_MANUAL_MODE_REQUEST = bytes([0x02, 0x1B, 0x5A, 0x01])
+DACHS_CONTROL_RELEASE_FIELD = "Hka_Bd.UHka_Frei.usFreigabe"
+DACHS_CONTROL_RELEASE_WORD_MASK = 0x4000
+DACHS_CONTROL_SAFE_START_STATUSES = SERVICE_RESET_SAFE_MOTOR_STATUSES
+DACHS_CONTROL_TOKEN_TTL_SECONDS = 30.0
+DACHS_CONTROL_RETRY_GUARD_SECONDS = 30.0
+# Read-only CPU-0 RAM telemetry over service 0x02. This fixed allowlist is the
+# only set of addresses/lengths the slow poller may request; each entry comes
+# from reports/msr2-ram-telemetrie-kandidaten-2026-10-24.md.
+RAM_TELEMETRY_FIELDS = (
+    {
+        "key": "CPU0.RAM.0x00222e",
+        "address": 0x222E,
+        "length": 2,
+        "signed": False,
+        "label": "Internes Leistungsziel",
+        "unit": "W",
+        "confidence": "hoch",
+        "note": "Ergebnis der aktuell wirksamen internen Leistungsbegrenzung",
+    },
+    {
+        "key": "CPU0.RAM.0x000dca",
+        "address": 0x0DCA,
+        "length": 2,
+        "signed": True,
+        "label": "Abgas-Regelkorrektur",
+        "unit": "W",
+        "confidence": "mittel",
+        "note": "Additive Motorabgas-Korrektur; Vorzeichenwirkung hängt vom noch nicht benannten Zustand 0x000db3 ab",
+    },
+    {
+        "key": "CPU0.RAM.0x001ad4",
+        "address": 0x1AD4,
+        "length": 2,
+        "signed": False,
+        "label": "Verfügbare Leistungsgrenze",
+        "unit": "W",
+        "confidence": "hoch",
+        "note": "Vorgelagerte Obergrenze P0; kann durch Schutz-/Deratingpfade reduziert sein",
+    },
+)
+RAM_TELEMETRY_SCHEMA = "open-dachs-ram-telemetry/v1"
+# Read-only soot-filter regeneration indicator (CPU-0 RAM, service 0x02).
+# Addresses, widths and thresholds come from
+# reports/russabbrand-anzeigeindikator-firmwareanalyse-2026-10-24.md. The
+# whole feature is gated by the Dachs type code 0x000f0a bit 3 (oil type with
+# soot filter); that byte is already mapped as Block 24 offset 54
+# ``Hka_Mw1.bKraftstofftyp`` (block base 0x0ed4: sbMotor offset 14 = 0x0ee2,
+# sAbgasMotor offset 16 = 0x0ee4), so it is not read a second time.
+SOOT_REGENERATION_FIELDS = (
+    {
+        "key": "CPU0.RAM.0x000db3",
+        "address": 0x0DB3,
+        "length": 1,
+        "signed": False,
+        "label": "Regenerationszustand",
+        "unit": "",
+        "confidence": "hoch",
+        "note": "0 inaktiv, 1 Regeneration läuft, 2 durch Abschaltung unterbrochen",
+    },
+    {
+        "key": "CPU0.RAM.0x000de6",
+        "address": 0x0DE6,
+        "length": 2,
+        "signed": False,
+        "label": "Regenerationsminuten",
+        "unit": "min",
+        "confidence": "hoch",
+        "note": "Byte 0: Betriebsminuten seit letzter Regeneration (0..180); Byte 1: Betriebsminuten in der Regeneration (0..12)",
+    },
+    {
+        "key": "CPU0.RAM.0x000d82",
+        "address": 0x0D82,
+        "length": 1,
+        "signed": False,
+        "label": "Unterbrechungszähler",
+        "unit": "",
+        "confidence": "hoch",
+        "note": "Bits 0..6 aufeinanderfolgende Unterbrechungen, Bit 7 Latch für den aktuellen Stillstand",
+    },
+)
+SOOT_REGENERATION_SCHEMA = "open-dachs-soot-regeneration/v1"
+SOOT_REGENERATION_TYPE_KEY = "Hka_Mw1.bKraftstofftyp"
+SOOT_REGENERATION_TYPE_BLOCK = 24
+SOOT_REGENERATION_TYPE_BIT = 3
+SOOT_REGENERATION_INTERVAL_MINUTES = 180
+SOOT_REGENERATION_DURATION_MINUTES = 12
+SOOT_REGENERATION_INTERRUPTION_LIMIT = 5
+SOOT_REGENERATION_STATE_LABELS = {
+    0: "inaktiv",
+    1: "Regeneration läuft",
+    2: "unterbrochen, wird beim nächsten Lauf fortgesetzt",
+}
+# Read-only inputs of the MMI start-page status lines that no polled block
+# carries (reports/display-statuszeilen-firmwareanalyse-2026-10-24.md, read
+# plan variant A). 0x0db3 is the same request as the soot-regeneration read
+# and is reused from it whenever that read ran in the same cycle.
+DISPLAY_STATUS_RAM_FIELDS = (
+    SOOT_REGENERATION_FIELDS[0],
+    {
+        "key": "CPU0.RAM.0x000f96",
+        "address": 0x0F96,
+        "length": 1,
+        "signed": False,
+        "label": "Warmwasser-Desinfektion",
+        "unit": "",
+        "confidence": "hoch",
+        "note": "Bit 1: thermische Warmwasser-Desinfektion aktiv (Statuszeile 2)",
+    },
+    {
+        "key": "CPU0.RAM.0x001bcc",
+        "address": 0x1BCC,
+        "length": 1,
+        "signed": False,
+        "label": "Platine getauscht",
+        "unit": "",
+        "confidence": "hoch",
+        "note": "== 1: Statuszeile 1 „Platine getauscht !“",
+    },
+    {
+        "key": "CPU0.RAM.0x001c9f",
+        "address": 0x1C9F,
+        "length": 1,
+        "signed": False,
+        "label": "Wartezustand",
+        "unit": "",
+        "confidence": "hoch",
+        "note": "nur bei Servicecode: == 1 Wartezustand, sonst Anlagenstörung (Statuszeile 1)",
+    },
+    {
+        "key": "CPU0.RAM.0x001b5c",
+        "address": 0x1B5C,
+        "length": 1,
+        "signed": False,
+        "label": "Servicecode-Alternativtext",
+        "unit": "",
+        "confidence": "hoch",
+        "note": "nur bei Servicecode 122/124: Bit 0 wählt den erhöhten Grenzwerttext",
+    },
+    {
+        "key": "CPU0.RAM.0x001ed4",
+        "address": 0x1ED4,
+        "length": 1,
+        "signed": False,
+        "label": "Busfehler",
+        "unit": "",
+        "confidence": "mittel",
+        "note": "nur im Mehrmodul-Slavefall mit Anforderung: == 1 Busfehler Notbetrieb",
+    },
+)
+DISPLAY_STATUS_RAM_FIELD_BY_ADDRESS = {
+    int(field["address"]): field for field in DISPLAY_STATUS_RAM_FIELDS
+}
+DISPLAY_STATUS_EVENT_LIMIT = 50
+# Controller automation (clock sync, 0x0f0e auto-reset, real runtime).
+CONTROLLER_AUTOMATION_USER = "system-automation"
+AUTOMATION_TICK_SECONDS = 5.0
+RUNTIME_AUTO_MIN_RUNTIME_OFFSET = 3       # Block 50 Hka_Ew.bMindestlaufzeit = RAM 0x1acf
+RUNTIME_AUTO_COUNTER_MAX_AGE_SECONDS = 30.0
+RUNTIME_AUTO_BACKOFF_SECONDS = 60.0
+REAL_RUNTIME_LIVE_MAX_AGE_SECONDS = 10.0
+REAL_RUNTIME_CACHE_SECONDS = 5.0
+# Handbetrieb/Aktortest flag (reports/firmware-deep/phase6-live-leseplan.md P1.6,
+# motor.md: 0x1b5a == 1); read-only 1-byte service-0x02 read.
+RUNTIME_AUTO_MANUAL_MODE_FIELD = {
+    "key": "CPU0.RAM.0x001b5a",
+    "address": 0x1B5A,
+    "length": 1,
+    "signed": False,
+    "label": "Handbetrieb",
+    "unit": "",
+    "confidence": "hoch",
+    "note": "== 1: Handbetrieb/Aktortest aktiv",
+}
+DISPLAY_STATUS_EVENT_MAX_LIMIT = 500
+
+
+def soot_regeneration_supported(type_code: object):
+    """Return True/False for bit 3 of the Dachs type code, None when unknown."""
+    if isinstance(type_code, bool):
+        return None
+    try:
+        number = int(type_code)
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= number <= 0xFF:
+        return None
+    return bool(number & (1 << SOOT_REGENERATION_TYPE_BIT))
+
+
+def soot_regeneration_unavailable(type_code=None, error=None, recorded_at=None) -> dict:
+    supported = soot_regeneration_supported(type_code)
+    return {
+        "schema": SOOT_REGENERATION_SCHEMA,
+        "supported": supported,
+        "type_code": None if supported is None else int(type_code),
+        "type_code_key": SOOT_REGENERATION_TYPE_KEY,
+        "available": False,
+        "state": None,
+        "state_label": None,
+        "minutes_since_regeneration": None,
+        "minutes_until_next": None,
+        "regeneration_due": None,
+        "minutes_in_regeneration": None,
+        "minutes_remaining": None,
+        "interruptions": None,
+        "interruption_latched": None,
+        "interval_minutes": SOOT_REGENERATION_INTERVAL_MINUTES,
+        "duration_minutes": SOOT_REGENERATION_DURATION_MINUTES,
+        "interruption_limit": SOOT_REGENERATION_INTERRUPTION_LIMIT,
+        "semantics": "active_runtime_minutes",
+        "confidence": "hoch",
+        "raw": {},
+        "recorded_at": recorded_at,
+        "error": None if error is None else str(error),
+    }
+
+
+def soot_regeneration_status(type_code: object, fields: dict, recorded_at: str) -> dict:
+    """Combine the three gated RAM reads into one fail-closed status dict.
+
+    ``fields`` maps the allowlist keys to ``ram_telemetry_status``-style
+    dicts. Any unavailable field, an unsupported type code or an out-of-range
+    state byte yields ``available: False`` without partial derived values.
+    """
+    supported = soot_regeneration_supported(type_code)
+    if supported is None:
+        return soot_regeneration_unavailable(
+            None, error="Dachs-Typcode nicht lesbar", recorded_at=str(recorded_at)
+        )
+    if supported is False:
+        return soot_regeneration_unavailable(
+            type_code, error="nicht unterstützt (Typcode ohne Rußfilterbit)", recorded_at=str(recorded_at)
+        )
+    raw = {}
+    for field in SOOT_REGENERATION_FIELDS:
+        item = fields.get(field["key"]) or {}
+        if item.get("available") is not True or not isinstance(item.get("raw"), int):
+            return soot_regeneration_unavailable(
+                type_code,
+                error=f"{field['label']}: {item.get('error') or 'nicht gelesen'}",
+                recorded_at=str(recorded_at),
+            )
+        raw[field["address"]] = int(item["raw"])
+    state = raw[0x0DB3]
+    if state not in SOOT_REGENERATION_STATE_LABELS:
+        return {
+            **soot_regeneration_unavailable(
+                type_code,
+                error=f"Regenerationszustand {state} ist nicht belegt",
+                recorded_at=str(recorded_at),
+            ),
+            "raw": {f"0x{address:06x}": value for address, value in raw.items()},
+        }
+    minutes_since = raw[0x0DE6] & 0xFF
+    minutes_in = (raw[0x0DE6] >> 8) & 0xFF
+    counter = raw[0x0D82]
+    return {
+        **soot_regeneration_unavailable(type_code, recorded_at=str(recorded_at)),
+        "available": True,
+        "state": state,
+        "state_label": SOOT_REGENERATION_STATE_LABELS[state],
+        "minutes_since_regeneration": minutes_since,
+        "minutes_until_next": max(0, SOOT_REGENERATION_INTERVAL_MINUTES - minutes_since),
+        "regeneration_due": minutes_since >= SOOT_REGENERATION_INTERVAL_MINUTES,
+        "minutes_in_regeneration": minutes_in,
+        "minutes_remaining": max(0, SOOT_REGENERATION_DURATION_MINUTES - minutes_in),
+        "interruptions": counter & 0x7F,
+        "interruption_latched": bool(counter & 0x80),
+        "raw": {
+            "0x000db3": state,
+            "0x000de6": minutes_since,
+            "0x000de7": minutes_in,
+            "0x000d82": counter,
+        },
+        "error": None,
+    }
+
+
+def ram_telemetry_request(field: dict) -> bytes:
+    """Build the exact four-byte service-0x02 read for one allowlisted field."""
+    address = int(field["address"])
+    length = int(field["length"])
+    if not 0 <= address <= 0xFFFF or not 1 <= length <= 64:
+        raise ValueError(f"RAM-Telemetrie: ungültige Anfrage für {field.get('key')}")
+    return bytes([0x02, (address >> 8) & 0xFF, address & 0xFF, length])
+
+
+CONTROLLER_CLOCK_BLOCK = 50
+# Hka_Ew.ulSystemTime: Reglerzeit (lokal) in Sekunden seit 2000-01-01.
+CONTROLLER_CLOCK_OFFSET = 36
+CONTROLLER_CLOCK_TIMEZONE = ZoneInfo("Europe/Berlin")
+
+
+def controller_clock_status(
+    payload: bytes | None, read_age_seconds: float | None, max_age_seconds: float,
+    now: datetime | None = None,
+) -> dict:
+    """Controller clock against ODM time from the last fresh block-50 read.
+
+    Read-only and fail-closed: a missing, failed or stale read yields no
+    value at all, never an older one.
+    """
+    unavailable = {
+        "available": False,
+        "controller_time": None,
+        "odm_time": None,
+        "offset_seconds": None,
+        "source": "Block 50 Hka_Ew.ulSystemTime",
+    }
+    if payload is None or read_age_seconds is None:
+        return {**unavailable, "error": "Block 50 nicht gelesen"}
+    if read_age_seconds < 0 or read_age_seconds > max_age_seconds:
+        return {**unavailable, "error": "veraltet"}
+    if len(payload) < CONTROLLER_CLOCK_OFFSET + 4:
+        return {**unavailable, "error": "Block 50 zu kurz"}
+    raw = int.from_bytes(
+        payload[CONTROLLER_CLOCK_OFFSET:CONTROLLER_CLOCK_OFFSET + 4], "little", signed=False
+    )
+    if raw in {0, 0xFFFFFFFF}:
+        return {**unavailable, "error": f"ungültige Reglerzeit (Rohwert {raw})"}
+    read_at = (now or datetime.now(timezone.utc)) - timedelta(seconds=float(read_age_seconds))
+    odm_local = read_at.astimezone(CONTROLLER_CLOCK_TIMEZONE)
+    controller = datetime(2000, 1, 1) + timedelta(seconds=raw)
+    offset = (controller - odm_local.replace(tzinfo=None)).total_seconds()
+    return {
+        "available": True,
+        "controller_time": controller.isoformat(),
+        "odm_time": odm_local.isoformat(timespec="seconds"),
+        "offset_seconds": int(round(offset)),
+        "source": unavailable["source"],
+        "error": None,
+    }
+
+
+def ram_telemetry_unavailable(field: dict, error=None, recorded_at=None) -> dict:
+    return {
+        "schema": RAM_TELEMETRY_SCHEMA,
+        "key": field["key"],
+        "label": field["label"],
+        "address": f"0x{int(field['address']):06x}",
+        "length": int(field["length"]),
+        "signed": bool(field["signed"]),
+        "unit": field["unit"],
+        "confidence": field["confidence"],
+        "note": field["note"],
+        "available": False,
+        "raw": None,
+        "value": None,
+        "recorded_at": recorded_at,
+        "rtt_ms": None,
+        "error": None if error is None else str(error),
+    }
+
+
 ADAPTIVE_RAW_RETENTION_HOURS = 24
 ADAPTIVE_EVENT_MARGIN_SECONDS = 3600
 ADAPTIVE_ROLLUP_SECONDS = 900
@@ -203,7 +717,10 @@ DEFAULT_DASHBOARD_SERIES = (
     ("drehzahl", "Drehzahl", 24, "Hka_Mw1.usDrehzahl", "1/min", "#0f766e"),
     ("wirkleistung", "Wirkleistung Ist", 24, "Hka_Mw1.sWirkleistung", "kW", "#0891b2"),
     ("wirkleistung_soll", "Wirkleistung Soll", 50, "Hka_Ew.usSollGenerator", "kW", "#d97706"),
-    ("betriebsstunden", "Laufzeit seit Start", 24, "Hka_Mw1.ulMotorlaufsekunden", "h", "#7c3aed"),
+    # 0x0f0e is the controller's own, deliberately resettable runtime counter.
+    # The id and the tuple position stay unchanged (HISTORY_SERIES index);
+    # the real runtime since start comes from ``real_runtime``.
+    ("betriebsstunden", "Reglerzähler (0x0f0e)", 24, "Hka_Mw1.ulMotorlaufsekunden", "h", "#7c3aed"),
     ("motorstatus", "Motorstatus", 24, "Hka_Mw1.bMotorStatus", "", "#475569"),
     ("betriebsstunden_gesamt", "Betriebsstunden gesamt", 22, "Hka_Bd.ulBetriebssekunden", "h", "#7c3aed"),
     ("starts", "Anzahl Starts", 22, "Hka_Bd.ulAnzahlStarts", "", "#ea580c"),
@@ -228,7 +745,7 @@ DEFAULT_DASHBOARD_SERIES = (
 HISTORY_SERIES = tuple(
     item
     for item in DEFAULT_DASHBOARD_SERIES
-    if item[2] in DEFAULT_FAST_MONITOR_BLOCKS
+    if (item[2] in (22, 24) or item[0] == "frequenz")
     and item[3] != "Hka_Mw1.Temp.DachsAustritt"
 )
 HISTORY_MEASUREMENT_KEYS = frozenset(
@@ -247,25 +764,74 @@ DEFAULT_OVERVIEW_SERIES_IDS = (
     "kapsel",
     "regler",
     "betriebsstunden_gesamt",
-    "betriebsstunden",
     "starts",
     "arbeit_elektr",
     "arbeit_therm_hka",
     "arbeit_therm_kon",
     "servicecode",
 )
+# Retired synthetic tile key; retained solely to migrate existing selections
+# to the controller-provided Block-38 value.
 DASHBOARD_OPERATING_HOURS_PER_START_KEY = "derived.operating_hours_per_start"
+DASHBOARD_RUNTIME_24H_KEY = "derived.runtime_24h_shutdown"
+DASHBOARD_SOOT_REGENERATION_KEY = "derived.soot_filter_regeneration"
+DASHBOARD_RAM_TELEMETRY_KEY = "derived.ram_telemetry"
+DASHBOARD_DISPLAY_STATUS_KEY = "derived.display_status"
+# Retired tile: the real runtime is now the main value of the runtime tile.
+DASHBOARD_REAL_RUNTIME_KEY = "derived.real_runtime"
+DASHBOARD_RETIRED_CARDS = {
+    (24, DASHBOARD_REAL_RUNTIME_KEY): (22, DASHBOARD_RUNTIME_24H_KEY),
+    (22, DASHBOARD_OPERATING_HOURS_PER_START_KEY): (
+        OPERATING_HOURS_PER_START_BLOCK,
+        OPERATING_HOURS_PER_START_KEY,
+    ),
+}
+# Derived history series, reconstructed from motor_status_points at query
+# time; it has no HISTORY_SERIES slot and needs no database migration.
+HISTORY_REAL_RUNTIME_SERIES = {
+    "id": "laufzeit_real",
+    "title": "Laufzeit seit Start (real)",
+    "block": 24,
+    "key": DASHBOARD_REAL_RUNTIME_KEY,
+    "unit": "h",
+    "color": "#7c3aed",
+    "derived": True,
+}
 DASHBOARD_DERIVED_FIELDS = (
     (
-        "operating_hours_per_start",
-        "Betriebsstunden je Start",
+        "runtime_24h_shutdown",
+        "Laufzeit seit Start",
         22,
-        DASHBOARD_OPERATING_HOURS_PER_START_KEY,
-        "Bh/Start",
+        DASHBOARD_RUNTIME_24H_KEY,
+        "",
+    ),
+    # Optional tiles: never part of the defaults and never migrated into
+    # existing user selections. Operators add them via "Bearbeiten".
+    (
+        "soot_filter_regeneration",
+        "Rußfilterregeneration",
+        24,
+        DASHBOARD_SOOT_REGENERATION_KEY,
+        "",
+    ),
+    (
+        "ram_telemetry",
+        "Interne Reglerwerte",
+        24,
+        DASHBOARD_RAM_TELEMETRY_KEY,
+        "",
+    ),
+    (
+        "display_status",
+        "Display-Status",
+        22,
+        DASHBOARD_DISPLAY_STATUS_KEY,
+        "",
     ),
 )
 MAX_DASHBOARD_CARDS = 24
 MAX_DASHBOARD_EXTRA_BLOCKS = 12
+DASHBOARD_SETTINGS_VERSION = 2
 SOOT_FILTER_SOURCE_KEY = "Hka_Mw1.Temp.sAbgasMotor"
 DEFAULT_SOOT_FILTER_ZERO_C = 420.0
 DEFAULT_SOOT_FILTER_FULL_C = 520.0
@@ -335,61 +901,201 @@ def _json_value(value):
 
 
 def operating_hours_per_start(values: list[dict]) -> dict:
-    """Derive coherent Bh/Start from the two raw Block-22 counters."""
-    source: dict[tuple[int, str], dict] = {}
-    for item in values:
-        if not isinstance(item, dict):
-            continue
-        try:
-            identity = (int(item.get("block", -1)), str(item.get("key", "")))
-        except (TypeError, ValueError):
-            continue
-        source[identity] = item
-    seconds_row = source.get((22, "Hka_Bd.ulBetriebssekunden"))
-    starts_row = source.get((22, "Hka_Bd.ulAnzahlStarts"))
+    """Return the controller-provided Block-38 Bh/Start value."""
     result = {
         "available": False,
         "value": None,
         "unit": "Bh/Start",
-        "source_block": 22,
-        "operating_seconds": None,
-        "starts": None,
+        "source_block": OPERATING_HOURS_PER_START_BLOCK,
+        "source_key": OPERATING_HOURS_PER_START_KEY,
+        "raw": None,
         "recorded_at": None,
     }
-    if seconds_row is None or starts_row is None:
+    row = next(
+        (
+            item
+            for item in values
+            if isinstance(item, dict)
+            and item.get("block") == OPERATING_HOURS_PER_START_BLOCK
+            and item.get("key") == OPERATING_HOURS_PER_START_KEY
+        ),
+        None,
+    )
+    if row is None:
         return result
-
-    def raw_u32(value: object) -> int | None:
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, int):
-            number = value
-        elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
-            number = int(value.strip())
-        else:
-            return None
-        return number if 0 <= number <= 0xFFFFFFFF else None
-
-    seconds = raw_u32(seconds_row.get("raw"))
-    starts = raw_u32(starts_row.get("raw"))
-    seconds_recorded = str(seconds_row.get("recorded_at") or "")
-    starts_recorded = str(starts_row.get("recorded_at") or "")
+    raw = row.get("raw")
+    value = row.get("value")
+    recorded_at = str(row.get("recorded_at") or "")
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 0 <= raw <= 0xFF:
+        return result
+    if isinstance(value, bool):
+        return result
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return result
     if (
-        seconds is None
-        or starts is None
-        or starts == 0
-        or not seconds_recorded
-        or seconds_recorded != starts_recorded
+        not math.isfinite(number)
+        or abs(number - raw / 10.0) > 1e-9
+        or not recorded_at
     ):
         return result
     return {
         **result,
         "available": True,
-        "value": seconds / 3600.0 / starts,
-        "operating_seconds": seconds,
-        "starts": starts,
-        "recorded_at": seconds_recorded,
+        "value": number,
+        "raw": raw,
+        "recorded_at": recorded_at,
     }
+
+
+def runtime_24h_status(response, recorded_at: str) -> dict:
+    """Decode one exact CPU-0 RAM-read response for the 24-hour counter."""
+    ack = getattr(response, "ack", None)
+    data = getattr(response, "data", None)
+    if ack is None or getattr(ack, "positive", None) is not True:
+        raise TransportError("24-h-Zähler: kein positives Transport-ACK")
+    payload = bytes(getattr(data, "payload", b"")) if data is not None else b""
+    expected = bytes([0x82]) + RUNTIME_24H_REQUEST[1:]
+    if len(payload) != len(expected) + RUNTIME_24H_COUNTER_LENGTH or not payload.startswith(expected):
+        raise TransportError(
+            "24-h-Zähler: unerwartete RAM-Read-Antwort "
+            f"{payload.hex() or 'leer'}"
+        )
+    counter = int.from_bytes(payload[len(expected):], "little", signed=False)
+    remaining = max(0, RUNTIME_24H_SHUTDOWN_SECONDS - counter)
+    night_remaining = max(0, RUNTIME_NIGHT_SHUTDOWN_GATE_SECONDS - counter)
+    return {
+        "schema": "open-dachs-runtime-24h/v1",
+        "available": True,
+        "counter_seconds": counter,
+        "remaining_run_seconds": remaining,
+        "shutdown_threshold_seconds": RUNTIME_24H_SHUTDOWN_SECONDS,
+        "threshold_reached": counter >= RUNTIME_24H_SHUTDOWN_SECONDS,
+        "night_shutdown_gate_seconds": RUNTIME_NIGHT_SHUTDOWN_GATE_SECONDS,
+        "remaining_to_night_gate_seconds": night_remaining,
+        "night_shutdown_gate_reached": counter >= RUNTIME_NIGHT_SHUTDOWN_GATE_SECONDS,
+        "counter_address": f"0x{RUNTIME_24H_COUNTER_ADDRESS:04x}",
+        "recorded_at": str(recorded_at),
+        "rtt_ms": round(float(getattr(response, "elapsed_ms", 0.0)), 1),
+        "semantics": "active_runtime_seconds",
+        "wall_clock_countdown": False,
+    }
+
+
+def ram_telemetry_status(field: dict, response, recorded_at: str) -> dict:
+    """Decode one exact CPU-0 RAM-read response for an allowlisted field."""
+    label = field["label"]
+    ack = getattr(response, "ack", None)
+    data = getattr(response, "data", None)
+    if ack is None or getattr(ack, "positive", None) is not True:
+        raise TransportError(f"{label}: kein positives Transport-ACK")
+    payload = bytes(getattr(data, "payload", b"")) if data is not None else b""
+    request = ram_telemetry_request(field)
+    expected = bytes([0x82]) + request[1:]
+    length = int(field["length"])
+    if len(payload) != len(expected) + length or not payload.startswith(expected):
+        raise TransportError(
+            f"{label}: unerwartete RAM-Read-Antwort {payload.hex() or 'leer'}"
+        )
+    raw_bytes = payload[len(expected):]
+    raw = int.from_bytes(raw_bytes, "little", signed=False)
+    value = int.from_bytes(raw_bytes, "little", signed=bool(field["signed"]))
+    return {
+        **ram_telemetry_unavailable(field, recorded_at=str(recorded_at)),
+        "available": True,
+        "raw": raw,
+        "value": value,
+        "rtt_ms": round(float(getattr(response, "elapsed_ms", 0.0)), 1),
+        "error": None,
+    }
+
+
+def runtime_24h_write_seconds(value: object) -> int:
+    """Parse seconds or HH:MM:SS and reject the shutdown threshold."""
+    if isinstance(value, bool):
+        raise ValueError("24-h-Zähler muss als HH:MM:SS oder ganze Sekundenzahl angegeben werden")
+    if isinstance(value, int):
+        seconds = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"[0-9]+", text):
+            seconds = int(text)
+        else:
+            match = re.fullmatch(r"([0-9]{1,2}):([0-9]{2}):([0-9]{2})", text)
+            if match is None:
+                raise ValueError("24-h-Zähler benötigt HH:MM:SS oder ganze Sekunden")
+            hours, minutes, remainder = (int(part) for part in match.groups())
+            if minutes > 59 or remainder > 59:
+                raise ValueError("24-h-Zähler enthält ungültige Minuten oder Sekunden")
+            seconds = hours * 3600 + minutes * 60 + remainder
+    else:
+        raise ValueError("24-h-Zähler muss als HH:MM:SS oder ganze Sekundenzahl angegeben werden")
+    if not 0 <= seconds <= RUNTIME_24H_MAX_SETTABLE_SECONDS:
+        raise ValueError(
+            f"24-h-Zähler muss zwischen 0 und {RUNTIME_24H_MAX_SETTABLE_SECONDS} Sekunden liegen; "
+            f"{RUNTIME_24H_SHUTDOWN_SECONDS} oder mehr würde unmittelbar die Sicherheitsabschaltung anfordern"
+        )
+    return seconds
+
+
+def validate_runtime_24h_write_response(response) -> None:
+    """Accept only the live-confirmed exact service-0x03 response."""
+    ack = getattr(response, "ack", None)
+    data = getattr(response, "data", None)
+    if ack is None or getattr(ack, "positive", None) is not True:
+        raise TransportError("24-h-Zähler: RAM-Write erhielt kein positives Transport-ACK")
+    payload = bytes(getattr(data, "payload", b"")) if data is not None else b""
+    expected = bytes([0x83]) + RUNTIME_24H_WRITE_PREFIX[1:]
+    if payload != expected:
+        raise TransportError(
+            "24-h-Zähler: unerwartete RAM-Write-Antwort "
+            + (payload.hex() or "leer")
+        )
+
+
+def validate_service_reset_write_response(response) -> None:
+    """Require the exact ACK and echo observed for RAM 0x1c9e."""
+    ack = getattr(response, "ack", None)
+    data = getattr(response, "data", None)
+    if ack is None or getattr(ack, "positive", None) is not True:
+        raise TransportError("Entstörung: RAM-Write erhielt kein positives Transport-ACK")
+    payload = bytes(getattr(data, "payload", b"")) if data is not None else b""
+    if payload != SERVICE_RESET_RESPONSE:
+        raise TransportError(
+            "Entstörung: unerwartete redigierte RAM-Write-Antwort "
+            f"(Länge={len(payload)}, Präfix={payload[:4].hex() or 'leer'})"
+        )
+
+
+def dachs_control_read_byte(response, request: bytes, label: str) -> int:
+    """Decode one exact one-byte CPU-0 RAM response, fail-closed."""
+    ack = getattr(response, "ack", None)
+    data = getattr(response, "data", None)
+    if ack is None or getattr(ack, "positive", None) is not True:
+        raise TransportError(f"Dachs {label}: RAM-Read erhielt kein positives Transport-ACK")
+    payload = bytes(getattr(data, "payload", b"")) if data is not None else b""
+    expected = bytes([0x82]) + bytes(request[1:])
+    if len(payload) != 5 or not payload.startswith(expected):
+        raise TransportError(
+            f"Dachs {label}: unerwartete RAM-Read-Antwort "
+            f"(Länge={len(payload)}, Präfix={payload[:4].hex() or 'leer'})"
+        )
+    return int(payload[4])
+
+
+def validate_dachs_control_write_response(response) -> None:
+    """Require the exact ACK and address/length echo for RAM 0x0ea1."""
+    ack = getattr(response, "ack", None)
+    data = getattr(response, "data", None)
+    if ack is None or getattr(ack, "positive", None) is not True:
+        raise TransportError("Dachs Ein/Aus: RAM-Write erhielt kein positives Transport-ACK")
+    payload = bytes(getattr(data, "payload", b"")) if data is not None else b""
+    if payload != DACHS_CONTROL_WRITE_RESPONSE:
+        raise TransportError(
+            "Dachs Ein/Aus: unerwartete RAM-Write-Antwort "
+            f"(Länge={len(payload)}, Präfix={payload[:4].hex() or 'leer'})"
+        )
 
 
 def _field_edit_value(field) -> object:
@@ -447,6 +1153,19 @@ def web_field_visible(block: int, key: str, metadata: dict | None = None) -> boo
     return True
 
 
+def generic_web_field_writable(block: int, metadata: dict) -> bool:
+    """Hide firmware-owned SC123 bytes from generic edit affordances."""
+    try:
+        offset = int(metadata.get("offset", -1))
+        size = int(metadata.get("size", -1))
+    except (TypeError, ValueError):
+        return False
+    if offset < 0 or size < 1:
+        return False
+    protected = set(sc123_firmware_owned_offsets(0, int(block)))
+    return protected.isdisjoint(range(offset, offset + size))
+
+
 def web_measurement_valid(block: int, key: str, value, raw=None) -> bool:
     """Reject known sensor sentinels and pre-fix decoder outliers."""
     if int(block) != 24:
@@ -487,6 +1206,8 @@ def web_monitor_field_visible(block: int, key: str) -> bool:
     block = int(block)
     if block == POWER_TARGET_BLOCK:
         return key == POWER_TARGET_KEY
+    if block == OPERATING_HOURS_PER_START_BLOCK:
+        return key == OPERATING_HOURS_PER_START_KEY
     if block == 104:
         return key in MAINTENANCE_CACHE_KEYS
     return True
@@ -626,6 +1347,17 @@ class DachsStore:
                     recorded_at TEXT PRIMARY KEY,
                     status INTEGER CHECK(status IS NULL OR (status>=0 AND status<=255))
                 );
+                CREATE TABLE IF NOT EXISTS display_status_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recorded_at TEXT NOT NULL,
+                    line1 TEXT NOT NULL,
+                    line2 TEXT NOT NULL,
+                    line1_index INTEGER,
+                    line2_index INTEGER,
+                    service_code INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_display_status_events_time
+                    ON display_status_events(recorded_at);
                 CREATE TABLE IF NOT EXISTS history_migrations (
                     name TEXT PRIMARY KEY,
                     completed_at TEXT NOT NULL,
@@ -668,6 +1400,75 @@ class DachsStore:
                     block INTEGER NOT NULL,
                     audit_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS update_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recorded_at TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    request_id TEXT,
+                    version TEXT,
+                    details_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_update_audit_time
+                    ON update_audit(recorded_at DESC,id DESC);
+                CREATE TABLE IF NOT EXISTS notification_state (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    updated_at TEXT NOT NULL,
+                    state_json TEXT NOT NULL
+                );
+                INSERT OR IGNORE INTO notification_state(singleton,updated_at,state_json)
+                    VALUES(1,'','{}');
+                CREATE TABLE IF NOT EXISTS notification_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL UNIQUE,
+                    category TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    event_json TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','dead','canceled')),
+                    attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+                    next_attempt_at TEXT,
+                    last_attempt_at TEXT,
+                    sent_at TEXT,
+                    last_error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_notification_outbox_status_next
+                    ON notification_outbox(status,next_attempt_at,id);
+                CREATE TABLE IF NOT EXISTS notification_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recorded_at TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    details_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_notification_audit_time
+                    ON notification_audit(recorded_at DESC,id DESC);
+                CREATE TABLE IF NOT EXISTS notification_dispatch_state (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    paused_revision INTEGER,
+                    paused_reason TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT OR IGNORE INTO notification_dispatch_state(
+                    singleton,paused_revision,paused_reason,updated_at
+                ) VALUES(1,NULL,NULL,'1970-01-01T00:00:00+00:00');
+                CREATE TABLE IF NOT EXISTS service_reset_write_intents (
+                    intent_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    service_code_raw INTEGER NOT NULL CHECK(service_code_raw BETWEEN 1 AND 255),
+                    fault_count INTEGER NOT NULL CHECK(fault_count BETWEEN 0 AND 65535),
+                    fault_runtime_seconds INTEGER NOT NULL CHECK(fault_runtime_seconds BETWEEN 0 AND 4294967295),
+                    status TEXT NOT NULL CHECK(status IN ('pending','resolved')),
+                    resolution TEXT,
+                    details_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_service_reset_intents_status_created
+                    ON service_reset_write_intents(status, created_at);
                 CREATE TABLE IF NOT EXISTS maintenance_reports (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     created_at TEXT NOT NULL,
@@ -678,7 +1479,10 @@ class DachsStore:
                     report_json TEXT NOT NULL,
                     protocol_json TEXT NOT NULL,
                     completed_at TEXT,
-                    completion_json TEXT
+                    completion_json TEXT,
+                    maintenance_kind TEXT NOT NULL DEFAULT 'regular',
+                    maintenance_number TEXT,
+                    local_reason TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_maintenance_reports_created
                     ON maintenance_reports(created_at DESC);
@@ -731,6 +1535,31 @@ class DachsStore:
                 );
                 """
             )
+            notification_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(notification_outbox)").fetchall()
+            }
+            if "recipient" not in notification_columns:
+                db.execute(
+                    "ALTER TABLE notification_outbox ADD COLUMN recipient TEXT NOT NULL DEFAULT ''"
+                )
+            if "message_id" not in notification_columns:
+                db.execute(
+                    "ALTER TABLE notification_outbox ADD COLUMN message_id TEXT NOT NULL DEFAULT ''"
+                )
+            db.execute(
+                "UPDATE notification_outbox SET status='dead',next_attempt_at=NULL,"
+                "last_error=COALESCE(last_error,'Prozessabbruch beim letzten SMTP-Versuch') "
+                "WHERE status='sending' AND attempts>=?",
+                (EMAIL_MAX_ATTEMPTS,),
+            )
+            db.execute(
+                "UPDATE notification_outbox SET status='pending',"
+                "next_attempt_at=COALESCE(next_attempt_at,created_at),"
+                "last_error=COALESCE(last_error,'Prozessabbruch während SMTP-Versand') "
+                "WHERE status='sending' AND attempts<?",
+                (EMAIL_MAX_ATTEMPTS,),
+            )
             request_columns = {
                 str(row["name"])
                 for row in db.execute("PRAGMA table_info(api_requests)").fetchall()
@@ -743,6 +1572,26 @@ class DachsStore:
                 db.execute(
                     "ALTER TABLE api_requests ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
                 )
+            maintenance_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(maintenance_reports)").fetchall()
+            }
+            # SQLite DDL is transactional here: all v1.8.1 maintenance metadata
+            # columns become visible together or the connection rolls back.
+            if "maintenance_kind" not in maintenance_columns:
+                db.execute(
+                    "ALTER TABLE maintenance_reports ADD COLUMN maintenance_kind "
+                    "TEXT NOT NULL DEFAULT 'regular'"
+                )
+            if "maintenance_number" not in maintenance_columns:
+                db.execute("ALTER TABLE maintenance_reports ADD COLUMN maintenance_number TEXT")
+            if "local_reason" not in maintenance_columns:
+                db.execute("ALTER TABLE maintenance_reports ADD COLUMN local_reason TEXT")
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_maintenance_reports_number "
+                "ON maintenance_reports(maintenance_number) "
+                "WHERE maintenance_number IS NOT NULL"
+            )
             archive_columns = {
                 str(row["name"])
                 for row in db.execute("PRAGMA table_info(backup_archives)").fetchall()
@@ -810,12 +1659,13 @@ class DachsStore:
         end: datetime,
         limit: int,
     ) -> list[dict]:
-        with self.lock:
-            db = self.connect()
-            try:
-                return self._measurements_between_db(db, block, key, start, end, limit)
-            finally:
-                db.close()
+        # Read-only: WAL readers never block the monitor's commits, so the
+        # writer lock is not taken (a long chart query held it for seconds).
+        db = self.connect()
+        try:
+            return self._measurements_between_db(db, block, key, start, end, limit)
+        finally:
+            db.close()
 
     @staticmethod
     def _merge_measurement_rows(
@@ -1589,6 +2439,111 @@ class DachsStore:
             )
         return {"complete": complete, "scanned": scanned, "inserted": inserted}
 
+    def real_runtime_series(
+        self,
+        start: datetime,
+        end: datetime,
+        limit: int = HISTORY_MAX_POINTS,
+    ) -> list[dict]:
+        """Reconstruct "Laufzeit seit Start (real)" from motor_status_points.
+
+        The real runtime grows linearly from 0 at each observed run start, so
+        only the run boundaries are emitted (start 0, last running point,
+        drop to 0 at the stop). Runs whose beginning lies in a recording gap
+        are skipped instead of guessed. Read-only, no schema change.
+        """
+        start = start.astimezone(timezone.utc)
+        end = end.astimezone(timezone.utc)
+        if end <= start:
+            return []
+        running = REAL_RUNTIME_RUNNING_STATUS
+        db = self.connect()
+        try:
+            anchor = db.execute(
+                "SELECT recorded_at FROM motor_status_points WHERE recorded_at<=? "
+                "AND status IS NOT NULL AND status<? ORDER BY recorded_at DESC LIMIT 1",
+                (start.isoformat(), running),
+            ).fetchone()
+            if anchor is not None:
+                rows = db.execute(
+                    "SELECT recorded_at,status FROM motor_status_points "
+                    "WHERE recorded_at>=? AND recorded_at<=? ORDER BY recorded_at",
+                    (anchor["recorded_at"], end.isoformat()),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT recorded_at,status FROM motor_status_points "
+                    "WHERE recorded_at<=? ORDER BY recorded_at",
+                    (end.isoformat(),),
+                ).fetchall()
+        finally:
+            db.close()
+
+        runs: list[tuple[datetime, datetime, datetime | None]] = []
+        run_start: datetime | None = None
+        last_running: datetime | None = None
+        previous: datetime | None = None
+        unknown = False
+        for row in rows:
+            point = self._parse_recorded_at(row["recorded_at"])
+            if point is None:
+                continue
+            status = int(row["status"]) if row["status"] is not None else None
+            if previous is not None and (point - previous).total_seconds() > MOTOR_STATUS_GAP_SECONDS:
+                if run_start is not None:
+                    runs.append((run_start, last_running or run_start, None))
+                run_start = None
+                unknown = True
+            if status is None:
+                if run_start is not None:
+                    runs.append((run_start, last_running or run_start, None))
+                run_start = None
+                unknown = True
+            elif status < running:
+                if run_start is not None:
+                    runs.append((run_start, point, point))
+                run_start = None
+                unknown = False
+            elif run_start is None and not unknown:
+                run_start = point
+            if status is not None and status >= running and run_start is not None:
+                last_running = point
+            previous = point
+        if run_start is not None:
+            last = last_running or run_start
+            if (end - last).total_seconds() <= MOTOR_STATUS_GAP_SECONDS:
+                last = end
+            runs.append((run_start, last, None))
+
+        points: list[tuple[datetime, int]] = []
+        for run_from, run_to, stopped_at in runs:
+            if run_to < start or run_from > end:
+                continue
+            first = max(start, run_from)
+            last = min(end, run_to)
+            points.append((first, int((first - run_from).total_seconds())))
+            if last > first:
+                points.append((last, int((last - run_from).total_seconds())))
+            if stopped_at is not None and start <= stopped_at <= end:
+                points.append((stopped_at, 0))
+        if len(points) > limit:
+            points = points[-limit:]
+        title = HISTORY_REAL_RUNTIME_SERIES["title"]
+        return [
+            {
+                "recorded_at": moment.isoformat(),
+                "block": HISTORY_REAL_RUNTIME_SERIES["block"],
+                "field_key": HISTORY_REAL_RUNTIME_SERIES["key"],
+                "label": title,
+                "raw": seconds,
+                "value": round(seconds / 3600.0, 3),
+                "unit": HISTORY_REAL_RUNTIME_SERIES["unit"],
+                "rtt_ms": None,
+                "series_id": HISTORY_REAL_RUNTIME_SERIES["id"],
+            }
+            for moment, seconds in points
+        ]
+
     def motor_status_segments(
         self,
         start: datetime,
@@ -1681,6 +2636,103 @@ class DachsStore:
             return segments
         finally:
             db.close()
+
+    def _operating_seconds_near(
+        self, db: sqlite3.Connection, recorded_at: str, *, before: bool
+    ) -> int | None:
+        """Hka_Bd.ulBetriebssekunden from the history sample closest to a point."""
+        index = HISTORY_SERIES_INDEX.get((22, "Hka_Bd.ulBetriebssekunden"))
+        point = self._parse_recorded_at(recorded_at)
+        if index is None or point is None:
+            return None
+        query = (
+            "SELECT recorded_at,sample_json FROM history_samples WHERE recorded_at<=? "
+            "ORDER BY recorded_at DESC LIMIT 8"
+            if before
+            else "SELECT recorded_at,sample_json FROM history_samples WHERE recorded_at>=? "
+            "ORDER BY recorded_at LIMIT 8"
+        )
+        for row in db.execute(query, (recorded_at,)):
+            sample_at = self._parse_recorded_at(row["recorded_at"])
+            if sample_at is None or abs((sample_at - point).total_seconds()) > REAL_RUNTIME_SAMPLE_WINDOW_SECONDS:
+                return None
+            try:
+                sample = json.loads(row["sample_json"])["values"][index]
+                raw = int(sample[0]) if sample and not isinstance(sample[0], bool) else None
+            except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                raw = None
+            if raw is not None and raw >= 0:
+                return raw
+        return None
+
+    def real_runtime_history(self) -> dict:
+        """Reconstruct the current run/stop boundaries from motor_status_points.
+
+        Read-only on its own WAL connection (never ``self.lock``), so a web
+        request can not delay the monitor commit.
+        """
+        running = REAL_RUNTIME_RUNNING_STATUS
+        db = self.connect()
+        try:
+            standstill = db.execute(
+                "SELECT recorded_at FROM motor_status_points WHERE status IS NOT NULL "
+                "AND status<? ORDER BY recorded_at DESC LIMIT 1",
+                (running,),
+            ).fetchone()
+            if standstill is not None:
+                start = db.execute(
+                    "SELECT recorded_at FROM motor_status_points WHERE recorded_at>? "
+                    "AND status>=? ORDER BY recorded_at LIMIT 1",
+                    (standstill["recorded_at"], running),
+                ).fetchone()
+                gap = db.execute(
+                    "SELECT 1 FROM motor_status_points WHERE recorded_at>? AND status IS NULL LIMIT 1",
+                    (standstill["recorded_at"],),
+                ).fetchone() is not None
+            else:
+                start = db.execute(
+                    "SELECT recorded_at FROM motor_status_points WHERE status>=? "
+                    "ORDER BY recorded_at LIMIT 1",
+                    (running,),
+                ).fetchone()
+                gap = start is not None and db.execute(
+                    "SELECT 1 FROM motor_status_points WHERE recorded_at>? AND status IS NULL LIMIT 1",
+                    (start["recorded_at"],),
+                ).fetchone() is not None
+            last_running = db.execute(
+                "SELECT recorded_at FROM motor_status_points WHERE status>=? "
+                "ORDER BY recorded_at DESC LIMIT 1",
+                (running,),
+            ).fetchone()
+            stopped = None
+            stop_gap = False
+            if last_running is not None:
+                stopped = db.execute(
+                    "SELECT recorded_at FROM motor_status_points WHERE recorded_at>? "
+                    "AND status IS NOT NULL AND status<? ORDER BY recorded_at LIMIT 1",
+                    (last_running["recorded_at"], running),
+                ).fetchone()
+                if stopped is not None:
+                    stop_gap = db.execute(
+                        "SELECT 1 FROM motor_status_points WHERE recorded_at>? AND recorded_at<? "
+                        "AND status IS NULL LIMIT 1",
+                        (last_running["recorded_at"], stopped["recorded_at"]),
+                    ).fetchone() is not None
+            operating_at_standstill = (
+                self._operating_seconds_near(db, standstill["recorded_at"], before=True)
+                if standstill is not None and gap
+                else None
+            )
+        finally:
+            db.close()
+        return {
+            "standstill_at": self._parse_recorded_at(standstill["recorded_at"]) if standstill else None,
+            "start_at": self._parse_recorded_at(start["recorded_at"]) if start else None,
+            "gap": bool(gap),
+            "operating_seconds_at_standstill": operating_at_standstill,
+            "stopped_since": self._parse_recorded_at(stopped["recorded_at"]) if stopped else None,
+            "stop_gap": stop_gap,
+        }
 
     def _adaptive_series_ids_db(self, db: sqlite3.Connection, rows: list[dict]) -> dict[tuple[int, str], int]:
         identities: list[tuple[int, str]] = []
@@ -1891,14 +2943,15 @@ class DachsStore:
         }
 
     def adaptive_catalog(self) -> list[dict]:
-        with self.lock, self.database() as db:
+        with self.database() as db:
             rows = db.execute(
                 "SELECT id,block,field_key,label,unit,value_type FROM adaptive_series ORDER BY block,field_key"
             ).fetchall()
         return [dict(row) for row in rows]
 
     def adaptive_status(self) -> dict:
-        with self.lock, self.database() as db:
+        # Read-only full-table aggregate; must not stall the monitor's writes.
+        with self.database() as db:
             raw = db.execute(
                 "SELECT COUNT(*) AS count,SUM(preserve) AS preserved,MIN(recorded_at) AS oldest,"
                 "MAX(recorded_at) AS newest,COALESCE(SUM(length(sample_blob)),0) AS bytes FROM adaptive_raw_samples"
@@ -1928,7 +2981,9 @@ class DachsStore:
         start = start.astimezone(timezone.utc)
         end = end.astimezone(timezone.utc)
         limit = min(HISTORY_MAX_POINTS, max(1, int(limit)))
-        with self.lock, self.database() as db:
+        # Read-only: no writer lock. On ODM the sampling query alone takes
+        # 0.36 s (24 h) to 1.8 s (30 d) and used to block monitor commits.
+        with self.database() as db:
             series = db.execute(
                 "SELECT id,label,unit,value_type FROM adaptive_series WHERE block=? AND field_key=?",
                 (block, key),
@@ -2167,6 +3222,545 @@ class DachsStore:
                 (recorded_at, username, block, json.dumps(audit, ensure_ascii=False)),
             )
 
+    def update_audit(self, recorded_at: str, username: str, action: str,
+                     request_id: str | None, version: str | None, details: dict) -> None:
+        with self.lock, self.database() as db:
+            db.execute(
+                "INSERT INTO update_audit(recorded_at,username,action,request_id,version,details_json) "
+                "VALUES(?,?,?,?,?,?)",
+                (str(recorded_at), str(username), str(action), request_id, version,
+                 json.dumps(details, ensure_ascii=False, separators=(",", ":"))),
+            )
+
+    def notification_audit(
+        self, recorded_at: str, actor: str, action: str, details: dict
+    ) -> None:
+        with self.lock, self.database() as db:
+            db.execute(
+                "INSERT INTO notification_audit(recorded_at,actor,action,details_json) "
+                "VALUES(?,?,?,?)",
+                (
+                    str(recorded_at), str(actor), str(action),
+                    json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+
+    def notification_audits(self, limit: int = 50) -> list[dict]:
+        limit = max(1, min(200, int(limit)))
+        with self.lock, self.database() as db:
+            rows = db.execute(
+                "SELECT id,recorded_at,actor,action,details_json FROM notification_audit "
+                "ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["details"] = json.loads(str(item.pop("details_json")))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item["details"] = {}
+            result.append(item)
+        return result
+
+    def notification_state(self) -> dict:
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT state_json FROM notification_state WHERE singleton=1"
+            ).fetchone()
+        try:
+            state = json.loads(str(row["state_json"])) if row else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return state if isinstance(state, dict) else {}
+
+    def notification_dispatch_pause(self) -> dict:
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT paused_revision,paused_reason,updated_at "
+                "FROM notification_dispatch_state WHERE singleton=1"
+            ).fetchone()
+        if row is None or row["paused_revision"] is None:
+            return {"paused_revision": None, "paused_reason": None, "updated_at": None}
+        return {
+            "paused_revision": int(row["paused_revision"]),
+            "paused_reason": str(row["paused_reason"] or ""),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def set_notification_dispatch_pause(
+        self, revision: int, reason: str, recorded_at: str
+    ) -> None:
+        with self.lock, self.database() as db:
+            db.execute(
+                "UPDATE notification_dispatch_state SET "
+                "paused_revision=?,paused_reason=?,updated_at=? WHERE singleton=1",
+                (int(revision), str(reason)[:1000], str(recorded_at)),
+            )
+
+    def clear_notification_dispatch_pause(self, recorded_at: str) -> None:
+        with self.lock, self.database() as db:
+            db.execute(
+                "UPDATE notification_dispatch_state SET "
+                "paused_revision=NULL,paused_reason=NULL,updated_at=? WHERE singleton=1",
+                (str(recorded_at),),
+            )
+
+    def record_notification_observation(
+        self,
+        recorded_at: str,
+        state: dict | None,
+        messages: list[dict],
+        audit: dict | None = None,
+    ) -> int:
+        """Atomically advance optional edge state and enqueue deduplicated messages."""
+        state_json = (
+            json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+            if isinstance(state, dict)
+            else None
+        )
+        inserted = 0
+        dropped = 0
+        with self.lock, self.database() as db:
+            active = int(db.execute(
+                "SELECT COUNT(*) FROM notification_outbox "
+                "WHERE status IN ('pending','sending','failed')"
+            ).fetchone()[0])
+            remaining = max(0, EMAIL_OUTBOX_MAX_ACTIVE - active)
+            if state_json is not None:
+                db.execute(
+                    "UPDATE notification_state SET updated_at=?,state_json=? WHERE singleton=1",
+                    (str(recorded_at), state_json),
+                )
+            for message in messages:
+                if remaining <= 0:
+                    dropped += 1
+                    continue
+                changed = db.execute(
+                    "INSERT INTO notification_outbox("
+                    "event_key,category,recipient,created_at,subject,body,message_id,"
+                    "event_json,status,attempts,next_attempt_at,last_attempt_at,sent_at,last_error"
+                    ") VALUES(?,?,?,?,?,?,?,?,'pending',0,?,NULL,NULL,NULL) "
+                    "ON CONFLICT(event_key) DO NOTHING",
+                    (
+                        str(message["event_key"]),
+                        str(message["category"]),
+                        str(message["recipient"]),
+                        str(recorded_at),
+                        str(message["subject"]),
+                        str(message["body"]),
+                        str(message["message_id"]),
+                        json.dumps(message.get("context") or {}, ensure_ascii=False),
+                        str(recorded_at),
+                    ),
+                ).rowcount
+                inserted += changed
+                remaining -= changed
+            if audit is not None:
+                details = dict(audit.get("details") or {})
+                details["queued"] = inserted
+                details["dropped"] = dropped
+                db.execute(
+                    "INSERT INTO notification_audit(recorded_at,actor,action,details_json) "
+                    "VALUES(?,?,?,?)",
+                    (
+                        str(recorded_at),
+                        str(audit.get("actor") or "system"),
+                        str(audit.get("action") or "enqueue"),
+                        json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+                    ),
+                )
+            if dropped and audit is None:
+                db.execute(
+                    "INSERT INTO notification_audit(recorded_at,actor,action,details_json) "
+                    "VALUES(?,?,?,?)",
+                    (
+                        str(recorded_at), "system", "queue-overflow",
+                        json.dumps({"dropped": dropped}, separators=(",", ":")),
+                    ),
+                )
+        return inserted
+
+    def enqueue_notification_messages(
+        self,
+        recorded_at: str,
+        messages: list[dict],
+        audit: dict | None = None,
+    ) -> int:
+        """Queue messages without reading or replacing the detector edge state."""
+        return self.record_notification_observation(recorded_at, None, messages, audit)
+
+    def claim_notification(
+        self, recorded_at: str, *, test_only: bool = False
+    ) -> dict | None:
+        category_clause = " AND category='test'" if test_only else ""
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT * FROM notification_outbox WHERE status IN ('pending','failed') "
+                "AND attempts<? AND COALESCE(next_attempt_at,created_at)<=?"
+                + category_clause + " ORDER BY id LIMIT 1",
+                (EMAIL_MAX_ATTEMPTS, str(recorded_at)),
+            ).fetchone()
+            if row is None:
+                return None
+            changed = db.execute(
+                "UPDATE notification_outbox SET status='sending',attempts=attempts+1,"
+                "last_attempt_at=?,last_error=NULL WHERE id=? AND status IN ('pending','failed')",
+                (str(recorded_at), int(row["id"])),
+            ).rowcount
+            if changed != 1:
+                return None
+            row = db.execute(
+                "SELECT * FROM notification_outbox WHERE id=?",
+                (int(row["id"]),),
+            ).fetchone()
+        item = dict(row)
+        try:
+            item["context"] = json.loads(str(item.pop("event_json")))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            item["context"] = {}
+        return item
+
+    def finish_notification(
+        self,
+        notification_id: int,
+        *,
+        sent: bool,
+        recorded_at: str,
+        error: str | None = None,
+        next_attempt_at: str | None = None,
+        terminal: bool = False,
+    ) -> None:
+        with self.lock, self.database() as db:
+            changed = db.execute(
+                "UPDATE notification_outbox SET status=?,sent_at=?,next_attempt_at=?,"
+                "last_error=? WHERE id=? AND status='sending'",
+                (
+                    "sent" if sent else ("dead" if terminal else "failed"),
+                    str(recorded_at) if sent else None,
+                    None if sent or terminal else next_attempt_at,
+                    None if sent else str(error or "SMTP-Versand fehlgeschlagen")[:1000],
+                    int(notification_id),
+                ),
+            ).rowcount
+        if changed != 1:
+            raise RuntimeError("E-Mail-Ausgang konnte nicht atomar abgeschlossen werden")
+
+    def cancel_notification(
+        self, notification_id: int, recorded_at: str, reason: str
+    ) -> None:
+        with self.lock, self.database() as db:
+            changed = db.execute(
+                "UPDATE notification_outbox SET status='canceled',sent_at=NULL,"
+                "next_attempt_at=NULL,last_error=? WHERE id=? AND status='sending'",
+                (str(reason)[:1000], int(notification_id)),
+            ).rowcount
+        if changed != 1:
+            raise RuntimeError("E-Mail-Ausgang konnte nicht widerrufen werden")
+
+    def cancel_obsolete_notifications(
+        self,
+        recorded_at: str,
+        recipients: list[str],
+        categories: dict,
+        enabled: bool,
+    ) -> int:
+        active_recipients = set(recipients)
+        canceled = 0
+        with self.lock, self.database() as db:
+            rows = db.execute(
+                "SELECT id,recipient,category FROM notification_outbox "
+                "WHERE status IN ('pending','failed')"
+            ).fetchall()
+            for row in rows:
+                category = str(row["category"])
+                allowed = str(row["recipient"]) in active_recipients and (
+                    category == "test" or (bool(enabled) and bool(categories.get(category)))
+                )
+                if allowed:
+                    continue
+                canceled += db.execute(
+                    "UPDATE notification_outbox SET status='canceled',"
+                    "next_attempt_at=NULL,last_error='Empfänger oder Kategorie entfernt' "
+                    "WHERE id=? AND status IN ('pending','failed')",
+                    (int(row["id"]),),
+                ).rowcount
+        return canceled
+
+    def notification_outbox(self, limit: int = 50) -> list[dict]:
+        limit = max(1, min(200, int(limit)))
+        with self.lock, self.database() as db:
+            rows = db.execute(
+                "SELECT id,event_key,category,recipient,created_at,subject,message_id,"
+                "status,attempts,next_attempt_at,last_attempt_at,sent_at,last_error "
+                "FROM notification_outbox ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def notification_summary(self) -> dict:
+        with self.lock, self.database() as db:
+            counts = {
+                str(row["status"]): int(row["count"])
+                for row in db.execute(
+                    "SELECT status,COUNT(*) AS count FROM notification_outbox GROUP BY status"
+                ).fetchall()
+            }
+            last_sent = db.execute(
+                "SELECT sent_at,subject FROM notification_outbox WHERE status='sent' "
+                "ORDER BY sent_at DESC,id DESC LIMIT 1"
+            ).fetchone()
+            last_error = db.execute(
+                "SELECT last_attempt_at,last_error,subject FROM notification_outbox "
+                "WHERE status IN ('failed','dead') AND last_error IS NOT NULL "
+                "ORDER BY last_attempt_at DESC,id DESC LIMIT 1"
+            ).fetchone()
+        return {
+            "counts": {status: counts.get(status, 0) for status in ("pending", "sending", "sent", "failed", "dead", "canceled")},
+            "last_sent": dict(last_sent) if last_sent else None,
+            "last_error": dict(last_error) if last_error else None,
+        }
+
+    def notification_test_request_exists(self, request_id: str) -> bool:
+        prefix = f"test:{str(request_id)}:to:%"
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT 1 FROM notification_outbox WHERE event_key LIKE ? LIMIT 1",
+                (prefix,),
+            ).fetchone()
+        return row is not None
+
+    def recent_test_notification(self, cutoff: str) -> bool:
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT 1 FROM notification_outbox WHERE category='test' "
+                "AND created_at>=? LIMIT 1",
+                (str(cutoff),),
+            ).fetchone()
+        return row is not None
+
+    def purge_notifications(self, now: datetime) -> dict:
+        outbox_cutoff = (now - timedelta(days=EMAIL_OUTBOX_RETENTION_DAYS)).isoformat()
+        audit_cutoff = (now - timedelta(days=EMAIL_AUDIT_RETENTION_DAYS)).isoformat()
+        with self.lock, self.database() as db:
+            outbox = db.execute(
+                "DELETE FROM notification_outbox WHERE status IN ('sent','dead','canceled') "
+                "AND created_at<?",
+                (outbox_cutoff,),
+            ).rowcount
+            audits = db.execute(
+                "DELETE FROM notification_audit WHERE recorded_at<?",
+                (audit_cutoff,),
+            ).rowcount
+        return {"outbox": outbox, "audit": audits}
+
+    def recent_confirmed_manual_reset(
+        self,
+        service_code: int,
+        episode_started_at: str,
+        recorded_at: str,
+        window_seconds: int = 120,
+    ) -> bool:
+        try:
+            at = _history_datetime(str(recorded_at), "Benachrichtigungszeit")
+            episode_start = _history_datetime(
+                str(episode_started_at), "Beginn der Störungsepisode"
+            )
+        except ValueError:
+            return False
+        if episode_start > at:
+            return False
+        cutoff_dt = max(
+            episode_start,
+            at - timedelta(seconds=max(1, int(window_seconds))),
+        )
+        with self.lock, self.database() as db:
+            rows = db.execute(
+                "SELECT service_code_raw,details_json FROM service_reset_write_intents "
+                "WHERE created_at>=? AND created_at<=? "
+                "ORDER BY created_at DESC LIMIT 50",
+                (cutoff_dt.isoformat(), at.isoformat()),
+            ).fetchall()
+        for row in rows:
+            try:
+                details = json.loads(str(row["details_json"]))
+                confirmed_at = _history_datetime(
+                    str(details.get("clear_confirmed_at") or ""),
+                    "Bestätigte Entstörzeit",
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if (
+                int(row["service_code_raw"]) + 100 == int(service_code)
+                and details.get("clear_confirmed") is True
+                and cutoff_dt <= confirmed_at <= at
+            ):
+                return True
+        return False
+
+    def begin_service_reset_write_intent(
+        self,
+        intent_id: str,
+        recorded_at: str,
+        username: str,
+        service_code_raw: int,
+        fault_count: int,
+        fault_runtime_seconds: int,
+        details: dict,
+    ) -> None:
+        """Persist the at-most-once guard before a reset telegram may leave."""
+        with self.lock, self.database() as db:
+            db.execute(
+                "INSERT INTO service_reset_write_intents("
+                "intent_id,created_at,updated_at,username,service_code_raw,"
+                "fault_count,fault_runtime_seconds,status,resolution,details_json"
+                ") VALUES(?,?,?,?,?,?,?,'pending',NULL,?)",
+                (
+                    str(intent_id), str(recorded_at), str(recorded_at), str(username),
+                    int(service_code_raw), int(fault_count), int(fault_runtime_seconds),
+                    json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+
+    def mark_service_reset_clear_confirmed(
+        self, intent_id: str, confirmed_at: str
+    ) -> None:
+        """Publish a durable clear marker before the serial lease is released."""
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT details_json FROM service_reset_write_intents "
+                "WHERE intent_id=? AND status='pending'",
+                (str(intent_id),),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Entstörmarker besitzt keinen offenen Schreibschutz")
+            try:
+                details = json.loads(str(row["details_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                details = {}
+            if not isinstance(details, dict):
+                details = {}
+            details.update({
+                "clear_confirmed": True,
+                "clear_confirmed_at": str(confirmed_at),
+            })
+            changed = db.execute(
+                "UPDATE service_reset_write_intents SET updated_at=?,details_json=? "
+                "WHERE intent_id=? AND status='pending'",
+                (
+                    str(confirmed_at),
+                    json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+                    str(intent_id),
+                ),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError(
+                    "Bestätigter Entstörmarker konnte nicht gespeichert werden"
+                )
+
+    def resolve_service_reset_write_intent(
+        self,
+        intent_id: str,
+        recorded_at: str,
+        resolution: str,
+        details: dict,
+    ) -> None:
+        """Resolve only a confirmed intent; uncertain attempts remain pending."""
+        with self.lock, self.database() as db:
+            changed = db.execute(
+                "UPDATE service_reset_write_intents SET status='resolved',updated_at=?,"
+                "resolution=?,details_json=? WHERE intent_id=? AND status='pending'",
+                (
+                    str(recorded_at), str(resolution),
+                    json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+                    str(intent_id),
+                ),
+            ).rowcount
+        if changed != 1:
+            raise RuntimeError("persistenter Entstör-Schreibschutz konnte nicht aufgelöst werden")
+
+    def record_service_reset_outcome(
+        self,
+        intent_id: str,
+        recorded_at: str,
+        username: str,
+        block: int,
+        audit: dict,
+        *,
+        resolve: bool,
+        resolution: str,
+        details: dict,
+    ) -> None:
+        """Persist final intent state and mandatory audit in one transaction."""
+        audit_json = json.dumps(audit, ensure_ascii=False)
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT details_json FROM service_reset_write_intents WHERE intent_id=?",
+                (str(intent_id),),
+            ).fetchone()
+            merged_details = dict(details)
+            if row is not None:
+                try:
+                    existing_details = json.loads(str(row["details_json"]))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    existing_details = {}
+                if isinstance(existing_details, dict) and existing_details.get("clear_confirmed") is True:
+                    merged_details.setdefault("clear_confirmed", True)
+                    merged_details.setdefault(
+                        "clear_confirmed_at", existing_details.get("clear_confirmed_at")
+                    )
+            details_json = json.dumps(
+                merged_details, ensure_ascii=False, separators=(",", ":")
+            )
+            if resolve:
+                changed = db.execute(
+                    "UPDATE service_reset_write_intents SET status='resolved',updated_at=?,"
+                    "resolution=?,details_json=? WHERE intent_id=? AND status='pending'",
+                    (str(recorded_at), str(resolution), details_json, str(intent_id)),
+                ).rowcount
+            else:
+                changed = db.execute(
+                    "UPDATE service_reset_write_intents SET updated_at=?,resolution=?,"
+                    "details_json=? WHERE intent_id=? AND status='pending'",
+                    (str(recorded_at), str(resolution), details_json, str(intent_id)),
+                ).rowcount
+            if changed != 1:
+                raise RuntimeError(
+                    "persistenter Entstör-Schreibschutz konnte nicht atomar dokumentiert werden"
+                )
+            db.execute(
+                "INSERT INTO write_audit(recorded_at, username, block, audit_json) "
+                "VALUES(?,?,?,?)",
+                (str(recorded_at), str(username), int(block), audit_json),
+            )
+
+    def pending_service_reset_write_intent(self) -> dict | None:
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT intent_id,created_at,updated_at,username,service_code_raw,"
+                "fault_count,fault_runtime_seconds,status,resolution,details_json "
+                "FROM service_reset_write_intents WHERE status='pending' "
+                "ORDER BY created_at,intent_id LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            details = json.loads(str(item.pop("details_json")))
+        except (TypeError, ValueError):
+            details = {}
+        item["details"] = details if isinstance(details, dict) else {}
+        item["service_code_raw"] = int(item["service_code_raw"])
+        item["service_code"] = int(item["service_code_raw"]) + 100
+        item["fault_count"] = int(item["fault_count"])
+        item["fault_runtime_seconds"] = int(item["fault_runtime_seconds"])
+        return item
+
+    def write_audit_max_id(self) -> int | None:
+        with self.lock, self.database() as db:
+            row = db.execute("SELECT MAX(id) FROM write_audit").fetchone()
+        return None if row is None else row[0]
+
     def audits(self, limit: int = 100) -> list[dict]:
         with self.lock, self.database() as db:
             rows = db.execute(
@@ -2226,7 +3820,11 @@ class DachsStore:
         item["technician"] = str(protocol.get("technician") or "")
         item["completion_mode"] = (completion or {}).get("mode")
         item["controller_written"] = (completion or {}).get("controller_written")
+        item["maintenance_kind"] = str(item.get("maintenance_kind") or "regular")
+        item["maintenance_number"] = item.get("maintenance_number")
+        item["local_reason"] = item.get("local_reason") or (completion or {}).get("reason")
         item["backup_archive"] = report.get("backup_archive")
+        item["fuel_check"] = maintenance_fuel_check(report, protocol, item.get("fuel_type"))
         if full:
             item.update({"report": report, "protocol": protocol, "completion": completion})
         return item
@@ -2430,6 +4028,90 @@ class DachsStore:
                 raise ValueError("nur ein offener Wartungsbericht kann bearbeitet werden")
         return self.maintenance_report(report_id)
 
+    @staticmethod
+    def _snapshot_maintenance_base(report: dict) -> int | None:
+        value = report_summary(report).get("maintenance_count")
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not number.is_integer() or number < 0:
+            return None
+        return int(number)
+
+    def complete_local_intermediate_maintenance(
+        self, report_id: int, protocol: dict, username: str, reason: str
+    ) -> dict:
+        """Atomically allocate and persist a local-only intermediate number."""
+        now = _now()
+        report_id = int(report_id)
+        reason = str(reason).strip()
+        if not reason:
+            raise ValueError("Grund für die Zwischenwartung ist erforderlich")
+        if len(reason) > 500:
+            raise ValueError("Grund für die Zwischenwartung darf höchstens 500 Zeichen haben")
+        with self.lock, self.database() as db:
+            row = db.execute(
+                "SELECT status,report_json FROM maintenance_reports WHERE id=?",
+                (report_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Wartungsbericht {report_id} nicht gefunden")
+            if str(row["status"]) != "draft":
+                raise ValueError("nur ein offener Wartungsentwurf kann als Zwischenwartung gespeichert werden")
+            report = json.loads(row["report_json"])
+            base = self._snapshot_maintenance_base(report)
+            if base is None:
+                # Stable fallback: latest persisted local base, then highest valid
+                # regulator counter captured in any report, finally zero.
+                bases = []
+                for candidate in db.execute(
+                    "SELECT maintenance_number,report_json FROM maintenance_reports ORDER BY id"
+                ).fetchall():
+                    number = str(candidate["maintenance_number"] or "")
+                    if "." in number and number.split(".", 1)[0].isdigit():
+                        bases.append(int(number.split(".", 1)[0]))
+                    captured = self._snapshot_maintenance_base(json.loads(candidate["report_json"]))
+                    if captured is not None:
+                        bases.append(captured)
+                base = max(bases, default=0)
+            prefix = f"{base}."
+            suffixes = []
+            for candidate in db.execute(
+                "SELECT maintenance_number FROM maintenance_reports "
+                "WHERE maintenance_kind='intermediate' AND maintenance_number LIKE ?",
+                (prefix + "%",),
+            ).fetchall():
+                text = str(candidate["maintenance_number"] or "")
+                tail = text[len(prefix):]
+                if tail.isdigit() and int(tail) > 0:
+                    suffixes.append(int(tail))
+            maintenance_number = f"{base}.{max(suffixes, default=0) + 1}"
+            completion = {
+                "mode": "local_intermediate",
+                "completed_at": now,
+                "username": str(username),
+                "reason": reason,
+                "maintenance_number": maintenance_number,
+                "controller_written": False,
+                "hardware_unchanged": True,
+                "confirmation_bit_set": False,
+                "auth_used": False,
+                "serial_session_opened": False,
+                "audits": [],
+                "note": "Zwischenwartung ausschließlich lokal archiviert; MSR2 unverändert.",
+            }
+            cursor = db.execute(
+                "UPDATE maintenance_reports SET updated_at=?,fuel_type=?,protocol_json=?,"
+                "status='completed',completed_at=?,completion_json=?,maintenance_kind='intermediate',"
+                "maintenance_number=?,local_reason=? WHERE id=? AND status='draft'",
+                (now, protocol["fuel_type"], json.dumps(protocol, ensure_ascii=False), now,
+                 json.dumps(completion, ensure_ascii=False), maintenance_number, reason, report_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Wartungsentwurf wurde zwischenzeitlich verändert")
+        return self.maintenance_report(report_id)
+
     def complete_maintenance_report(self, report_id: int, completion: dict) -> dict:
         now = _now()
         with self.lock, self.database() as db:
@@ -2588,6 +4270,66 @@ class DachsStore:
             db.execute("DELETE FROM measurements WHERE recorded_at < ?", (cutoff,))
             db.execute("DELETE FROM history_samples WHERE recorded_at < ?", (cutoff,))
             db.execute("DELETE FROM motor_status_points WHERE recorded_at < ?", (cutoff,))
+            # Keep the newest display change: it still describes the current state.
+            db.execute(
+                "DELETE FROM display_status_events WHERE recorded_at < ? "
+                "AND id < (SELECT MAX(id) FROM display_status_events)",
+                (cutoff,),
+            )
+
+    def record_display_status_change(self, recorded_at: str, status: dict) -> bool:
+        """Insert one row only when the displayed text of line 1 or 2 changes.
+
+        Unavailable lines are never stored, so a read gap does not create a
+        pair of artificial transitions.
+        """
+        if not isinstance(status, dict) or status.get("available") is not True:
+            return False
+        line1 = status.get("line1")
+        line2 = status.get("line2")
+        if not isinstance(line1, str) or not isinstance(line2, str):
+            return False
+        with self.lock, self.database() as db:
+            last = db.execute(
+                "SELECT line1,line2 FROM display_status_events ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if last is not None and (str(last["line1"]), str(last["line2"])) == (line1, line2):
+                return False
+            db.execute(
+                "INSERT INTO display_status_events"
+                "(recorded_at,line1,line2,line1_index,line2_index,service_code) "
+                "VALUES(?,?,?,?,?,?)",
+                (
+                    str(recorded_at),
+                    line1,
+                    line2,
+                    status.get("line1_index"),
+                    status.get("line2_index"),
+                    status.get("service_code"),
+                ),
+            )
+        return True
+
+    def display_status_events(self, limit: int = DISPLAY_STATUS_EVENT_LIMIT) -> list[dict]:
+        """Newest display-line changes first."""
+        limit = min(DISPLAY_STATUS_EVENT_MAX_LIMIT, max(1, int(limit)))
+        with self.database() as db:
+            rows = db.execute(
+                "SELECT recorded_at,line1,line2,line1_index,line2_index,service_code "
+                "FROM display_status_events ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "recorded_at": str(row["recorded_at"]),
+                "line1": str(row["line1"]),
+                "line2": str(row["line2"]),
+                "line1_index": row["line1_index"],
+                "line2_index": row["line2_index"],
+                "service_code": row["service_code"],
+            }
+            for row in rows
+        ]
 
     def purge_invalid_dashboard(self) -> int:
         """Remove only known-invalid historical dashboard samples."""
@@ -2612,6 +4354,7 @@ class DachsWebApp:
                  pack_rev: str = "50", data_dir: str | Path = "./dachs-web-data",
                  interval: float = 0.75, serial_socket: str | Path | None = None,
                  maintenance_live_writes: bool = False,
+                 service_reset_temperature_policy_approved: bool = False,
                  history_interval: float = DEFAULT_HISTORY_SAMPLE_INTERVAL):
         self.data_dir = Path(data_dir).expanduser().resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -2640,16 +4383,49 @@ class DachsWebApp:
         self.soot_filter_settings_path = self.data_dir / "soot_filter_settings.json"
         self.api_settings_path = self.data_dir / "api_settings.json"
         self.local_access_settings_path = self.data_dir / "local_access_settings.json"
+        self.email_notification_settings_path = (
+            self.data_dir / "email_notification_settings.json"
+        )
+        self.email_notification_secret_dir = self.data_dir / "secrets"
         # The environment value is only the initial default. Once an admin
         # changes the test mode in the web UI, the local setting survives
         # service restarts and later package updates.
         self.maintenance_live_writes_enabled = self._load_maintenance_live_writes(
             bool(maintenance_live_writes)
         )
+        # Manual reset can cause an automatic restart.  The temperature
+        # limits are therefore not enabled merely because they are below
+        # firmware trip points: an operator must explicitly attest that the
+        # installation-specific restart policy has been reviewed.
+        self.service_reset_temperature_policy_approved = bool(
+            service_reset_temperature_policy_approved
+        )
         self.dashboard_cards = self._load_dashboard_cards()
         self.soot_filter_config = self._load_soot_filter_settings()
         self.api_config = self._load_api_settings()
         self.local_access_config = self._load_local_access_settings()
+        self._email_notification_flow_lock = threading.RLock()
+        self.email_notification_config = self._load_email_notification_settings()
+        persisted_email_pause = self.store.notification_dispatch_pause()
+        if (
+            persisted_email_pause["paused_revision"] is not None
+            and persisted_email_pause["paused_revision"]
+            != int(self.email_notification_config.get("revision") or 0)
+        ):
+            self.store.clear_notification_dispatch_pause(_now())
+            persisted_email_pause = {
+                "paused_revision": None, "paused_reason": None, "updated_at": None
+            }
+        self.email_notification_runtime = {
+            "last_observation_at": None,
+            "last_observation_error": None,
+            "last_send_at": None,
+            "last_send_error": None,
+            "paused_revision": persisted_email_pause["paused_revision"],
+            "paused_reason": persisted_email_pause["paused_reason"],
+            "dispatcher_alive": False,
+        }
+        self._send_smtp_email = send_smtp_email
         self.local_access_runtime = {
             "active": False,
             "last_error": None,
@@ -2657,6 +4433,9 @@ class DachsWebApp:
             "url": None,
         }
         self.local_access_manager: LocalAccessManager | None = None
+        # Network-only checker: it never acquires the serial lock and can only
+        # stage a verified request for the separately installed root helper.
+        self.update_manager = UpdateManager(self.data_dir, __version__)
         self.slow_monitor_interval = DEFAULT_SLOW_MONITOR_INTERVAL
         self._last_slow_poll = 0.0
         self._last_history_sample = float("-inf")
@@ -2664,15 +4443,63 @@ class DachsWebApp:
         # monitor loop performs the same maintenance hourly after the web
         # listener is already responsive.
         self._last_retention_purge = time.monotonic()
+        self._last_notification_retention_purge = 0.0
         self.serial_state_path = self.data_dir / "serial_state.json"
         self.dashboard_cleanup_marker = self.data_dir / HISTORY_CLEANUP_MARKER
         self.serial_enabled = self._load_serial_enabled()
         self.monitor_enabled = self.serial_enabled
         self.stop_event = threading.Event()
+        # Tests replace this with a no-wait function.  Production uses the
+        # stop event so shutdown can interrupt only the bounded readback wait,
+        # never trigger a second write.
+        self._service_reset_wait = self.stop_event.wait
+        # Serialize preview issuance and execution as one controller-wide
+        # capability flow.  This prevents an older preview from overwriting a
+        # newer token after either request waited for the shared serial lock.
+        self._service_reset_flow_lock = threading.Lock()
+        self._service_reset_token_lock = threading.Lock()
+        self._service_reset_token: dict | None = None
+        self._service_reset_last_attempt: dict | None = None
+        self._dachs_control_flow_lock = threading.Lock()
+        self._dachs_control_token_lock = threading.Lock()
+        self._dachs_control_token: dict | None = None
+        self._dachs_control_last_attempt: dict | None = None
+        self._sc123_limit_flow_lock = threading.Lock()
+        self._sc123_limit_token_lock = threading.Lock()
+        self._sc123_limit_token: dict | None = None
+        self._sc123_limit_last_attempt: dict | None = None
         self.serial_lock = threading.Lock()
         self.state_lock = threading.Lock()
-        self.sessions: dict[str, tuple[str, str, float]] = {}
+        self.sessions: dict[str, tuple[str, str, float, int]] = {}
         self.live_values: dict[tuple[int, str], dict] = {}
+        self.runtime_24h = {
+            "schema": "open-dachs-runtime-24h/v1",
+            "available": False,
+            "counter_seconds": None,
+            "remaining_run_seconds": None,
+            "shutdown_threshold_seconds": RUNTIME_24H_SHUTDOWN_SECONDS,
+            "threshold_reached": False,
+            "night_shutdown_gate_seconds": RUNTIME_NIGHT_SHUTDOWN_GATE_SECONDS,
+            "remaining_to_night_gate_seconds": None,
+            "night_shutdown_gate_reached": False,
+            "counter_address": f"0x{RUNTIME_24H_COUNTER_ADDRESS:04x}",
+            "recorded_at": None,
+            "semantics": "active_runtime_seconds",
+            "wall_clock_countdown": False,
+            "error": None,
+        }
+        self.ram_telemetry = {
+            field["key"]: ram_telemetry_unavailable(field)
+            for field in RAM_TELEMETRY_FIELDS
+        }
+        self.soot_regeneration = soot_regeneration_unavailable()
+        self.display_status = display_status_unavailable(error="noch nicht berechnet")
+        self._display_status_mono: float | None = None
+        # Slow block payloads (50/104) and RAM-only bytes with the monotonic
+        # time of their last read attempt; a failed attempt stores None.
+        self._display_slow_payloads: dict[int, tuple[bytes, float]] = {}
+        self._display_ram: dict[int, dict] = {}
+        self._display_last_recorded_lines: tuple[str, str] | None = None
         self.monitor_state = {
             "enabled": self.serial_enabled,
             "serial_enabled": self.serial_enabled,
@@ -2688,6 +4515,41 @@ class DachsWebApp:
             "slow_interval_seconds": self.slow_monitor_interval,
             "last_slow_cycle": None,
         }
+        # Temporary read-only Phase-6 verification logger; off unless
+        # <data_dir>/phase6_verify.json enables it with an end date.
+        self.phase6 = Phase6Verifier(
+            self.data_dir,
+            version=__version__,
+            serial_socket=str(serial_socket or ""),
+            write_audit_count=self.store.write_audit_max_id,
+        )
+        self._utcnow = lambda: datetime.now(timezone.utc)
+        self._ntp_status = self._timedatectl_ntp_status
+        self.automation_lock = threading.Lock()
+        self.clock_sync_settings_path = self.data_dir / "controller_clock_sync.json"
+        self.clock_sync_state_path = self.data_dir / "controller_clock_sync_state.json"
+        self.runtime_auto_settings_path = self.data_dir / "runtime_auto_reset.json"
+        self.runtime_auto_state_path = self.data_dir / "runtime_auto_reset_state.json"
+        self.clock_sync_config = self._load_clock_sync_settings()
+        self.clock_sync_state = self._load_automation_json(self.clock_sync_state_path) or {}
+        self.runtime_auto_config = self._load_runtime_auto_settings()
+        self.runtime_auto_state = self._load_automation_json(self.runtime_auto_state_path) or {}
+        self.runtime_auto_live = {
+            "phase": "watching" if self.runtime_auto_config["enabled"] else "disabled",
+            "reason": None,
+            "checked_at": None,
+        }
+        self._runtime_auto_backoff_until = 0.0
+        self._real_runtime_history_cache: tuple | None = None
+        self.automation_thread = threading.Thread(
+            target=self._automation_loop, name="dachs-web-automation", daemon=True
+        )
+        self.email_notification_thread = threading.Thread(
+            target=self._email_notification_loop,
+            name="dachs-web-email-notifications",
+            daemon=True,
+        )
+        self._previous_cycle: dict = {}
         self.monitor_thread = threading.Thread(target=self._monitor_loop, name="dachs-web-monitor", daemon=True)
         self.maintenance_thread = threading.Thread(
             target=self._startup_maintenance,
@@ -3190,6 +5052,548 @@ class DachsWebApp:
             self.api_config = settings
         return self.api_settings()
 
+    def _email_notification_secret_directory(self) -> Path:
+        try:
+            self.email_notification_secret_dir.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        info = self.email_notification_secret_dir.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise PermissionError("SMTP-Secretpfad ist kein sicheres Verzeichnis")
+        if info.st_uid != os.geteuid():
+            raise PermissionError("SMTP-Secretverzeichnis besitzt einen falschen Eigentümer")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            self.email_notification_secret_dir.chmod(0o700)
+        return self.email_notification_secret_dir
+
+    @staticmethod
+    def _validate_email_secret_ref(secret_ref: object) -> str:
+        value = str(secret_ref or "")
+        if not re.fullmatch(r"smtp-[0-9a-f]{32}\.json", value):
+            raise ValueError("ungültige SMTP-Secretreferenz")
+        return value
+
+    def _load_email_notification_password(self, secret_ref: object) -> str:
+        if not secret_ref:
+            return ""
+        name = self._validate_email_secret_ref(secret_ref)
+        directory = self._email_notification_secret_directory()
+        directory_fd = os.open(
+            directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(name, flags, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_size <= 0
+                or info.st_size > 4096
+            ):
+                raise PermissionError("SMTP-Secretdatei besitzt unsichere Eigenschaften")
+            raw = os.read(fd, info.st_size + 1)
+            if len(raw) != info.st_size:
+                raise OSError("SMTP-Secretdatei wurde nicht exakt gelesen")
+            payload = json.loads(raw.decode("utf-8"))
+            password = str(payload.get("password") or "")
+            if len(password) > 1024:
+                raise ValueError("SMTP-Passwort ist zu lang")
+            return password
+        finally:
+            os.close(fd)
+
+    def _write_email_notification_password(self, password: str) -> str:
+        self._email_notification_secret_directory()
+        secret_ref = f"smtp-{secrets.token_hex(16)}.json"
+        destination = self.email_notification_secret_dir / secret_ref
+        write_json_exclusive(
+            destination, {"version": 1, "password": str(password)}
+        )
+        destination.chmod(0o600)
+        return secret_ref
+
+    def _delete_email_notification_password(self, secret_ref: object) -> None:
+        if not secret_ref:
+            return
+        name = self._validate_email_secret_ref(secret_ref)
+        (self._email_notification_secret_directory() / name).unlink(missing_ok=True)
+
+    def _prune_email_notification_passwords(self, keep_ref: object) -> None:
+        keep = str(keep_ref or "")
+        directory = self._email_notification_secret_directory()
+        for path in directory.glob("smtp-*.json"):
+            if path.name == keep or not re.fullmatch(r"smtp-[0-9a-f]{32}\.json", path.name):
+                continue
+            with suppress(OSError):
+                if path.is_file() and not path.is_symlink():
+                    path.unlink()
+
+    def _load_email_notification_settings(self) -> dict:
+        try:
+            payload = json.loads(
+                self.email_notification_settings_path.read_text(encoding="utf-8")
+            )
+            secret_ref = str((payload.get("smtp") or {}).get("secret_ref") or "")
+            settings = normalize_email_notification_settings(
+                payload,
+                existing_password=self._load_email_notification_password(secret_ref),
+                strict=False,
+            )
+            settings["smtp"]["secret_ref"] = secret_ref or None
+            self._prune_email_notification_passwords(secret_ref)
+            return settings
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return default_email_notification_settings()
+
+    def _save_email_notification_settings(
+        self, settings: dict, secret_ref: str | None
+    ) -> None:
+        stored = json.loads(json.dumps(settings))
+        stored["smtp"].pop("password", None)
+        stored["smtp"]["secret_ref"] = secret_ref
+        write_json_atomic(
+            self.email_notification_settings_path,
+            {"version": 1, **stored},
+        )
+        with suppress(OSError):
+            self.email_notification_settings_path.chmod(0o600)
+
+    def email_notification_settings(self) -> dict:
+        with self.state_lock:
+            settings = json.loads(json.dumps(self.email_notification_config))
+            runtime = dict(self.email_notification_runtime)
+        return {
+            **public_email_notification_settings(settings),
+            "ready": email_settings_ready(settings),
+            "runtime": runtime,
+            "outbox": self.store.notification_summary(),
+        }
+
+    def set_email_notification_settings(self, payload: object, username: str) -> dict:
+        with self._email_notification_flow_lock:
+            return self._set_email_notification_settings_locked(payload, username)
+
+    def _set_email_notification_settings_locked(
+        self, payload: object, username: str
+    ) -> dict:
+        with self.state_lock:
+            previous = json.loads(json.dumps(self.email_notification_config))
+        smtp_payload = payload.get("smtp") if isinstance(payload, dict) else {}
+        supplied_password = str((smtp_payload or {}).get("password") or "")
+        clear_password = bool((smtp_payload or {}).get("clear_password") is True)
+        old_secret_ref = str((previous.get("smtp") or {}).get("secret_ref") or "")
+        settings = normalize_email_notification_settings(
+            payload,
+            existing_password=str((previous.get("smtp") or {}).get("password") or ""),
+        )
+        previous_revision = int(previous.get("revision") or 0)
+        settings["revision"] = previous_revision + 1 if previous_revision < 0x7FFFFFFF else 1
+        previous_rules_revision = int(previous.get("temperature_rules_revision") or 0)
+        temperature_contract_changed = bool(
+            settings["temperature_rules"] != previous.get("temperature_rules")
+            or bool(settings["categories"].get("temperature"))
+            != bool((previous.get("categories") or {}).get("temperature"))
+        )
+        settings["temperature_rules_revision"] = (
+            previous_rules_revision + 1
+            if temperature_contract_changed and previous_rules_revision < 0x7FFFFFFF
+            else (1 if temperature_contract_changed else previous_rules_revision)
+        )
+        new_secret_ref = old_secret_ref or None
+        created_secret_ref = None
+        if supplied_password:
+            created_secret_ref = self._write_email_notification_password(
+                settings["smtp"]["password"]
+            )
+            new_secret_ref = created_secret_ref
+        elif clear_password:
+            new_secret_ref = None
+        settings["smtp"]["secret_ref"] = new_secret_ref
+        try:
+            self._save_email_notification_settings(settings, new_secret_ref)
+        except Exception:
+            if created_secret_ref:
+                with suppress(Exception):
+                    self._delete_email_notification_password(created_secret_ref)
+            raise
+        if old_secret_ref and old_secret_ref != new_secret_ref:
+            with suppress(Exception):
+                self._delete_email_notification_password(old_secret_ref)
+        changed_at = _now()
+        with suppress(Exception):
+            self.store.clear_notification_dispatch_pause(changed_at)
+        with self.state_lock:
+            self.email_notification_config = settings
+            self.email_notification_runtime.update({
+                "paused_revision": None,
+                "paused_reason": None,
+                "last_send_error": None,
+            })
+        cancellation_error = None
+        try:
+            canceled = self.store.cancel_obsolete_notifications(
+                changed_at, settings["recipients"], settings["categories"],
+                settings["enabled"],
+            )
+        except Exception as exc:
+            canceled = 0
+            cancellation_error = f"Outbox-Widerruf fehlgeschlagen: {exc}"[:1000]
+            with self.state_lock:
+                self.email_notification_runtime["last_send_error"] = cancellation_error
+        try:
+            self.store.notification_audit(changed_at, username, "settings", {
+                "enabled": settings["enabled"],
+                "categories": settings["categories"],
+                "smtp_host": settings["smtp"]["host"],
+                "smtp_port": settings["smtp"]["port"],
+                "smtp_security": settings["smtp"]["security"],
+                "recipient_count": len(settings["recipients"]),
+                "canceled_outbox_items": canceled,
+                "cancellation_error": bool(cancellation_error),
+                "password_configured": bool(settings["smtp"]["password"]),
+                "secret_in_audit": False,
+            })
+        except Exception as exc:
+            with self.state_lock:
+                self.email_notification_runtime["last_send_error"] = (
+                    f"E-Mail-Einstellung aktiv; Audit fehlgeschlagen: {exc}"[:1000]
+                )
+        return self.email_notification_settings()
+
+    def test_email_notification(self, username: str, request_id: str) -> dict:
+        with self._email_notification_flow_lock:
+            return self._test_email_notification_locked(username, request_id)
+
+    def _test_email_notification_locked(self, username: str, request_id: str) -> dict:
+        with self.state_lock:
+            settings = json.loads(json.dumps(self.email_notification_config))
+        if not email_settings_ready(settings):
+            raise ValueError(
+                "SMTP, Absender, Empfänger und öffentliche ODM-Adresse sind nicht vollständig"
+            )
+        request_id = str(request_id or "").strip().lower()
+        if not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            request_id,
+        ):
+            raise ValueError("request_id muss eine gültige UUID sein")
+        if self.store.notification_test_request_exists(request_id):
+            return {"ok": True, "queued": 0, "request_id": request_id}
+        recorded_at = _now()
+        cutoff = (
+            _history_datetime(recorded_at, "Testmail-Zeit")
+            - timedelta(seconds=EMAIL_TEST_RATE_LIMIT_SECONDS)
+        ).isoformat()
+        if self.store.recent_test_notification(cutoff):
+            raise APIRequestConflictError(
+                f"Testmail ist auf eine Nachricht je {EMAIL_TEST_RATE_LIMIT_SECONDS} Sekunden begrenzt"
+            )
+        base_key = f"test:{request_id}"
+        body = (
+            "Diese Testnachricht bestätigt die SMTP-Einstellungen des "
+            "Open Dachs Managers.\n\n"
+            f"Zeit: {recorded_at}\nODM öffnen: {settings.get('public_base_url') or ''}"
+        )
+        messages = []
+        for recipient in settings["recipients"]:
+            recipient_key = hashlib.sha256(recipient.casefold().encode()).hexdigest()[:16]
+            event_key = f"{base_key}:to:{recipient_key}"
+            messages.append({
+                "event_key": event_key,
+                "category": "test",
+                "recipient": recipient,
+                "subject": "[ODM] Testnachricht",
+                "body": body,
+                "message_id": stable_message_id(
+                    event_key, recipient, settings["smtp"]["from_address"]
+                ),
+                "context": {"test": True},
+            })
+        queued = self.store.enqueue_notification_messages(
+            recorded_at,
+            messages,
+            audit={
+                "actor": username,
+                "action": "test-queued",
+                "details": {
+                    "request_id": request_id,
+                    "recipient_count": len(settings["recipients"]),
+                    "secret_in_audit": False,
+                },
+            },
+        )
+        return {"ok": True, "queued": queued, "request_id": request_id}
+
+    def email_notification_outbox(self, limit: int = 50) -> dict:
+        return {
+            "items": self.store.notification_outbox(limit),
+            "summary": self.store.notification_summary(),
+        }
+
+    def _observe_email_notifications(
+        self, recorded_at: str, display_status_result: dict | None = None
+    ) -> None:
+        with self._email_notification_flow_lock:
+            self._observe_email_notifications_locked(recorded_at, display_status_result)
+
+    def _observe_email_notifications_locked(
+        self, recorded_at: str, display_status_result: dict | None = None
+    ) -> None:
+        with self.state_lock:
+            settings = json.loads(json.dumps(self.email_notification_config))
+            cached_values = [dict(row) for row in self.live_values.values()]
+        values = [
+            row for row in cached_values
+            if str(row.get("recorded_at") or "") == str(recorded_at)
+        ]
+        cache_values = {
+            str(row["key"]): row.get("value")
+            for row in values
+            if int(row["block"]) == 104
+        }
+        current_maintenance = maintenance_status(cache_values) if cache_values else None
+        previous = self.store.notification_state()
+        previous_fault = dict(previous.get("fault") or {})
+        previous_raw = previous_fault.get("raw")
+        current_row = next(
+            (
+                row for row in values
+                if int(row["block"]) == 22 and row["key"] == "Hka_Bd.bStoerung"
+            ),
+            None,
+        )
+        try:
+            current_raw = int(current_row.get("raw")) if current_row else None
+        except (TypeError, ValueError):
+            current_raw = None
+        episode_started_at = str(previous_fault.get("episode_started_at") or "")
+        manual_clear = bool(
+            previous_raw
+            and current_raw == 0
+            and episode_started_at
+            and self.store.recent_confirmed_manual_reset(
+                int(previous_raw) + 100,
+                episode_started_at,
+                recorded_at,
+            )
+        )
+        exact_service_text = None
+        status = display_status_result if isinstance(display_status_result, dict) else {}
+        if (
+            current_raw
+            and status.get("line2_kind") == "servicecode"
+            and status.get("line2_available") is True
+            and int(status.get("service_code") or 0) == int(current_raw) + 100
+            and str(status.get("recorded_at") or "") == str(recorded_at)
+        ):
+            exact_service_text = str(status.get("line2") or "") or None
+        state, events = detect_notification_events(
+            values=values,
+            maintenance=current_maintenance,
+            settings=settings,
+            previous_state=previous,
+            recorded_at=recorded_at,
+            manual_fault_clear=manual_clear,
+            service_text=exact_service_text,
+        )
+        messages = []
+        for event in events:
+            rendered = render_notification(event, settings, recorded_at=recorded_at)
+            for recipient in settings["recipients"]:
+                recipient_key = hashlib.sha256(
+                    recipient.casefold().encode("utf-8")
+                ).hexdigest()[:16]
+                event_key = f"{rendered['event_key']}:to:{recipient_key}"
+                messages.append({
+                    **rendered,
+                    "event_key": event_key,
+                    "recipient": recipient,
+                    "message_id": stable_message_id(
+                        event_key, recipient, settings["smtp"]["from_address"]
+                    ),
+                })
+        self.store.record_notification_observation(recorded_at, state, messages)
+        with self.state_lock:
+            self.email_notification_runtime.update({
+                "last_observation_at": recorded_at,
+                "last_observation_error": None,
+            })
+
+    def _email_notification_dispatch_once(self) -> float:
+        with self._email_notification_flow_lock:
+            return self._email_notification_dispatch_once_locked()
+
+    def _email_notification_dispatch_once_locked(self) -> float:
+        with self.state_lock:
+            settings = json.loads(json.dumps(self.email_notification_config))
+            runtime = dict(self.email_notification_runtime)
+        revision = int(settings.get("revision") or 0)
+        if runtime.get("paused_revision") == revision:
+            return 2.0
+        if not email_settings_ready(settings):
+            return 2.0
+        claimed_at = _now()
+        item = self.store.claim_notification(
+            claimed_at, test_only=not bool(settings.get("enabled"))
+        )
+        if item is None:
+            return 2.0
+
+        recipient = str(item["recipient"])
+        category = str(item["category"])
+        recipient_id = hashlib.sha256(
+            recipient.casefold().encode("utf-8")
+        ).hexdigest()[:16]
+        category_active = category == "test" or bool(
+            settings.get("enabled") and settings.get("categories", {}).get(category)
+        )
+        configured_recipients = set(settings.get("recipients") or [])
+        if recipient not in configured_recipients or not category_active:
+            reason = (
+                "Empfänger wurde entfernt"
+                if recipient not in configured_recipients
+                else "Kategorie wurde deaktiviert"
+            )
+            self.store.cancel_notification(int(item["id"]), claimed_at, reason)
+            with suppress(Exception):
+                self.store.notification_audit(claimed_at, "system", "canceled", {
+                    "outbox_id": int(item["id"]),
+                    "category": category,
+                    "recipient_id": recipient_id,
+                    "reason": reason,
+                })
+            return 0.0
+
+        try:
+            recipient_settings = json.loads(json.dumps(settings))
+            recipient_settings["recipients"] = [recipient]
+            self._send_smtp_email(
+                recipient_settings,
+                subject=str(item["subject"]),
+                body=str(item["body"]),
+                message_id=str(item["message_id"]),
+            )
+        except Exception as exc:
+            failed_at = datetime.now(timezone.utc)
+            attempts = max(1, int(item.get("attempts") or 1))
+            delay = EMAIL_RETRY_SECONDS[min(attempts - 1, len(EMAIL_RETRY_SECONDS) - 1)]
+            policy = smtp_error_policy(exc)
+            terminal = policy == "dead" or attempts >= EMAIL_MAX_ATTEMPTS
+            paused = policy == "pause" and not terminal
+            error = sanitized_smtp_error(exc, settings)
+            next_attempt_at = (
+                failed_at.isoformat()
+                if paused
+                else (failed_at + timedelta(seconds=delay)).isoformat()
+            )
+            if paused:
+                with self.state_lock:
+                    self.email_notification_runtime.update({
+                        "last_send_error": error[:1000],
+                        "paused_revision": revision,
+                        "paused_reason": error[:1000],
+                    })
+                self.store.set_notification_dispatch_pause(
+                    revision, error[:1000], failed_at.isoformat()
+                )
+            try:
+                self.store.finish_notification(
+                    int(item["id"]),
+                    sent=False,
+                    recorded_at=failed_at.isoformat(),
+                    error=error,
+                    next_attempt_at=next_attempt_at,
+                    terminal=terminal,
+                )
+            except Exception as persist_exc:
+                error += f"; Outbox-Abschluss fehlgeschlagen: {persist_exc}"
+            else:
+                with suppress(Exception):
+                    self.store.notification_audit(
+                        failed_at.isoformat(), "system", "failed", {
+                            "outbox_id": int(item["id"]),
+                            "category": category,
+                            "recipient_id": recipient_id,
+                            "attempt": attempts,
+                            "error_type": exc.__class__.__name__,
+                            "policy": policy,
+                            "retry_seconds": delay if policy == "retry" and not terminal else None,
+                            "dead_letter": terminal,
+                            "paused_revision": revision if paused else None,
+                        },
+                    )
+            with self.state_lock:
+                self.email_notification_runtime.update({
+                    "last_send_error": error[:1000],
+                    "paused_revision": revision if paused else None,
+                    "paused_reason": error[:1000] if paused else None,
+                })
+            return 2.0 if paused else 0.0
+
+        sent_at = _now()
+        try:
+            self.store.finish_notification(
+                int(item["id"]), sent=True, recorded_at=sent_at
+            )
+        except Exception as exc:
+            error = f"SMTP-Relay nahm Nachricht an; lokaler Abschluss unklar: {exc}"
+            with self.state_lock:
+                self.email_notification_runtime["last_send_error"] = error[:1000]
+            return 2.0
+        with suppress(Exception):
+            self.store.notification_audit(sent_at, "system", "sent", {
+                "outbox_id": int(item["id"]),
+                "category": category,
+                "recipient_id": recipient_id,
+                "attempt": int(item["attempts"]),
+                "relay_accepted": True,
+            })
+        with self.state_lock:
+            self.email_notification_runtime.update({
+                "last_send_at": sent_at,
+                "last_send_error": None,
+                "paused_revision": None,
+                "paused_reason": None,
+            })
+        return 0.0
+
+    def _email_notification_loop(self) -> None:
+        with self.state_lock:
+            self.email_notification_runtime["dispatcher_alive"] = True
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    if (
+                        time.monotonic() - self._last_notification_retention_purge
+                        >= 3600.0
+                    ):
+                        self.store.purge_notifications(datetime.now(timezone.utc))
+                        self._last_notification_retention_purge = time.monotonic()
+                    delay = self._email_notification_dispatch_once()
+                except Exception as exc:
+                    error = str(exc) or exc.__class__.__name__
+                    with self.state_lock:
+                        self.email_notification_runtime.update({
+                            "last_send_error": error[:1000],
+                            "paused_reason": "Dispatcherfehler; automatischer Wiederanlauf",
+                        })
+                    with suppress(Exception):
+                        self.store.notification_audit(
+                            _now(), "system", "dispatcher-error", {
+                                "error_type": exc.__class__.__name__,
+                            },
+                        )
+                    delay = 5.0
+                self.stop_event.wait(max(0.0, float(delay)))
+        finally:
+            with self.state_lock:
+                self.email_notification_runtime["dispatcher_alive"] = False
+
     @staticmethod
     def _normalize_local_access_settings(payload: object) -> dict:
         if not isinstance(payload, dict):
@@ -3298,11 +5702,13 @@ class DachsWebApp:
     @staticmethod
     def _default_dashboard_cards() -> list[dict]:
         wanted = set(DEFAULT_OVERVIEW_SERIES_IDS)
-        return [
+        cards = [
             {"block": int(block), "key": str(key)}
             for series_id, _title, block, key, _unit, _color in DEFAULT_DASHBOARD_SERIES
             if series_id in wanted
         ]
+        cards.append({"block": 22, "key": DASHBOARD_RUNTIME_24H_KEY})
+        return cards
 
     @staticmethod
     def _derived_dashboard_fields() -> list[dict]:
@@ -3377,17 +5783,63 @@ class DachsWebApp:
             )
         return normalized
 
+    def _migrate_stored_dashboard_cards(self, cards: object) -> tuple[list, bool]:
+        """Map retired tiles and drop unknown ones from a stored selection.
+
+        A single stale key (retired tile, removed pack field) must not throw
+        away the whole user selection; the remaining order is preserved.
+        """
+        if not isinstance(cards, list):
+            raise ValueError("Dashboard-Karten müssen eine Liste sein")
+        migrated: list = []
+        changed = False
+        for card in cards:
+            if not isinstance(card, dict):
+                changed = True
+                continue
+            try:
+                identity = (int(card.get("block")), str(card.get("key", "")).strip())
+            except (TypeError, ValueError):
+                changed = True
+                continue
+            replacement = DASHBOARD_RETIRED_CARDS.get(identity)
+            if replacement is not None:
+                identity = replacement
+                changed = True
+            block, key = identity
+            if block not in self.pack.addressable_blocks() or key not in self._dashboard_available_keys(block):
+                changed = True
+                continue
+            migrated.append({"block": block, "key": key})
+        return migrated[:MAX_DASHBOARD_CARDS], changed
+
     def _load_dashboard_cards(self) -> list[dict]:
         try:
             payload = json.loads(self.dashboard_settings_path.read_text(encoding="utf-8"))
-            return self._normalize_dashboard_cards(payload.get("cards"))
+            stored, changed = self._migrate_stored_dashboard_cards(payload.get("cards"))
+            cards = self._normalize_dashboard_cards(stored)
+            changed = changed or len(cards) != len(stored)
+            version = int(payload.get("version", 1))
+            runtime_card = {"block": 22, "key": DASHBOARD_RUNTIME_24H_KEY}
+            if version < DASHBOARD_SETTINGS_VERSION and runtime_card not in cards:
+                if len(cards) < MAX_DASHBOARD_CARDS:
+                    cards.append(runtime_card)
+                changed = True
+            if changed:
+                with suppress(OSError):
+                    self._save_dashboard_cards(cards)
+            return cards
         except (OSError, ValueError, TypeError, KeyError):
             return self._default_dashboard_cards()
 
     def _save_dashboard_cards(self, cards: list[dict]) -> None:
         temporary = self.dashboard_settings_path.with_suffix(".tmp")
         temporary.write_text(
-            json.dumps({"version": 1, "cards": cards}, ensure_ascii=False, indent=2) + "\n",
+            json.dumps(
+                {"version": DASHBOARD_SETTINGS_VERSION, "cards": cards},
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
             encoding="utf-8",
         )
         with suppress(OSError):
@@ -3429,11 +5881,19 @@ class DachsWebApp:
         # the Pi's SD card.  Keep the HTTP listener responsive and run the
         # maintenance work in the background after startup.
         self.maintenance_thread.start()
+        self.automation_thread.start()
+        self.email_notification_thread.start()
+        self.update_manager.start()
 
     def stop(self) -> None:
         self.stop_event.set()
         self.diagnosis_250h_cache.stop()
         self.monitor_thread.join(timeout=2)
+        if self.automation_thread.is_alive():
+            self.automation_thread.join(timeout=2)
+        if self.email_notification_thread.is_alive():
+            self.email_notification_thread.join(timeout=2)
+        self.update_manager.stop()
 
     def _load_users(self) -> list[dict]:
         try:
@@ -3602,9 +6062,26 @@ class DachsWebApp:
             ):
                 token = secrets.token_urlsafe(32)
                 with self.state_lock:
-                    self.sessions[token] = (username, str(user.get("role", "guest")), time.time() + 12 * 3600)
+                    self.sessions[token] = (
+                        username, str(user.get("role", "guest")),
+                        time.time() + 12 * 3600, time.time_ns(),
+                    )
                 return token, str(user.get("role", "guest"))
         return None
+
+    def verify_admin_password(self, username: str, password: str) -> bool:
+        """Re-authenticate a real enabled admin without creating a session."""
+        for user in self._load_users():
+            if (
+                user.get("username") == username
+                and user.get("role") == "admin"
+                and bool(user.get("enabled", True))
+                and _check_password(
+                    password, user.get("salt", ""), user.get("digest", "")
+                )
+            ):
+                return True
+        return False
 
     def session_user(self, token: str | None) -> dict | None:
         if not token:
@@ -3618,10 +6095,21 @@ class DachsWebApp:
                 return None
             return {"username": item[0], "role": item[1]}
 
+    def session_update_identity(self, token: str | None) -> tuple[str, int]:
+        if not token:
+            raise PermissionError("gültige Sitzung erforderlich")
+        with self.state_lock:
+            item = self.sessions.get(token)
+            if item is None or item[2] < time.time():
+                self.sessions.pop(token, None)
+                raise PermissionError("gültige Sitzung erforderlich")
+            return hashlib.sha256(token.encode("utf-8")).hexdigest(), int(item[3])
+
     def logout(self, token: str | None) -> None:
         if token:
             with self.state_lock:
                 self.sessions.pop(token, None)
+        self.update_manager.preview = None
 
     def change_password(self, username: str, current_password: str, new_password: str) -> None:
         new_password = self._require_password(new_password)
@@ -3661,6 +6149,207 @@ class DachsWebApp:
         self._save_users(users)
         self._invalidate_user_sessions("gast")
 
+    @staticmethod
+    def _read_runtime_24h(session, recorded_at: str) -> dict:
+        """Read twice and reject a byte-tear that is not stable on retry."""
+        samples = []
+
+        def read_sample() -> dict:
+            response = session.request(
+                RUNTIME_24H_REQUEST,
+                session.next_packet(),
+                timeout=0.9,
+                cpu=0,
+            )
+            sample = runtime_24h_status(response, recorded_at)
+            samples.append(sample)
+            return sample
+
+        first = read_sample()
+        second = read_sample()
+
+        def coherent(left: dict, right: dict) -> bool:
+            before = int(left["counter_seconds"])
+            after = int(right["counter_seconds"])
+            return 0 <= after - before <= 1
+
+        accepted = second
+        if not coherent(first, second):
+            third = read_sample()
+            # A real stop/reset is confirmed by two zero samples. A torn read
+            # around a byte carry is resolved when first and third are coherent.
+            if not coherent(second, third) and not coherent(first, third):
+                raise TransportError(
+                    "24-h-Zähler: drei nicht kohärente RAM-Lesungen "
+                    + ", ".join(str(item["counter_seconds"]) for item in samples)
+                )
+            accepted = third
+        return {**accepted, "validated_samples": len(samples)}
+
+    @staticmethod
+    def _read_ram_telemetry(session, recorded_at: str) -> dict:
+        """Read every allowlisted CPU-0 RAM field once; failures stay per field.
+
+        Each field fails closed on its own: a transport or validation error is
+        reported as ``available: False`` with the error text instead of an old
+        value. Only the fixed allowlist is requested, over the shared session.
+        """
+        return DachsWebApp._read_ram_fields(session, RAM_TELEMETRY_FIELDS, recorded_at)
+
+    @staticmethod
+    def _read_ram_fields(session, fields, recorded_at: str) -> dict:
+        results = {}
+        for field in fields:
+            try:
+                response = session.request(
+                    ram_telemetry_request(field),
+                    session.next_packet(),
+                    timeout=0.9,
+                    cpu=0,
+                )
+                results[field["key"]] = ram_telemetry_status(field, response, recorded_at)
+            except Exception as exc:
+                results[field["key"]] = ram_telemetry_unavailable(
+                    field, error=exc, recorded_at=str(recorded_at)
+                )
+        return results
+
+    def _current_soot_type_code(self):
+        """Raw Block-24 fuel/type byte from the current live cache, else None."""
+        with self.state_lock:
+            row = self.live_values.get(
+                (SOOT_REGENERATION_TYPE_BLOCK, SOOT_REGENERATION_TYPE_KEY)
+            )
+        if not row:
+            return None
+        return row.get("raw")
+
+    def _read_soot_regeneration(self, session, recorded_at: str) -> dict:
+        """Gate on the mapped type code, then read the three allowlisted bytes.
+
+        Without a readable type code or without bit 3 no RAM read is issued at
+        all; the status reports unsupported/unavailable instead of an old value.
+        """
+        return self._read_soot_regeneration_fields(session, recorded_at)[0]
+
+    def _read_soot_regeneration_fields(self, session, recorded_at: str) -> tuple[dict, dict]:
+        """Like ``_read_soot_regeneration`` but also return the raw field reads."""
+        type_code = self._current_soot_type_code()
+        if soot_regeneration_supported(type_code) is not True:
+            return soot_regeneration_status(type_code, {}, recorded_at), {}
+        fields = self._read_ram_fields(session, SOOT_REGENERATION_FIELDS, recorded_at)
+        return soot_regeneration_status(type_code, fields, recorded_at), fields
+
+    def _display_status_max_age(self) -> float:
+        """Inputs older than two slow cycles plus margin count as stale."""
+        return 2.0 * float(self.slow_monitor_interval) + 5.0
+
+    def _store_display_ram_sample(self, address: int, item: dict, now_mono: float) -> None:
+        value = item.get("raw") if item.get("available") is True else None
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 0xFF:
+            value = None
+        self._display_ram[int(address)] = {
+            "value": value,
+            "attempt_mono": float(now_mono),
+            "error": None if value is not None else str(item.get("error") or "nicht gelesen"),
+        }
+
+    def _update_display_slow_payloads(self, payloads: dict, failed_blocks: set, now_mono: float) -> None:
+        for block in DISPLAY_STATUS_SLOW_BLOCKS:
+            if block in payloads:
+                self._display_slow_payloads[block] = (bytes(payloads[block]), float(now_mono))
+            elif block in failed_blocks:
+                # A failed read invalidates the cached payload immediately.
+                self._display_slow_payloads.pop(block, None)
+
+    def _refresh_display_status(
+        self,
+        session,
+        payloads: dict,
+        now_mono: float,
+        recorded_at: str,
+        slow_poll_due: bool,
+        refreshed: set | None = None,
+    ) -> dict:
+        """Compute both display lines from this cycle's blocks plus fresh RAM bytes.
+
+        Fast blocks 22/24/26 must come from the current cycle. Blocks 50/104
+        and RAM-only bytes come from their last read if it is not stale.
+        RAM bytes are read in the 10-s cycle; a conditional byte that becomes
+        relevant between slow cycles is read once immediately and then again
+        only after a full slow interval, so a persistent failure never turns
+        into per-cycle retries. ``refreshed`` lists addresses already read in
+        this cycle (0x0db3 from the soot-regeneration read).
+        """
+        refreshed = set(refreshed or ())
+        max_age = self._display_status_max_age()
+        block_payloads = {
+            block: payloads[block] for block in DISPLAY_STATUS_FAST_BLOCKS if block in payloads
+        }
+        input_errors: dict[int, str] = {}
+        for block in DISPLAY_STATUS_SLOW_BLOCKS:
+            cached = self._display_slow_payloads.get(block)
+            if cached is not None and now_mono - cached[1] <= max_age:
+                block_payloads[block] = cached[0]
+        values = inputs_from_payloads(block_payloads)
+        to_read = []
+        for address in ram_reads_needed(values):
+            if address not in DISPLAY_STATUS_RAM_FIELD_BY_ADDRESS or address in refreshed:
+                continue
+            cached = self._display_ram.get(address)
+            if (
+                slow_poll_due
+                or cached is None
+                or now_mono - float(cached["attempt_mono"]) >= float(self.slow_monitor_interval)
+            ):
+                to_read.append(DISPLAY_STATUS_RAM_FIELD_BY_ADDRESS[address])
+        if to_read:
+            fields = self._read_ram_fields(session, to_read, recorded_at)
+            for field in to_read:
+                self._store_display_ram_sample(
+                    int(field["address"]), fields.get(field["key"]) or {}, now_mono
+                )
+        for address in DISPLAY_STATUS_RAM_ADDRESSES:
+            cached = self._display_ram.get(address)
+            if cached is None:
+                continue
+            if cached["value"] is None:
+                input_errors[address] = str(cached["error"])
+            elif now_mono - float(cached["attempt_mono"]) > max_age:
+                input_errors[address] = "veraltet"
+            else:
+                values[address] = int(cached["value"])
+        for block in DISPLAY_STATUS_FAST_BLOCKS + DISPLAY_STATUS_SLOW_BLOCKS:
+            if block not in block_payloads:
+                for address in DISPLAY_STATUS_BLOCK_INPUTS[block]:
+                    input_errors[address] = f"Block {block} nicht aktuell gelesen"
+        return compute_display_status(values, recorded_at=recorded_at, input_errors=input_errors)
+
+    def _publish_display_status(self, status: dict, now_mono: float) -> None:
+        with self.state_lock:
+            self.display_status = status
+            self._display_status_mono = float(now_mono)
+        if status.get("available") is not True:
+            return
+        lines = (str(status["line1"]), str(status["line2"]))
+        if lines == self._display_last_recorded_lines:
+            return
+        self.store.record_display_status_change(str(status["recorded_at"]), status)
+        self._display_last_recorded_lines = lines
+
+    def _current_display_status(self) -> dict:
+        """Published status, or unavailable when the monitor stopped updating it."""
+        with self.state_lock:
+            status = json.loads(json.dumps(self.display_status))
+            computed = self._display_status_mono
+        limit = max(5.0, 4.0 * float(self.interval) + 2.0)
+        if computed is not None and time.monotonic() - computed > limit:
+            return display_status_unavailable(
+                error="veraltet: keine aktuelle Berechnung",
+                recorded_at=status.get("recorded_at"),
+            )
+        return status
+
     def _monitor_loop(self) -> None:
         while not self.stop_event.is_set():
             with self.state_lock:
@@ -3679,8 +6368,17 @@ class DachsWebApp:
                 self.stop_event.wait(0.5)
                 continue
             cycle_started = time.monotonic()
+            serial_done: float | None = None
+            housekeeping = False
             recorded_at = _now()
             rows: list[dict] = []
+            display_payloads: dict[int, bytes] = {}
+            cycle_payloads: dict[int, bytes] = {}
+            ram_telemetry_available: bool | None = None
+            slow_poll_due = False
+            display_failed_blocks: set[int] = set()
+            display_status_result: dict | None = None
+            soot_fields: dict = {}
             motor_status_observation: object | None = None
             motor_speed_observation: object | None = None
             ok_blocks = failed_blocks = 0
@@ -3694,10 +6392,15 @@ class DachsWebApp:
                     with self.state_lock:
                         if not self.serial_enabled:
                             continue
+                    # Timestamp the observation only after acquiring the serial
+                    # lease. A reset that completed while this cycle waited
+                    # must not appear newer than the Block-22 observation.
+                    recorded_at = _now()
                     blocks = list(DEFAULT_FAST_MONITOR_BLOCKS)
                     now_mono = cycle_started
                     history_sample_due = self._history_sample_due(now_mono)
-                    if now_mono - self._last_slow_poll >= self.slow_monitor_interval:
+                    slow_poll_due = now_mono - self._last_slow_poll >= self.slow_monitor_interval
+                    if slow_poll_due:
                         blocks.extend(DEFAULT_SLOW_MONITOR_BLOCKS)
                         blocks.extend(sorted(dashboard_extra_blocks))
                         self._last_slow_poll = now_mono
@@ -3708,9 +6411,13 @@ class DachsWebApp:
                                 result, fields = self.service.decoded_block(session, block)
                                 if not result.ok:
                                     failed_blocks += 1
+                                    display_failed_blocks.add(block)
                                     error_text = f"Block {block}: Status {result.status!r}"
                                     continue
                                 ok_blocks += 1
+                                cycle_payloads[block] = bytes(result.payload)
+                                if block in DISPLAY_STATUS_BLOCK_INPUTS:
+                                    display_payloads[block] = bytes(result.payload)
                                 for field in fields:
                                     if (
                                         block == MOTOR_STATUS_BLOCK
@@ -3799,8 +6506,98 @@ class DachsWebApp:
                                         self.monitor_state["last_slow_cycle"] = recorded_at
                             except Exception as exc:
                                 failed_blocks += 1
+                                display_failed_blocks.add(block)
+                                display_payloads.pop(block, None)
                                 error_text = f"Block {block}: {exc}"
+                        if slow_poll_due:
+                            try:
+                                runtime_24h = self._read_runtime_24h(session, recorded_at)
+                                with self.state_lock:
+                                    self.runtime_24h = {**runtime_24h, "error": None}
+                            except Exception as exc:
+                                error_text = error_text or f"24-h-Zähler: {exc}"
+                                with self.state_lock:
+                                    self.runtime_24h = {
+                                        **self.runtime_24h,
+                                        "available": False,
+                                        "error": str(exc),
+                                        "recorded_at": recorded_at,
+                                    }
+                            ram_telemetry = self._read_ram_telemetry(session, recorded_at)
+                            with self.state_lock:
+                                self.ram_telemetry = ram_telemetry
+                            first_error = next(
+                                (item["error"] for item in ram_telemetry.values() if item["error"]),
+                                None,
+                            )
+                            if first_error:
+                                error_text = error_text or f"RAM-Telemetrie: {first_error}"
+                            ram_telemetry_available = any(
+                                item.get("available") for item in ram_telemetry.values()
+                            )
+                            soot_regeneration, soot_fields = self._read_soot_regeneration_fields(
+                                session, recorded_at
+                            )
+                            with self.state_lock:
+                                self.soot_regeneration = soot_regeneration
+                            if soot_regeneration["supported"] is True and soot_regeneration["error"]:
+                                error_text = error_text or f"Rußfilterregeneration: {soot_regeneration['error']}"
+                        display_refreshed: set[int] = set()
+                        if slow_poll_due:
+                            # Reuse the soot-regeneration read of 0x0db3 instead
+                            # of requesting the same byte twice in one cycle.
+                            soot_state = soot_fields.get(SOOT_REGENERATION_FIELDS[0]["key"])
+                            if soot_state is not None:
+                                self._store_display_ram_sample(0x0DB3, soot_state, now_mono)
+                                display_refreshed.add(0x0DB3)
+                        self._update_display_slow_payloads(
+                            display_payloads, display_failed_blocks, now_mono
+                        )
+                        try:
+                            display_status_result = self._refresh_display_status(
+                                session,
+                                display_payloads,
+                                now_mono,
+                                recorded_at,
+                                slow_poll_due,
+                                display_refreshed,
+                            )
+                        except Exception as exc:
+                            display_status_result = display_status_unavailable(
+                                error=f"Display-Status: {exc}", recorded_at=recorded_at
+                            )
+                        try:
+                            self.phase6.cycle(
+                                session,
+                                self.service,
+                                cycle_payloads,
+                                now_mono,
+                                {
+                                    "slow": slow_poll_due,
+                                    "previous_elapsed": self._previous_cycle.get("elapsed"),
+                                    "previous_slow": self._previous_cycle.get("slow"),
+                                    "previous_housekeeping": self._previous_cycle.get("housekeeping"),
+                                    "previous_serial_elapsed": self._previous_cycle.get("serial_elapsed"),
+                                    "display_available": bool(
+                                        (display_status_result or {}).get("available")
+                                    ),
+                                    "ram_telemetry_available": ram_telemetry_available,
+                                },
+                            )
+                        except Exception as exc:
+                            error_text = error_text or f"Phase-6-Logger: {exc}"
+                # Serial part (lease incl. Phase-6 reads) ends here; the rest
+                # of the cycle is local SQLite work.
+                serial_done = time.monotonic()
                 self.store.record_history_snapshot(recorded_at, rows)
+                try:
+                    self._observe_email_notifications(recorded_at, display_status_result)
+                except Exception as exc:
+                    with self.state_lock:
+                        self.email_notification_runtime.update({
+                            "last_observation_at": recorded_at,
+                            "last_observation_error": str(exc)[:1000],
+                        })
                 if motor_status_observation is not None:
                     self.store.record_motor_status_observation(
                         recorded_at,
@@ -3827,6 +6624,7 @@ class DachsWebApp:
                 if rows:
                     self._last_history_sample = now_mono
                 if time.monotonic() - self._last_retention_purge >= 3600:
+                    housekeeping = True
                     self.store.purge(HISTORY_RETENTION_DAYS)
                     compacted = self.store.compact_adaptive_history()
                     with self.state_lock:
@@ -3835,6 +6633,15 @@ class DachsWebApp:
             except Exception as exc:
                 error_text = str(exc)
                 failed_blocks = len(DEFAULT_FAST_MONITOR_BLOCKS)
+            if display_status_result is None:
+                display_status_result = display_status_unavailable(
+                    error=f"Display-Status: {error_text or 'Zyklus nicht abgeschlossen'}",
+                    recorded_at=recorded_at,
+                )
+            try:
+                self._publish_display_status(display_status_result, cycle_started)
+            except Exception as exc:
+                error_text = error_text or f"Display-Status-Historie: {exc}"
             if motor_status_observation is None:
                 try:
                     self.store.record_motor_status_missing(recorded_at)
@@ -3859,7 +6666,43 @@ class DachsWebApp:
                         "connection_state": "getrennt",
                     })
             cycle_elapsed = time.monotonic() - cycle_started
+            serial_elapsed = None if serial_done is None else serial_done - cycle_started
+            self._previous_cycle = {
+                "elapsed": cycle_elapsed,
+                "slow": slow_poll_due,
+                "housekeeping": housekeeping,
+                "serial_elapsed": serial_elapsed,
+            }
+            self._record_cycle_timing(cycle_elapsed, serial_elapsed, slow_poll_due, housekeeping)
             self.stop_event.wait(max(0.0, self.interval - cycle_elapsed))
+
+    def _record_cycle_timing(
+        self,
+        elapsed: float,
+        serial_elapsed: float | None,
+        slow: bool,
+        housekeeping: bool,
+    ) -> None:
+        """Expose the split of the last cycle (serial lease vs. local SQLite work)."""
+        kind = "housekeeping" if housekeeping else "slow" if slow else "fast"
+        with self.state_lock:
+            timing = dict(self.monitor_state.get("cycle_timing") or {
+                "fast_over_limit": 0, "fast_max_s": None, "fast_max_at": None,
+            })
+            timing.update({
+                "kind": kind,
+                "last_s": round(elapsed, 3),
+                "serial_s": None if serial_elapsed is None else round(serial_elapsed, 3),
+                "store_s": None if serial_elapsed is None else round(elapsed - serial_elapsed, 3),
+                "fast_limit_s": SLOW_FAST_CYCLE_SECONDS,
+            })
+            if kind == "fast":
+                if elapsed > SLOW_FAST_CYCLE_SECONDS:
+                    timing["fast_over_limit"] = int(timing.get("fast_over_limit") or 0) + 1
+                if timing.get("fast_max_s") is None or elapsed > float(timing["fast_max_s"]):
+                    timing["fast_max_s"] = round(elapsed, 3)
+                    timing["fast_max_at"] = _now()
+            self.monitor_state["cycle_timing"] = timing
 
     def _history_sample_due(self, now_mono: float) -> bool:
         return self.history_interval <= 0 or float(now_mono) - self._last_history_sample >= self.history_interval
@@ -3869,6 +6712,19 @@ class DachsWebApp:
             state = dict(self.monitor_state)
             values = list(self.live_values.values())
             soot_settings = dict(self.soot_filter_config)
+            runtime_24h = dict(self.runtime_24h)
+            ram_telemetry = [
+                dict(self.ram_telemetry.get(field["key"]) or ram_telemetry_unavailable(field))
+                for field in RAM_TELEMETRY_FIELDS
+            ]
+            soot_regeneration = json.loads(json.dumps(self.soot_regeneration))
+            clock_cache = self._display_slow_payloads.get(CONTROLLER_CLOCK_BLOCK)
+        controller_clock = controller_clock_status(
+            clock_cache[0] if clock_cache else None,
+            time.monotonic() - clock_cache[1] if clock_cache else None,
+            self._display_status_max_age(),
+        )
+        display_status = self._current_display_status()
         values.sort(key=lambda item: (int(item["block"]), str(item["key"])))
         cache_values = {
             str(item["key"]): item.get("value")
@@ -3894,6 +6750,15 @@ class DachsWebApp:
             "maintenance": maintenance_status(cache_values),
             "soot_filter": soot_filter,
             "operating_hours_per_start": operating_hours_per_start(values),
+            "runtime_24h": runtime_24h,
+            "ram_telemetry": ram_telemetry,
+            "soot_filter_regeneration": soot_regeneration,
+            "display_status": display_status,
+            "controller_clock": controller_clock,
+            "controller_clock_sync": self._controller_clock_sync_summary(),
+            "real_runtime": self.real_runtime(),
+            "runtime_auto_reset": self._runtime_auto_reset_summary(),
+            "phase6_verify": self.phase6.status(),
         }
 
     def schema(self) -> dict:
@@ -3935,7 +6800,7 @@ class DachsWebApp:
                     "unit": meta.get("unit", ""),
                     "size": meta.get("size", 1),
                     "offset": meta.get("offset", 0),
-                    "write": True,
+                    "write": generic_web_field_writable(block, meta),
                     "reserved": is_reserved_key(key),
                     "choices": _json_value(meta.get("choices") or []),
                     "min": meta.get("min"),
@@ -3984,6 +6849,7 @@ class DachsWebApp:
             "blocks": blocks,
             "network_protection": network_protection_schemas(),
             "series": series,
+            "derived_series": [dict(HISTORY_REAL_RUNTIME_SERIES)],
             "roles": {"guest": "lesen", "admin": "lesen und schreiben"},
         }
 
@@ -4439,7 +7305,15 @@ class DachsWebApp:
             if restored[offset:offset + size] != current[offset:offset + size]:
                 preserved.add(base_key)
             restored[offset:offset + size] = current[offset:offset + size]
-        return bytes(restored), sorted(preserved)
+        firmware_rebased = restore_target_preserving_firmware_owned(
+            cpu, block, bytes(restored), current
+        )
+        if firmware_rebased != bytes(restored):
+            if block == SC123_LIMIT_CAPABILITY_BLOCK:
+                preserved.add("Hka_Ew.Reserve_2/SC123-Heartbeat")
+            elif block == SC123_LIMIT_STORAGE_BLOCK:
+                preserved.add("Waermef_Ew.Reserve[0..5]/SC123-Datensatz")
+        return firmware_rebased, sorted(preserved)
 
     def restore_backup(
         self,
@@ -4808,7 +7682,7 @@ class DachsWebApp:
                     "type": f.metadata.get("type", "byte"),
                     "size": f.metadata.get("size", 1),
                     "offset": f.metadata.get("offset", 0),
-                    "write": True,
+                    "write": generic_web_field_writable(block, f.metadata),
                     "reserved": is_reserved_key(f.key),
                     "choices": _json_value(f.metadata.get("choices") or []),
                     "min": f.metadata.get("min"),
@@ -5025,10 +7899,10 @@ class DachsWebApp:
         if missing_required:
             blocks = ", ".join(str(block) for block in missing_required)
             raise RuntimeError(f"Wartungsstart nicht möglich; Pflichtblöcke fehlen: {blocks}")
-        block24 = {item["key"]: item for item in snapshots["24"]["fields"]}
-        fuel_type = fuel_type_from_raw((block24.get("Hka_Mw1.bKraftstofftyp") or {}).get("raw"))
+        fuel_type, raw_fuel = fuel_type_from_block24(
+            snapshots["24"]["fields"], payloads.get(24)
+        )
         if fuel_type == "unknown":
-            raw_fuel = (block24.get("Hka_Mw1.bKraftstofftyp") or {}).get("raw")
             raise RuntimeError(
                 "Wartungsstart nicht möglich; Kraftstoffart wurde nicht eindeutig "
                 f"ermittelt (Rohwert {raw_fuel!r})"
@@ -5074,6 +7948,11 @@ class DachsWebApp:
             "generated_by": username,
             "pack_rev": self.pack.pack_rev,
             "fuel_type": fuel_type,
+            "fuel_source": {
+                "key": FUEL_TYPE_KEY,
+                "address": FUEL_TYPE_ADDRESS,
+                "raw": raw_fuel,
+            },
             "snapshot": {
                 "started_at": started_at,
                 "completed_at": completed_at,
@@ -5116,12 +7995,32 @@ class DachsWebApp:
         current = self.store.maintenance_report(report_id)
         if current["status"] != "draft":
             raise ValueError("abgeschlossene Wartungsberichte sind unveränderlich")
-        clean = validate_protocol(protocol)
+        clean = validate_protocol(protocol, report=current["report"])
         self.store.update_maintenance_protocol(report_id, clean)
         return self.maintenance_report(report_id)
 
     def delete_maintenance_report(self, report_id: int) -> dict:
         return self.store.delete_maintenance_report(report_id)
+
+    def complete_local_intermediate_maintenance(
+        self, username: str, report_id: int, protocol: dict, reason: str
+    ) -> dict:
+        """Close a draft locally; deliberately has no transport/auth/write path."""
+        current = self.store.maintenance_report(report_id)
+        if current["status"] != "draft":
+            raise ValueError("nur ein offener Wartungsentwurf kann als Zwischenwartung gespeichert werden")
+        # A Zwischenwartung is deliberately a partial, local notebook entry.
+        # It must not pretend that the complete regulator checklist was done.
+        clean = validate_protocol(protocol, report=current["report"])
+        clean_reason = str(reason).strip()
+        if not clean_reason:
+            raise ValueError("Grund für die Zwischenwartung ist erforderlich")
+        if len(clean_reason) > 500:
+            raise ValueError("Grund für die Zwischenwartung darf höchstens 500 Zeichen haben")
+        self.store.complete_local_intermediate_maintenance(
+            report_id, clean, username, clean_reason
+        )
+        return self.maintenance_report(report_id)
 
     def complete_maintenance(self, username: str, report_id: int, protocol: dict,
                              auth_level: int, pass4: str, confirmation: str,
@@ -5130,7 +8029,10 @@ class DachsWebApp:
         if demo:
             if str(confirmation).strip() != MAINTENANCE_DEMO_CONFIRMATION:
                 raise ValueError(f"zur Demo-Bestätigung exakt {MAINTENANCE_DEMO_CONFIRMATION!r} eingeben")
-            clean = validate_protocol(protocol, complete=True)
+            clean = validate_protocol(
+                protocol, complete=True,
+                report=self.store.maintenance_report(report_id)["report"],
+            )
             completion = {
                 "mode": "demo",
                 "completed_at": _now(),
@@ -5146,7 +8048,10 @@ class DachsWebApp:
         if str(confirmation).strip() != MAINTENANCE_CONFIRMATION:
             raise ValueError(f"zur Bestätigung exakt {MAINTENANCE_CONFIRMATION!r} eingeben")
         auth_level = _validated_auth_level(auth_level, "Auth-Level für Wartungsabschluss")
-        clean = validate_protocol(protocol, complete=True)
+        clean = validate_protocol(
+            protocol, complete=True,
+            report=self.store.maintenance_report(report_id)["report"],
+        )
         archive_index = self.store.backup_archive_for_report(report_id)
         archive, _archive_raw, archive_image, archive_inspection = (
             self._load_verified_backup_archive(int(archive_index["id"]))
@@ -5322,6 +8227,2952 @@ class DachsWebApp:
             "read_at": _now(),
         }
 
+    @staticmethod
+    def _required_decoded_field(
+        fields, key: str, block: int, operation: str = "Entstörung"
+    ):
+        field = next((item for item in fields if item.key == key), None)
+        if field is None:
+            raise TransportError(f"{operation}: {key} fehlt in Block {block}")
+        return field
+
+    def _service_reset_sample(self, session) -> dict:
+        result22, fields22 = self.service.decoded_block(session, 22)
+        if not result22.ok:
+            raise TransportError("Entstörung: Block 22 konnte nicht frisch gelesen werden")
+        result24, fields24 = self.service.decoded_block(session, 24)
+        if not result24.ok:
+            raise TransportError("Entstörung: Block 24 konnte nicht frisch gelesen werden")
+
+        service = self._required_decoded_field(fields22, "Hka_Bd.bStoerung", 22)
+        fault_count = self._required_decoded_field(
+            fields22, "Hka_Bd.usAnzahlStoerungenHka", 22
+        )
+        fault_runtime = self._required_decoded_field(
+            fields22, "Hka_Bd.ulBetriebssekundenLetzteStoerung", 22
+        )
+        motor = self._required_decoded_field(fields24, MOTOR_STATUS_KEY, 24)
+        if (
+            isinstance(service.raw, bool)
+            or not isinstance(service.raw, int)
+            or not 0 <= service.raw <= 0xFF
+        ):
+            raise TransportError("Entstörung: Servicecode besitzt keinen gültigen Rohwert")
+        if (
+            isinstance(motor.raw, bool)
+            or not isinstance(motor.raw, int)
+            or not 0 <= motor.raw <= 0xFF
+        ):
+            raise TransportError("Entstörung: Motorstatus besitzt keinen gültigen Rohwert")
+        if (
+            isinstance(fault_count.raw, bool)
+            or not isinstance(fault_count.raw, int)
+            or not 0 <= fault_count.raw <= 0xFFFF
+        ):
+            raise TransportError("Entstörung: Störungszähler besitzt keinen gültigen Rohwert")
+        if (
+            isinstance(fault_runtime.raw, bool)
+            or not isinstance(fault_runtime.raw, int)
+            or not 0 <= fault_runtime.raw <= 0xFFFFFFFF
+        ):
+            raise TransportError(
+                "Entstörung: Betriebssekunden der letzten Störung besitzen keinen gültigen Rohwert"
+            )
+
+        temperatures = {}
+        for key, label, minimum, maximum in SERVICE_RESET_TEMPERATURE_LIMITS:
+            field = self._required_decoded_field(fields24, key, 24)
+            try:
+                value = float(field.value)
+            except (TypeError, ValueError) as exc:
+                raise TransportError(f"Entstörung: {label} ist nicht numerisch") from exc
+            if not math.isfinite(value):
+                raise TransportError(f"Entstörung: {label} ist nicht endlich")
+            temperatures[key] = {
+                "key": key,
+                "label": label,
+                "value_c": value,
+                "raw": _json_value(field.raw),
+                "minimum_c": minimum,
+                "maximum_c": maximum,
+                "valid": web_measurement_valid(24, key, field.value, field.raw),
+            }
+        return {
+            "service_code_raw": int(service.raw),
+            "service_text": str(service.value),
+            "fault_count": int(fault_count.raw),
+            "fault_runtime_seconds": int(fault_runtime.raw),
+            "motor_status": int(motor.raw),
+            "motor_status_text": str(motor.value),
+            "temperatures": temperatures,
+        }
+
+    def _service_reset_state(self, session) -> dict:
+        """Read Block 22/24 twice and derive a fail-closed reset preview."""
+        read_started = time.monotonic()
+        first = self._service_reset_sample(session)
+        second = self._service_reset_sample(session)
+        read_duration = time.monotonic() - read_started
+        if read_duration > SERVICE_RESET_MAX_STATE_READ_SECONDS:
+            raise TransportError(
+                "Entstörung: Doppellesung dauerte zu lange für einen frischen Zustand"
+            )
+        if first["service_code_raw"] != second["service_code_raw"]:
+            raise TransportError("Entstörung: Servicecode änderte sich während der Direktlesung")
+        if first["fault_count"] != second["fault_count"]:
+            raise TransportError("Entstörung: Störungszähler änderte sich während der Direktlesung")
+        if first["fault_runtime_seconds"] != second["fault_runtime_seconds"]:
+            raise TransportError("Entstörung: Störereignis änderte sich während der Direktlesung")
+        if first["motor_status"] != second["motor_status"]:
+            raise TransportError("Entstörung: Motorstatus änderte sich während der Direktlesung")
+
+        blockers = []
+        service_raw = int(second["service_code_raw"])
+        motor_status = int(second["motor_status"])
+        if service_raw == 0:
+            blockers.append("Keine aktive Störung")
+        if motor_status not in SERVICE_RESET_SAFE_MOTOR_STATUSES:
+            blockers.append(
+                f"Motorstatus {motor_status} ist nicht sicher AUS (zulässig: 15 oder 16)"
+            )
+        if not self.service_reset_temperature_policy_approved:
+            blockers.append(
+                "Entstör-Temperatur- und Wiederanlaufpolitik ist für diese Installation "
+                "nicht ausdrücklich fachlich freigegeben"
+            )
+
+        temperatures = []
+        for key, label, minimum, maximum in SERVICE_RESET_TEMPERATURE_LIMITS:
+            left = first["temperatures"][key]
+            right = second["temperatures"][key]
+            delta = abs(float(right["value_c"]) - float(left["value_c"]))
+            if delta > SERVICE_RESET_TEMPERATURE_COHERENCE_C:
+                raise TransportError(
+                    f"Entstörung: {label} änderte sich um {delta:g} °C während der Direktlesung"
+                )
+            samples = [float(left["value_c"]), float(right["value_c"])]
+            value = max(samples)
+            valid = bool(left["valid"] and right["valid"])
+            safe = valid and all(minimum <= sample <= maximum for sample in samples)
+            if not valid:
+                blockers.append(f"{label} ist nicht plausibel lesbar")
+            elif not safe:
+                blockers.append(
+                    f"{label} mit Messwerten {samples[0]:g}/{samples[1]:g} °C "
+                    "außerhalb der Entstörgrenze "
+                    f"{minimum:g}–{maximum:g} °C"
+                )
+            temperatures.append({
+                "key": key,
+                "label": label,
+                "value_c": value,
+                "samples_c": samples,
+                "minimum_c": minimum,
+                "maximum_c": maximum,
+                "safe": safe,
+            })
+
+        service_code = service_raw + 100 if service_raw else 0
+        return {
+            "schema": SERVICE_RESET_SCHEMA,
+            "eligible": not blockers,
+            "blockers": blockers,
+            "service_code": service_code,
+            "service_code_raw": service_raw,
+            "service_text": second["service_text"],
+            "fault_count": int(second["fault_count"]),
+            "fault_runtime_seconds": int(second["fault_runtime_seconds"]),
+            "fault_event": {
+                "count": int(second["fault_count"]),
+                "runtime_seconds": int(second["fault_runtime_seconds"]),
+            },
+            "motor_status": motor_status,
+            "motor_status_text": second["motor_status_text"],
+            "safe_motor_statuses": sorted(SERVICE_RESET_SAFE_MOTOR_STATUSES),
+            "temperatures": temperatures,
+            "validated_samples": 2,
+            "read_source": "direkte Block-22/24-Doppellesung über Serialworker",
+            "read_at": _now(),
+            "read_duration_seconds": round(read_duration, 3),
+            "volatile_ram_only": True,
+            "auth_level": SERVICE_RESET_AUTH_LEVEL,
+            "temperature_policy_approved": bool(
+                self.service_reset_temperature_policy_approved
+            ),
+        }
+
+    def _clear_service_reset_token(self, username: str) -> None:
+        with self._service_reset_token_lock:
+            self._service_reset_token = None
+
+    def _require_service_reset_worker(self) -> None:
+        if not str(getattr(self.service, "serial_socket", "") or "").strip():
+            raise TransportError(
+                "Entstörung ist ausschließlich über den exklusiven Serialworker verfügbar"
+            )
+
+    @contextmanager
+    def _service_reset_worker_session(self):
+        """Open one worker session only if web serial is still enabled.
+
+        The second state check deliberately happens after acquiring the web
+        serial lease.  A reset that was queued when the operator disconnected
+        web serial must not overtake that disconnect and write afterwards.
+        """
+        with self.serial_lock:
+            with self.state_lock:
+                if not self.serial_enabled:
+                    raise TransportError("serielle Verbindung ist getrennt")
+            with self.service.session() as session:
+                yield session
+
+    def _issue_service_reset_token(self, username: str, state: dict) -> str:
+        token = secrets.token_urlsafe(32)
+        now = time.monotonic()
+        with self._service_reset_token_lock:
+            # One controller has one outstanding acknowledgement capability.
+            # Bind it to the complete fault-event identity, not merely to the
+            # visible SC number. A newer preview invalidates every older tab.
+            self._service_reset_token = {
+                "token": token,
+                "username": str(username),
+                "service_code_raw": int(state["service_code_raw"]),
+                "fault_count": int(state["fault_count"]),
+                "fault_runtime_seconds": int(state["fault_runtime_seconds"]),
+                "expires_at": now + SERVICE_RESET_TOKEN_TTL_SECONDS,
+            }
+        return token
+
+    def _consume_service_reset_token(
+        self, username: str, token: object, expected_raw: int
+    ) -> dict:
+        supplied = str(token or "")
+        with self._service_reset_token_lock:
+            issued = self._service_reset_token
+            expired = bool(
+                issued is not None
+                and time.monotonic() > float(issued["expires_at"])
+            )
+            identity_matches = bool(
+                issued is not None
+                and supplied
+                and str(issued["username"]) == str(username)
+                and secrets.compare_digest(supplied, str(issued["token"]))
+            )
+            valid = bool(
+                identity_matches
+                and not expired
+                and int(issued["service_code_raw"]) == int(expected_raw)
+            )
+            # Consume a matching capability even if its bound code was sent
+            # incorrectly.  A stale token must not delete a newer preview.
+            if expired or identity_matches:
+                self._service_reset_token = None
+        if not valid:
+            raise APIRequestConflictError(
+                "Entstöranforderung fehlt, ist abgelaufen oder wurde bereits verbraucht; "
+                "Zustand neu lesen und niemals automatisch wiederholen"
+            )
+        return dict(issued)
+
+    @staticmethod
+    def _require_service_reset_token_fresh(token_preimage: dict, stage: str) -> None:
+        if time.monotonic() > float(token_preimage["expires_at"]):
+            raise APIRequestConflictError(
+                f"Entstörbestätigung lief {stage} ab; Zustand neu lesen und erneut bestätigen"
+            )
+
+    @staticmethod
+    def _require_service_reset_prewrite_fresh(checked_at: float) -> float:
+        age = max(0.0, time.monotonic() - float(checked_at))
+        if age > SERVICE_RESET_MAX_PREWRITE_AGE_SECONDS:
+            raise APIRequestConflictError(
+                "Letzte Entstör-Sicherheitsprüfung ist vor dem Write nicht mehr frisch; "
+                "kein Telegramm gesendet"
+            )
+        return age
+
+    def _service_reset_retry_guard_remaining(self, service_code_raw: int) -> float:
+        now = time.monotonic()
+        with self._service_reset_token_lock:
+            attempt = self._service_reset_last_attempt
+        if attempt is None or int(attempt["service_code_raw"]) != int(service_code_raw):
+            return 0.0
+        return max(
+            0.0,
+            SERVICE_RESET_RETRY_GUARD_SECONDS - (now - float(attempt["attempted_at"])),
+        )
+
+    def _record_service_reset_attempt(self, service_code_raw: int) -> None:
+        with self._service_reset_token_lock:
+            self._service_reset_last_attempt = {
+                "service_code_raw": int(service_code_raw),
+                "attempted_at": time.monotonic(),
+            }
+
+    def service_reset_preview(self, username: str) -> dict:
+        """Return a fresh, non-authenticating eligibility preview."""
+        with self._service_reset_flow_lock:
+            return self._service_reset_preview_locked(username)
+
+    def _service_reset_preview_locked(self, username: str) -> dict:
+        self._clear_service_reset_token(username)
+        self._require_service_reset_worker()
+        with self.state_lock:
+            if not self.serial_enabled:
+                raise TransportError("serielle Verbindung ist getrennt")
+        with self._service_reset_worker_session() as session:
+            state = self._service_reset_state(session)
+        pending_intent = self.store.pending_service_reset_write_intent()
+        if pending_intent is not None:
+            state = {
+                **state,
+                "eligible": False,
+                "blockers": [
+                    *state["blockers"],
+                    "Nicht aufgelöster früherer Entstör-Schreibversuch; nicht wiederholen, "
+                    "Audit und Reglerzustand manuell prüfen",
+                ],
+            }
+        retry_guard = self._service_reset_retry_guard_remaining(
+            state["service_code_raw"]
+        )
+        if retry_guard > 0.0 and state["service_code_raw"] != 0:
+            state = {
+                **state,
+                "eligible": False,
+                "blockers": [
+                    *state["blockers"],
+                    "Vorheriger Entstörversuch wird nicht automatisch wiederholt; "
+                    f"erneute manuelle Prüfung frühestens in {retry_guard:.1f} s",
+                ],
+            }
+        return {
+            **state,
+            "request_token": (
+                self._issue_service_reset_token(username, state)
+                if state["eligible"] else None
+            ),
+            "request_token_ttl_seconds": SERVICE_RESET_TOKEN_TTL_SECONDS,
+            "retry_guard_remaining_seconds": round(retry_guard, 3),
+            "unresolved_write_intent": pending_intent,
+        }
+
+    def _read_service_code_once(self, session) -> tuple[int, str]:
+        result, fields = self.service.decoded_block(session, 22)
+        if not result.ok:
+            raise TransportError("Entstörung: Servicecode-Readback aus Block 22 fehlgeschlagen")
+        field = self._required_decoded_field(fields, "Hka_Bd.bStoerung", 22)
+        if isinstance(field.raw, bool) or not isinstance(field.raw, int):
+            raise TransportError("Entstörung: Servicecode-Readback ist ungültig")
+        return int(field.raw), str(field.value)
+
+    def _service_reset_readback(self, session) -> dict:
+        raw_codes = []
+        errors = []
+        consecutive_zero = 0
+        last_text = ""
+        for attempt in range(1, SERVICE_RESET_READBACK_ATTEMPTS + 1):
+            if attempt > 1:
+                self._service_reset_wait(SERVICE_RESET_READBACK_DELAY_SECONDS)
+            try:
+                raw, last_text = self._read_service_code_once(session)
+                raw_codes.append(raw)
+                consecutive_zero = consecutive_zero + 1 if raw == 0 else 0
+                if consecutive_zero >= SERVICE_RESET_STABLE_ZERO_SAMPLES:
+                    return {
+                        "ok": True,
+                        "attempts": attempt,
+                        "raw_codes": raw_codes,
+                        "errors": errors,
+                        "service_code_raw": 0,
+                        "service_code": 0,
+                        "service_text": last_text,
+                    }
+            except Exception as exc:
+                consecutive_zero = 0
+                errors.append(f"{exc.__class__.__name__}: {exc}")
+        last_raw = raw_codes[-1] if raw_codes else None
+        return {
+            "ok": False,
+            "attempts": SERVICE_RESET_READBACK_ATTEMPTS,
+            "raw_codes": raw_codes,
+            "errors": errors,
+            "service_code_raw": last_raw,
+            "service_code": None if last_raw is None else (last_raw + 100 if last_raw else 0),
+            "service_text": last_text,
+        }
+
+    def reset_service_code(
+        self, username: str, expected_service_code: object, confirm: object,
+        request_token: object,
+    ) -> dict:
+        """Acknowledge exactly one current fault through volatile RAM 0x1c9e."""
+        with self._service_reset_flow_lock:
+            return self._reset_service_code_locked(
+                username, expected_service_code, confirm, request_token
+            )
+
+    def _reset_service_code_locked(
+        self, username: str, expected_service_code: object, confirm: object,
+        request_token: object,
+    ) -> dict:
+        if confirm is not True:
+            raise ValueError("Entstörung muss ausdrücklich bestätigt werden")
+        if isinstance(expected_service_code, bool) or not isinstance(expected_service_code, int):
+            raise ValueError("erwarteter Servicecode muss eine ganze SC-Nummer sein")
+        if not 101 <= expected_service_code <= 355:
+            raise ValueError("erwarteter Servicecode muss zwischen SC 101 und SC 355 liegen")
+        expected_raw = expected_service_code - 100
+        self._require_service_reset_worker()
+        token_preimage = self._consume_service_reset_token(
+            username, request_token, expected_raw
+        )
+        pending_intent = self.store.pending_service_reset_write_intent()
+        if pending_intent is not None:
+            raise APIRequestConflictError(
+                "Nicht aufgelöster früherer Entstör-Schreibversuch; nicht wiederholen, "
+                "Audit und Reglerzustand manuell prüfen"
+            )
+        with self.state_lock:
+            if not self.serial_enabled:
+                raise TransportError("serielle Verbindung ist getrennt")
+
+        recorded_at = _now()
+        audit = {
+            "schema": SERVICE_RESET_SCHEMA,
+            "operation": "manual-servicecode-reset",
+            "critical": True,
+            "cpu": 0,
+            "address": f"0x{SERVICE_RESET_ADDRESS:06x}",
+            "volatile_ram_only": True,
+            "nvm_write": False,
+            "request_hex": SERVICE_RESET_REQUEST.hex(),
+            "expected_response_hex": SERVICE_RESET_RESPONSE.hex(),
+            "expected_service_code": expected_service_code,
+            "expected_service_code_raw": expected_raw,
+            "service_code_before": None,
+            "service_code_raw_before": None,
+            "fault_count_before": None,
+            "fault_runtime_seconds_before": None,
+            "service_code_after": None,
+            "service_code_raw_after": None,
+            "motor_status_before": None,
+            "preconditions": None,
+            "prewrite_preconditions": None,
+            "prewrite_age_seconds": None,
+            "prewrite_max_age_seconds": SERVICE_RESET_MAX_PREWRITE_AGE_SECONDS,
+            "token_valid_at_write": None,
+            "conflict": False,
+            "auth_level_requested": SERVICE_RESET_AUTH_LEVEL,
+            "auth_level_granted": None,
+            "auth_result_uncertain": False,
+            "write_attempted": False,
+            "write_count": 0,
+            "write_intent_id": None,
+            "write_intent_persisted": False,
+            "write_intent_resolved": False,
+            "write_intent_resolution": None,
+            "restart_guard_pending": False,
+            "audit_persisted": False,
+            "written": False,
+            "ack_positive": None,
+            "response_echo_ok": False,
+            "readback_ok": None,
+            "readback_scope": "service-code-zero-two-consecutive",
+            "readback_attempts": 0,
+            "readback_codes_raw": [],
+            "service_code_cleared": False,
+            "write_confirmed": False,
+            "clear_confirmed_at": None,
+            "clear_marker_persisted": False,
+            "deauthenticated": None,
+            "cleanup_uncertain": False,
+            "post_cleanup_readback_ok": None,
+            "post_cleanup_readback_attempts": 0,
+            "post_cleanup_readback_codes_raw": [],
+            "post_cleanup_readback_errors": [],
+            "write_uncertain": False,
+            "uncertain": False,
+            "changed": False,
+            "changed_keys": ["CPU0.RAM.0x001c9e"],
+            "unchanged": False,
+            "error": None,
+        }
+
+        try:
+            with self._service_reset_worker_session() as session:
+                self._require_service_reset_token_fresh(
+                    token_preimage, "während der Wartezeit auf den Serialworker"
+                )
+                before = self._service_reset_state(session)
+                audit.update({
+                    "service_code_before": before["service_code"],
+                    "service_code_raw_before": before["service_code_raw"],
+                    "fault_count_before": before["fault_count"],
+                    "fault_runtime_seconds_before": before["fault_runtime_seconds"],
+                    "motor_status_before": before["motor_status"],
+                    "preconditions": before,
+                })
+                retry_guard = self._service_reset_retry_guard_remaining(
+                    before["service_code_raw"]
+                )
+                if retry_guard > 0.0 and before["service_code_raw"] != 0:
+                    audit["conflict"] = True
+                    raise APIRequestConflictError(
+                        "Vorheriger Entstörversuch wird nicht automatisch wiederholt; "
+                        f"erneute manuelle Prüfung frühestens in {retry_guard:.1f} s"
+                    )
+                token_event_changed = bool(
+                    int(before["fault_count"]) != int(token_preimage["fault_count"])
+                    or int(before["fault_runtime_seconds"])
+                    != int(token_preimage["fault_runtime_seconds"])
+                )
+                if before["service_code_raw"] != 0 and token_event_changed:
+                    audit["conflict"] = True
+                    raise APIRequestConflictError(
+                        "Störereignis änderte sich seit der bestätigten Vorschau; "
+                        "Zustand neu lesen und erneut bestätigen"
+                    )
+                if before["service_code_raw"] == 0:
+                    audit.update({
+                        "unchanged": True,
+                        "readback_ok": True,
+                        "service_code_after": 0,
+                        "service_code_raw_after": 0,
+                        "service_code_cleared": True,
+                    })
+                    result = {**audit, "ok": True}
+                else:
+                    if before["service_code_raw"] != expected_raw:
+                        audit["conflict"] = True
+                        raise APIRequestConflictError(
+                            f"Aktive Störung änderte sich von SC {expected_service_code} "
+                            f"auf SC {before['service_code']}; Vorschau neu laden"
+                        )
+                    if not before["eligible"]:
+                        audit["conflict"] = True
+                        raise APIRequestConflictError(
+                            "Entstörung blockiert: " + "; ".join(before["blockers"])
+                        )
+
+                    operation_error = None
+                    cleanup_error = None
+                    granted_password = ""
+                    auth_obtained = False
+                    auth_attempted = False
+                    try:
+                        auth_inputs = self.service.authentication_inputs(session)
+                        granted_password = calculate_pw4(
+                            auth_inputs.serial_number, auth_inputs.operating_hours
+                        )
+                        if not re.fullmatch(r"[0-9]{4}", granted_password):
+                            raise ValueError("serverseitiger Auth-Schlüssel ist ungültig")
+                    except Exception:
+                        operation_error = TransportError(
+                            "Entstörung: Auth-Schlüssel konnte nicht frisch abgeleitet werden"
+                        )
+
+                    # Persist the restart-safe at-most-once guard before any
+                    # authentication telegram can leave.  The final safety
+                    # double-read happens only after this potentially blocking
+                    # database commit, so a changed controller state cannot be
+                    # followed by a stale write.
+                    if operation_error is None:
+                        try:
+                            intent_id = secrets.token_urlsafe(24)
+                            intent_at = _now()
+                            self.store.begin_service_reset_write_intent(
+                                intent_id,
+                                intent_at,
+                                username,
+                                expected_raw,
+                                int(before["fault_count"]),
+                                int(before["fault_runtime_seconds"]),
+                                {
+                                    "schema": SERVICE_RESET_SCHEMA,
+                                    "operation": "manual-servicecode-reset-intent",
+                                    "request_hex": SERVICE_RESET_REQUEST.hex(),
+                                    "expected_service_code": expected_service_code,
+                                    "fault_event": before["fault_event"],
+                                },
+                            )
+                            audit["write_intent_id"] = intent_id
+                            audit["write_intent_persisted"] = True
+                            audit["restart_guard_pending"] = True
+                            self._require_service_reset_token_fresh(
+                                token_preimage, "vor der Authentifizierung"
+                            )
+                        except APIRequestConflictError as exc:
+                            audit["conflict"] = True
+                            operation_error = exc
+                        except Exception:
+                            operation_error = RuntimeError(
+                                "Persistenter Entstör-Schreibschutz konnte nicht angelegt werden"
+                            )
+
+                    if operation_error is None:
+                        auth_attempted = True
+                        try:
+                            auth = self.service.authenticate(
+                                session, SERVICE_RESET_AUTH_LEVEL, granted_password
+                            )
+                            audit["auth_level_granted"] = getattr(auth, "granted_level", None)
+                            auth_obtained = bool(
+                                getattr(auth, "ok", False)
+                                and audit["auth_level_granted"] == SERVICE_RESET_AUTH_LEVEL
+                            )
+                            if not auth_obtained:
+                                operation_error = PermissionError(
+                                    "Auth-Level 3 wurde nicht exakt gewährt"
+                                )
+                        except Exception:
+                            audit["auth_result_uncertain"] = True
+                            operation_error = TransportError(
+                                "Entstörung: Authentifizierung konnte nicht bestätigt werden"
+                            )
+
+                    if auth_obtained:
+                        try:
+                            # Authentication itself performs controller reads.
+                            # Revalidate the complete safety state afterwards,
+                            # immediately before the sole possible write.
+                            prewrite = self._service_reset_state(session)
+                            prewrite_checked_at = time.monotonic()
+                            audit["prewrite_preconditions"] = prewrite
+                            if prewrite["service_code_raw"] == 0:
+                                audit.update({
+                                    "unchanged": True,
+                                    "readback_ok": True,
+                                    "service_code_after": 0,
+                                    "service_code_raw_after": 0,
+                                    "service_code_cleared": True,
+                                })
+                            elif prewrite["service_code_raw"] != expected_raw:
+                                audit["conflict"] = True
+                                operation_error = APIRequestConflictError(
+                                    f"Aktive Störung änderte sich unmittelbar vor dem Write "
+                                    f"von SC {expected_service_code} auf SC {prewrite['service_code']}"
+                                )
+                            elif (
+                                int(prewrite["fault_count"])
+                                != int(token_preimage["fault_count"])
+                                or int(prewrite["fault_runtime_seconds"])
+                                != int(token_preimage["fault_runtime_seconds"])
+                            ):
+                                audit["conflict"] = True
+                                operation_error = APIRequestConflictError(
+                                    "Störereignis änderte sich unmittelbar vor dem Write; "
+                                    "Zustand neu lesen und erneut bestätigen"
+                                )
+                            elif not prewrite["eligible"]:
+                                audit["conflict"] = True
+                                operation_error = APIRequestConflictError(
+                                    "Entstörung unmittelbar vor dem Write blockiert: "
+                                    + "; ".join(prewrite["blockers"])
+                                )
+                            if operation_error is None and not audit["unchanged"]:
+                                self._require_service_reset_token_fresh(
+                                    token_preimage, "unmittelbar vor dem Write"
+                                )
+                                audit["token_valid_at_write"] = True
+                                audit["prewrite_age_seconds"] = (
+                                    self._require_service_reset_prewrite_fresh(
+                                        prewrite_checked_at
+                                    )
+                                )
+                        except APIRequestConflictError as exc:
+                            audit["conflict"] = True
+                            operation_error = exc
+                        except Exception as exc:
+                            operation_error = exc
+
+                    if auth_obtained and operation_error is None and not audit["unchanged"]:
+                        try:
+                            audit["write_attempted"] = True
+                            audit["write_count"] = 1
+                            self._record_service_reset_attempt(expected_raw)
+                            response = session.request(
+                                SERVICE_RESET_REQUEST,
+                                session.next_packet(),
+                                timeout=0.9,
+                                cpu=0,
+                            )
+                            audit["ack_positive"] = bool(
+                                getattr(getattr(response, "ack", None), "positive", False)
+                            )
+                            validate_service_reset_write_response(response)
+                            audit["response_echo_ok"] = True
+                            audit["written"] = True
+                        except Exception as exc:
+                            operation_error = exc
+
+                    if audit["write_attempted"]:
+                        try:
+                            readback = self._service_reset_readback(session)
+                            audit.update({
+                                "readback_ok": bool(readback["ok"]),
+                                "readback_attempts": int(readback["attempts"]),
+                                "readback_codes_raw": list(readback["raw_codes"]),
+                                "readback_errors": list(readback["errors"]),
+                                "service_code_after": readback["service_code"],
+                                "service_code_raw_after": readback["service_code_raw"],
+                                "service_code_cleared": bool(readback["ok"]),
+                            })
+                            if operation_error is None and not readback["ok"]:
+                                operation_error = TransportError(
+                                    "Entstörung: Servicecode wurde nicht stabil als 0 rückgelesen"
+                                )
+                        except Exception as exc:
+                            audit["readback_ok"] = False
+                            audit["readback_errors"] = [exc.__class__.__name__]
+                            if operation_error is None:
+                                operation_error = TransportError(
+                                    "Entstörung: Rückleseprüfung brach unerwartet ab"
+                                )
+
+                    # Once an auth telegram may have left the worker, always
+                    # issue and validate Auth 0.  The PW4 was derived before
+                    # that attempt, so even a lost/invalid auth response has
+                    # a deterministic cleanup path.
+                    cleanup_required = auth_attempted
+                    if cleanup_required:
+                        try:
+                            self.service.deauthenticate(session, granted_password)
+                            audit["deauthenticated"] = True
+                        except Exception:
+                            audit["deauthenticated"] = False
+                            cleanup_error = TransportError(
+                                "Auth-0-Cleanup konnte nicht bestätigt werden"
+                            )
+
+                    # If Auth 0 is uncertain after a stable clear, gather one
+                    # additional read-only controller observation.  This never
+                    # changes the already confirmed single-write outcome.
+                    if cleanup_error is not None and audit["service_code_cleared"]:
+                        try:
+                            post_cleanup = self._service_reset_readback(session)
+                            audit.update({
+                                "post_cleanup_readback_ok": bool(post_cleanup["ok"]),
+                                "post_cleanup_readback_attempts": int(
+                                    post_cleanup["attempts"]
+                                ),
+                                "post_cleanup_readback_codes_raw": list(
+                                    post_cleanup["raw_codes"]
+                                ),
+                                "post_cleanup_readback_errors": list(
+                                    post_cleanup["errors"]
+                                ),
+                            })
+                        except Exception as exc:
+                            audit["post_cleanup_readback_ok"] = False
+                            audit["post_cleanup_readback_errors"] = [
+                                exc.__class__.__name__
+                            ]
+
+                    audit["write_confirmed"] = bool(
+                        audit["written"] and audit["readback_ok"] is True
+                    )
+                    audit["changed"] = bool(
+                        audit["write_attempted"] and audit["service_code_cleared"]
+                    )
+                    audit["write_uncertain"] = bool(
+                        audit["write_attempted"] and not audit["write_confirmed"]
+                    )
+                    audit["cleanup_uncertain"] = bool(
+                        auth_attempted and audit["deauthenticated"] is not True
+                    )
+
+                    if audit["write_confirmed"]:
+                        clear_confirmed_at = _now()
+                        self.store.mark_service_reset_clear_confirmed(
+                            str(audit["write_intent_id"]), clear_confirmed_at
+                        )
+                        audit["clear_confirmed_at"] = clear_confirmed_at
+                        audit["clear_marker_persisted"] = True
+
+                    if audit["write_intent_id"]:
+                        audit["write_intent_resolved"] = bool(
+                            audit["write_confirmed"] or not audit["write_attempted"]
+                        )
+                        if audit["write_confirmed"]:
+                            audit["write_intent_resolution"] = "write-confirmed"
+                        elif audit["unchanged"]:
+                            audit["write_intent_resolution"] = (
+                                "already-cleared-before-write"
+                            )
+                        elif audit["write_attempted"]:
+                            audit["write_intent_resolution"] = "write-uncertain"
+                        else:
+                            audit["write_intent_resolution"] = "aborted-before-write"
+                        audit["restart_guard_pending"] = not audit[
+                            "write_intent_resolved"
+                        ]
+
+                    error_messages = []
+                    if operation_error is not None:
+                        error_messages.append(str(operation_error))
+                    if cleanup_error is not None:
+                        if audit["write_confirmed"]:
+                            error_messages.append(
+                                "Störung ist bestätigt gelöscht; " + str(cleanup_error)
+                            )
+                        else:
+                            error_messages.append(str(cleanup_error))
+                        if audit["post_cleanup_readback_ok"] is False:
+                            error_messages.append(
+                                "read-only Nachprüfung des Reglerzustands blieb unklar"
+                            )
+                    audit["error"] = "; ".join(dict.fromkeys(error_messages)) or None
+                    audit["uncertain"] = bool(
+                        audit["write_uncertain"]
+                        or audit["cleanup_uncertain"]
+                        or audit["restart_guard_pending"]
+                    )
+                    result = {
+                        **audit,
+                        "ok": bool(
+                            (audit["write_confirmed"] or audit["unchanged"])
+                            and audit["deauthenticated"] is True
+                            and not audit["error"]
+                        ),
+                    }
+
+                    if audit["service_code_cleared"]:
+                        with self.state_lock:
+                            current = self.live_values.get((22, "Hka_Bd.bStoerung"))
+                            if current is not None:
+                                self.live_values[(22, "Hka_Bd.bStoerung")] = {
+                                    **current,
+                                    "raw": 0,
+                                    "value": "Kein aktiver Servicecode",
+                                    "recorded_at": _now(),
+                                }
+        except (APIRequestConflictError, ValueError, KeyError, PermissionError, TransportError) as exc:
+            audit["error"] = str(exc)
+            if audit["write_intent_id"]:
+                audit.update({
+                    "write_intent_resolved": False,
+                    "write_intent_resolution": "unexpected-error",
+                    "restart_guard_pending": True,
+                    "audit_persisted": True,
+                    "uncertain": True,
+                })
+                try:
+                    self.store.record_service_reset_outcome(
+                        audit["write_intent_id"], _now(), username, 0, audit,
+                        resolve=False,
+                        resolution="unexpected-error",
+                        details={
+                            "schema": SERVICE_RESET_SCHEMA,
+                            "write_attempted": bool(audit["write_attempted"]),
+                            "error": audit["error"],
+                        },
+                    )
+                except Exception:
+                    audit["audit_persisted"] = False
+            else:
+                audit["audit_persisted"] = True
+                self.store.audit(recorded_at, username, 0, audit)
+            raise
+        except Exception as exc:
+            audit["error"] = str(exc) or exc.__class__.__name__
+            if audit["write_intent_id"]:
+                audit.update({
+                    "write_intent_resolved": False,
+                    "write_intent_resolution": "unexpected-error",
+                    "restart_guard_pending": True,
+                    "audit_persisted": True,
+                    "uncertain": True,
+                })
+                try:
+                    self.store.record_service_reset_outcome(
+                        audit["write_intent_id"], _now(), username, 0, audit,
+                        resolve=False,
+                        resolution="unexpected-error",
+                        details={
+                            "schema": SERVICE_RESET_SCHEMA,
+                            "write_attempted": bool(audit["write_attempted"]),
+                            "error": audit["error"],
+                        },
+                    )
+                except Exception:
+                    audit["audit_persisted"] = False
+            else:
+                audit["audit_persisted"] = True
+                self.store.audit(recorded_at, username, 0, audit)
+            raise
+
+        result["audit_persisted"] = True
+        if result["write_intent_id"]:
+            intent_details = {
+                "schema": SERVICE_RESET_SCHEMA,
+                "operation": "manual-servicecode-reset-intent-outcome",
+                "resolution": result["write_intent_resolution"],
+                "write_attempted": bool(result["write_attempted"]),
+                "write_confirmed": bool(result["write_confirmed"]),
+                "service_code_cleared": bool(result["service_code_cleared"]),
+                "readback_codes_raw": list(result["readback_codes_raw"]),
+                "deauthenticated": result["deauthenticated"],
+                "cleanup_uncertain": bool(result["cleanup_uncertain"]),
+                "post_cleanup_readback_ok": result["post_cleanup_readback_ok"],
+                "post_cleanup_readback_codes_raw": list(
+                    result["post_cleanup_readback_codes_raw"]
+                ),
+                "clear_confirmed": bool(result["write_confirmed"]),
+                "clear_confirmed_at": result.get("clear_confirmed_at"),
+                "error": result["error"],
+            }
+            try:
+                self.store.record_service_reset_outcome(
+                    result["write_intent_id"],
+                    _now(),
+                    username,
+                    0,
+                    result,
+                    resolve=bool(result["write_intent_resolved"]),
+                    resolution=str(result["write_intent_resolution"]),
+                    details=intent_details,
+                )
+            except Exception:
+                persistence_message = (
+                    "Persistenter Entstör-Schreibschutz und Pflichtaudit konnten "
+                    "nicht atomar abgeschlossen werden"
+                )
+                prior_error = str(result["error"] or "").strip()
+                result.update({
+                    "write_intent_resolved": False,
+                    "restart_guard_pending": True,
+                    "audit_persisted": False,
+                    "uncertain": True,
+                    "ok": False,
+                    "error": (
+                        f"{prior_error}; {persistence_message}"
+                        if prior_error else persistence_message
+                    ),
+                })
+                return result
+        else:
+            self.store.audit(recorded_at, username, 0, result)
+        return result
+
+    @staticmethod
+    def _dachs_control_action(action: object) -> tuple[str, bool]:
+        value = str(action or "").strip().lower()
+        if value not in {"on", "off"}:
+            raise ValueError("Dachs Ein/Aus: Aktion muss 'on' oder 'off' sein")
+        return value, value == "on"
+
+    def _dachs_control_read_byte(self, session, request: bytes, label: str) -> int:
+        response = session.request(
+            request,
+            session.next_packet(),
+            timeout=0.9,
+            cpu=0,
+        )
+        return dachs_control_read_byte(response, request, label)
+
+    def _dachs_control_sample(self, session) -> dict:
+        result22, fields22 = self.service.decoded_block(session, 22)
+        if not result22.ok:
+            raise TransportError("Dachs Ein/Aus: Block 22 konnte nicht frisch gelesen werden")
+        result24, fields24 = self.service.decoded_block(session, 24)
+        if not result24.ok:
+            raise TransportError("Dachs Ein/Aus: Block 24 konnte nicht frisch gelesen werden")
+
+        service = self._required_decoded_field(
+            fields22, "Hka_Bd.bStoerung", 22, "Dachs Ein/Aus"
+        )
+        release = self._required_decoded_field(
+            fields22, DACHS_CONTROL_RELEASE_FIELD, 22, "Dachs Ein/Aus"
+        )
+        motor = self._required_decoded_field(
+            fields24, MOTOR_STATUS_KEY, 24, "Dachs Ein/Aus"
+        )
+        for label, field, maximum in (
+            ("Servicecode", service, 0xFF),
+            ("Motorstatus", motor, 0xFF),
+            ("Lauffreigabe", release, 0xFFFF),
+        ):
+            if (
+                isinstance(field.raw, bool)
+                or not isinstance(field.raw, int)
+                or not 0 <= field.raw <= maximum
+            ):
+                raise TransportError(f"Dachs Ein/Aus: {label} besitzt keinen gültigen Rohwert")
+
+        release_byte = self._dachs_control_read_byte(
+            session, DACHS_CONTROL_READ_REQUEST, "Ein/Aus"
+        )
+        block_release_byte = (int(release.raw) >> 8) & 0xFF
+        if release_byte != block_release_byte:
+            raise TransportError(
+                "Dachs Ein/Aus: RAM 0x0ea1 und Block 22 liefern verschiedene Zustände"
+            )
+        manual_mode = self._dachs_control_read_byte(
+            session, DACHS_CONTROL_MANUAL_MODE_REQUEST, "Handbetrieb"
+        )
+
+        temperatures = {}
+        for key, label, minimum, maximum in SERVICE_RESET_TEMPERATURE_LIMITS:
+            field = next((item for item in fields24 if item.key == key), None)
+            value = None
+            valid = False
+            raw = None
+            if field is not None:
+                raw = _json_value(field.raw)
+                try:
+                    candidate = float(field.value)
+                except (TypeError, ValueError):
+                    candidate = math.nan
+                if math.isfinite(candidate):
+                    value = candidate
+                    valid = web_measurement_valid(24, key, field.value, field.raw)
+            temperatures[key] = {
+                "key": key,
+                "label": label,
+                "value_c": value,
+                "raw": raw,
+                "minimum_c": minimum,
+                "maximum_c": maximum,
+                "valid": bool(valid),
+            }
+        return {
+            "service_code_raw": int(service.raw),
+            "service_text": str(service.value),
+            "motor_status": int(motor.raw),
+            "motor_status_text": str(motor.value),
+            "release_word": int(release.raw),
+            "release_byte": release_byte,
+            "enabled": bool(release_byte & DACHS_CONTROL_MASK),
+            "manual_mode": manual_mode,
+            "temperatures": temperatures,
+        }
+
+    def _dachs_control_state(self, session, action: object, recorded_at: str) -> dict:
+        """Read the command preimage twice and derive a fail-closed preview."""
+        action_name, target_enabled = self._dachs_control_action(action)
+        first = self._dachs_control_sample(session)
+        second = self._dachs_control_sample(session)
+        for key, label in (
+            ("service_code_raw", "Servicecode"),
+            ("motor_status", "Motorstatus"),
+            ("release_word", "Lauffreigabe"),
+            ("release_byte", "RAM 0x0ea1"),
+            ("manual_mode", "Handbetrieb"),
+        ):
+            if first[key] != second[key]:
+                raise TransportError(
+                    f"Dachs Ein/Aus: {label} änderte sich während der Direktlesung"
+                )
+
+        enabled = bool(second["enabled"])
+        transition_required = enabled != target_enabled
+        blockers = []
+        if transition_required and int(second["manual_mode"]) != 0:
+            blockers.append(
+                f"Hand-/Aktortest ist aktiv (RAM 0x1b5a={int(second['manual_mode'])})"
+            )
+        if transition_required and target_enabled:
+            if int(second["service_code_raw"]) != 0:
+                blockers.append(
+                    f"Aktive Störung SC {int(second['service_code_raw']) + 100} zuerst getrennt entstören"
+                )
+            if int(second["motor_status"]) not in DACHS_CONTROL_SAFE_START_STATUSES:
+                blockers.append(
+                    f"Motorstatus {int(second['motor_status'])} ist nicht sicher AUS "
+                    "(zulässig: 15 oder 16)"
+                )
+
+        temperatures = []
+        for key, label, minimum, maximum in SERVICE_RESET_TEMPERATURE_LIMITS:
+            left = first["temperatures"][key]
+            right = second["temperatures"][key]
+            samples = [left["value_c"], right["value_c"]]
+            finite = all(value is not None and math.isfinite(float(value)) for value in samples)
+            coherent = bool(
+                finite
+                and abs(float(samples[1]) - float(samples[0]))
+                <= SERVICE_RESET_TEMPERATURE_COHERENCE_C
+            )
+            valid = bool(left["valid"] and right["valid"] and coherent)
+            safe = bool(
+                valid
+                and all(minimum <= float(value) <= maximum for value in samples)
+            )
+            if transition_required and target_enabled:
+                if not finite:
+                    blockers.append(f"{label} ist nicht numerisch lesbar")
+                elif not coherent:
+                    blockers.append(f"{label} änderte sich während der Direktlesung")
+                elif not valid:
+                    blockers.append(f"{label} ist nicht plausibel lesbar")
+                elif not safe:
+                    blockers.append(
+                        f"{label} mit Messwerten {float(samples[0]):g}/{float(samples[1]):g} °C "
+                        f"außerhalb der Freigabegrenze {minimum:g}–{maximum:g} °C"
+                    )
+            temperatures.append({
+                "key": key,
+                "label": label,
+                "value_c": right["value_c"],
+                "samples_c": samples,
+                "minimum_c": minimum,
+                "maximum_c": maximum,
+                "safe": safe,
+            })
+
+        service_raw = int(second["service_code_raw"])
+        return {
+            "schema": DACHS_CONTROL_SCHEMA,
+            "action": action_name,
+            "target_enabled": target_enabled,
+            "eligible": not blockers,
+            "blockers": blockers,
+            "transition_required": transition_required,
+            "unchanged": not transition_required,
+            "enabled": enabled,
+            "release_byte": int(second["release_byte"]),
+            "release_byte_hex": f"0x{int(second['release_byte']):02x}",
+            "release_word": int(second["release_word"]),
+            "service_code": service_raw + 100 if service_raw else 0,
+            "service_code_raw": service_raw,
+            "service_text": second["service_text"],
+            "motor_status": int(second["motor_status"]),
+            "motor_status_text": second["motor_status_text"],
+            "manual_mode": int(second["manual_mode"]),
+            "temperatures": temperatures,
+            "validated_samples": 2,
+            "read_source": "Block-22/24- und RAM-Doppellesung über Serialworker",
+            "read_at": str(recorded_at),
+            "volatile_ram_only": True,
+            "auth_level": DACHS_CONTROL_AUTH_LEVEL,
+            "semantics": (
+                "Automatikfreigabe, kein Zwangsstart"
+                if target_enabled
+                else "kontrollierte Stoppanforderung, kein Not-Aus"
+            ),
+        }
+
+    def _clear_dachs_control_token(self) -> None:
+        with self._dachs_control_token_lock:
+            self._dachs_control_token = None
+
+    def _issue_dachs_control_token(
+        self, username: str, action: str, release_byte: int
+    ) -> str:
+        token = secrets.token_urlsafe(32)
+        with self._dachs_control_token_lock:
+            self._dachs_control_token = {
+                "token": token,
+                "username": str(username),
+                "action": str(action),
+                "release_byte": int(release_byte),
+                "expires_at": time.monotonic() + DACHS_CONTROL_TOKEN_TTL_SECONDS,
+            }
+        return token
+
+    def _consume_dachs_control_token(
+        self, username: str, action: str, token: object
+    ) -> dict:
+        supplied = str(token or "")
+        with self._dachs_control_token_lock:
+            issued = self._dachs_control_token
+            expired = bool(
+                issued is not None
+                and time.monotonic() > float(issued["expires_at"])
+            )
+            identity_matches = bool(
+                issued is not None
+                and supplied
+                and str(issued["username"]) == str(username)
+                and secrets.compare_digest(supplied, str(issued["token"]))
+            )
+            valid = bool(
+                identity_matches
+                and not expired
+                and str(issued["action"]) == str(action)
+            )
+            if expired or identity_matches:
+                self._dachs_control_token = None
+        if not valid:
+            raise APIRequestConflictError(
+                "Dachs-Ein/Aus-Anforderung fehlt, ist abgelaufen oder wurde bereits verbraucht; "
+                "Zustand neu lesen und niemals automatisch wiederholen"
+            )
+        return dict(issued)
+
+    def _dachs_control_retry_guard_remaining(
+        self, action: str, release_byte: int
+    ) -> float:
+        with self._dachs_control_token_lock:
+            attempt = self._dachs_control_last_attempt
+        if (
+            attempt is None
+            or str(attempt["action"]) != str(action)
+            or int(attempt["release_byte"]) != int(release_byte)
+        ):
+            return 0.0
+        return max(
+            0.0,
+            DACHS_CONTROL_RETRY_GUARD_SECONDS
+            - (time.monotonic() - float(attempt["attempted_at"])),
+        )
+
+    def _record_dachs_control_attempt(self, action: str, release_byte: int) -> None:
+        with self._dachs_control_token_lock:
+            self._dachs_control_last_attempt = {
+                "action": str(action),
+                "release_byte": int(release_byte),
+                "attempted_at": time.monotonic(),
+            }
+
+    def dachs_control_preview(self, username: str, action: object) -> dict:
+        """Return a fresh, read-only on/off preview with one-shot capability."""
+        with self._dachs_control_flow_lock:
+            action_name, _target = self._dachs_control_action(action)
+            self._clear_dachs_control_token()
+            if not str(getattr(self.service, "serial_socket", "") or "").strip():
+                raise TransportError(
+                    "Dachs Ein/Aus ist ausschließlich über den exklusiven Serialworker verfügbar"
+                )
+            with self.state_lock:
+                if not self.serial_enabled:
+                    raise TransportError("serielle Verbindung ist getrennt")
+            with self._service_reset_worker_session() as session:
+                state = self._dachs_control_state(session, action_name, _now())
+            retry_guard = self._dachs_control_retry_guard_remaining(
+                action_name, state["release_byte"]
+            )
+            if retry_guard > 0.0 and state["transition_required"]:
+                state = {
+                    **state,
+                    "eligible": False,
+                    "blockers": [
+                        *state["blockers"],
+                        "Vorheriger Ein/Aus-Versuch wird nicht automatisch wiederholt; "
+                        f"erneute manuelle Prüfung frühestens in {retry_guard:.1f} s",
+                    ],
+                }
+            return {
+                **state,
+                "request_token": (
+                    self._issue_dachs_control_token(
+                        username, action_name, state["release_byte"]
+                    )
+                    if state["eligible"]
+                    else None
+                ),
+                "request_token_ttl_seconds": DACHS_CONTROL_TOKEN_TTL_SECONDS,
+                "retry_guard_remaining_seconds": round(retry_guard, 3),
+            }
+
+    def _dachs_control_readback(self, session, expected_byte: int) -> dict:
+        samples = []
+        errors = []
+        for _attempt in range(2):
+            try:
+                samples.append(
+                    self._dachs_control_read_byte(
+                        session, DACHS_CONTROL_READ_REQUEST, "Ein/Aus-Rücklesung"
+                    )
+                )
+            except Exception as exc:
+                errors.append(f"{exc.__class__.__name__}: {exc}")
+        return {
+            "ok": len(samples) == 2 and all(value == expected_byte for value in samples),
+            "samples": samples,
+            "errors": errors,
+            "expected_byte": int(expected_byte),
+        }
+
+    def set_dachs_control(
+        self, username: str, action: object, confirm: object, request_token: object
+    ) -> dict:
+        """Apply one fixed read-modify-write to fTasteOnOff with readback."""
+        with self._dachs_control_flow_lock:
+            return self._set_dachs_control_locked(
+                username, action, confirm, request_token
+            )
+
+    def _set_dachs_control_locked(
+        self, username: str, action: object, confirm: object, request_token: object
+    ) -> dict:
+        action_name, target_enabled = self._dachs_control_action(action)
+        if confirm is not True:
+            raise ValueError("Dachs Ein/Aus muss ausdrücklich bestätigt werden")
+        if not str(getattr(self.service, "serial_socket", "") or "").strip():
+            raise TransportError(
+                "Dachs Ein/Aus ist ausschließlich über den exklusiven Serialworker verfügbar"
+            )
+        issued = self._consume_dachs_control_token(
+            username, action_name, request_token
+        )
+        recorded_at = _now()
+        audit = {
+            "schema": DACHS_CONTROL_SCHEMA,
+            "operation": "manual-dachs-enable" if target_enabled else "manual-dachs-disable",
+            "critical": True,
+            "cpu": 0,
+            "address": f"0x{DACHS_CONTROL_ADDRESS:06x}",
+            "mask": f"0x{DACHS_CONTROL_MASK:02x}",
+            "action": action_name,
+            "target_enabled": target_enabled,
+            "volatile_ram_only": True,
+            "nvm_write": False,
+            "before_byte": None,
+            "desired_byte": None,
+            "after_byte": None,
+            "preconditions": None,
+            "prewrite_preconditions": None,
+            "auth_level_requested": DACHS_CONTROL_AUTH_LEVEL,
+            "auth_level_granted": None,
+            "auth_result_uncertain": False,
+            "write_attempted": False,
+            "write_count": 0,
+            "written": False,
+            "ack_positive": None,
+            "response_echo_ok": False,
+            "readback_ok": None,
+            "readback_scope": "exact-byte-two-consecutive",
+            "readback_bytes": [],
+            "target_reached": False,
+            "write_confirmed": False,
+            "deauthenticated": None,
+            "cleanup_uncertain": False,
+            "write_uncertain": False,
+            "uncertain": False,
+            "changed": False,
+            "changed_keys": ["CPU0.RAM.0x000ea1.bit6"],
+            "unchanged": False,
+            "conflict": False,
+            "error": None,
+        }
+
+        try:
+            with self._service_reset_worker_session() as session:
+                before = self._dachs_control_state(session, action_name, recorded_at)
+                audit.update({
+                    "before_byte": before["release_byte"],
+                    "preconditions": before,
+                })
+                if before["release_byte"] != int(issued["release_byte"]):
+                    audit["conflict"] = True
+                    raise APIRequestConflictError(
+                        "Dachs-Ein/Aus-Ausgangswert änderte sich seit der Vorschau; neu lesen"
+                    )
+                retry_guard = self._dachs_control_retry_guard_remaining(
+                    action_name, before["release_byte"]
+                )
+                if retry_guard > 0.0 and before["transition_required"]:
+                    audit["conflict"] = True
+                    raise APIRequestConflictError(
+                        "Vorheriger Dachs-Ein/Aus-Versuch wird nicht automatisch wiederholt; "
+                        f"erneute manuelle Prüfung frühestens in {retry_guard:.1f} s"
+                    )
+                if before["unchanged"]:
+                    audit.update({
+                        "unchanged": True,
+                        "readback_ok": True,
+                        "target_reached": True,
+                        "after_byte": before["release_byte"],
+                    })
+                    result = {**audit, "ok": True}
+                else:
+                    if not before["eligible"]:
+                        audit["conflict"] = True
+                        raise APIRequestConflictError(
+                            "Dachs Ein/Aus blockiert: " + "; ".join(before["blockers"])
+                        )
+
+                    operation_error = None
+                    cleanup_error = None
+                    granted_password = ""
+                    auth_attempted = False
+                    auth_obtained = False
+                    try:
+                        auth_inputs = self.service.authentication_inputs(session)
+                        granted_password = calculate_pw4(
+                            auth_inputs.serial_number, auth_inputs.operating_hours
+                        )
+                        if not re.fullmatch(r"[0-9]{4}", granted_password):
+                            raise ValueError("serverseitiger Auth-Schlüssel ist ungültig")
+                    except Exception:
+                        operation_error = TransportError(
+                            "Dachs Ein/Aus: Auth-Schlüssel konnte nicht frisch abgeleitet werden"
+                        )
+                    if operation_error is None:
+                        auth_attempted = True
+                        try:
+                            auth = self.service.authenticate(
+                                session, DACHS_CONTROL_AUTH_LEVEL, granted_password
+                            )
+                            audit["auth_level_granted"] = getattr(auth, "granted_level", None)
+                            auth_obtained = bool(
+                                getattr(auth, "ok", False)
+                                and audit["auth_level_granted"] == DACHS_CONTROL_AUTH_LEVEL
+                            )
+                            if not auth_obtained:
+                                operation_error = PermissionError(
+                                    "Auth-Level 3 wurde nicht exakt gewährt"
+                                )
+                        except Exception:
+                            audit["auth_result_uncertain"] = True
+                            operation_error = TransportError(
+                                "Dachs Ein/Aus: Authentifizierung konnte nicht bestätigt werden"
+                            )
+
+                    if auth_obtained:
+                        try:
+                            prewrite = self._dachs_control_state(
+                                session, action_name, _now()
+                            )
+                            audit["prewrite_preconditions"] = prewrite
+                            if prewrite["unchanged"]:
+                                audit.update({
+                                    "unchanged": True,
+                                    "readback_ok": True,
+                                    "target_reached": True,
+                                    "after_byte": prewrite["release_byte"],
+                                })
+                            elif prewrite["release_byte"] != before["release_byte"]:
+                                audit["conflict"] = True
+                                operation_error = APIRequestConflictError(
+                                    "Dachs-Ein/Aus-Ausgangswert änderte sich unmittelbar vor dem Write"
+                                )
+                            elif not prewrite["eligible"]:
+                                audit["conflict"] = True
+                                operation_error = APIRequestConflictError(
+                                    "Dachs Ein/Aus unmittelbar vor dem Write blockiert: "
+                                    + "; ".join(prewrite["blockers"])
+                                )
+                        except Exception as exc:
+                            operation_error = exc
+
+                    if auth_obtained and operation_error is None and not audit["unchanged"]:
+                        desired_byte = (
+                            before["release_byte"] | DACHS_CONTROL_MASK
+                            if target_enabled
+                            else before["release_byte"] & ~DACHS_CONTROL_MASK
+                        )
+                        desired_byte &= 0xFF
+                        audit["desired_byte"] = desired_byte
+                        request = DACHS_CONTROL_WRITE_PREFIX + bytes([desired_byte])
+                        audit["request_hex"] = request.hex()
+                        audit["expected_response_hex"] = DACHS_CONTROL_WRITE_RESPONSE.hex()
+                        try:
+                            audit["write_attempted"] = True
+                            audit["write_count"] = 1
+                            self._record_dachs_control_attempt(
+                                action_name, before["release_byte"]
+                            )
+                            response = session.request(
+                                request,
+                                session.next_packet(),
+                                timeout=0.9,
+                                cpu=0,
+                            )
+                            audit["ack_positive"] = bool(
+                                getattr(
+                                    getattr(response, "ack", None), "positive", False
+                                )
+                            )
+                            validate_dachs_control_write_response(response)
+                            audit["response_echo_ok"] = True
+                            audit["written"] = True
+                        except Exception as exc:
+                            operation_error = exc
+
+                    if audit["write_attempted"]:
+                        try:
+                            readback = self._dachs_control_readback(
+                                session, int(audit["desired_byte"])
+                            )
+                            audit.update({
+                                "readback_ok": bool(readback["ok"]),
+                                "readback_bytes": list(readback["samples"]),
+                                "readback_errors": list(readback["errors"]),
+                                "after_byte": (
+                                    readback["samples"][-1]
+                                    if readback["samples"]
+                                    else None
+                                ),
+                                "target_reached": bool(readback["ok"]),
+                            })
+                            if operation_error is None and not readback["ok"]:
+                                operation_error = TransportError(
+                                    "Dachs Ein/Aus: Zielbyte wurde nicht zweimal exakt rückgelesen"
+                                )
+                        except Exception:
+                            audit["readback_ok"] = False
+                            audit["readback_errors"] = ["unerwarteter Rücklesefehler"]
+                            if operation_error is None:
+                                operation_error = TransportError(
+                                    "Dachs Ein/Aus: Rückleseprüfung brach unerwartet ab"
+                                )
+
+                    if auth_attempted:
+                        try:
+                            self.service.deauthenticate(session, granted_password)
+                            audit["deauthenticated"] = True
+                        except Exception:
+                            audit["deauthenticated"] = False
+                            cleanup_error = TransportError(
+                                "Auth-0-Cleanup konnte nicht bestätigt werden"
+                            )
+
+                    audit["write_confirmed"] = bool(
+                        audit["written"] and audit["readback_ok"] is True
+                    )
+                    audit["changed"] = bool(
+                        audit["target_reached"]
+                        and audit["before_byte"] != audit["after_byte"]
+                    )
+                    audit["write_uncertain"] = bool(
+                        audit["write_attempted"] and not audit["write_confirmed"]
+                    )
+                    audit["cleanup_uncertain"] = bool(
+                        auth_attempted and audit["deauthenticated"] is not True
+                    )
+                    audit["uncertain"] = bool(
+                        audit["write_uncertain"] or audit["cleanup_uncertain"]
+                    )
+                    if operation_error is not None:
+                        audit["error"] = str(operation_error)
+                    if cleanup_error is not None:
+                        audit["error"] = (
+                            f"{audit['error']}; {cleanup_error}"
+                            if audit["error"]
+                            else str(cleanup_error)
+                        )
+                    result = {
+                        **audit,
+                        "ok": bool(
+                            (audit["write_confirmed"] or audit["unchanged"])
+                            and audit["deauthenticated"] is True
+                            and not audit["error"]
+                        ),
+                    }
+        except (APIRequestConflictError, ValueError, KeyError, PermissionError, TransportError) as exc:
+            audit["error"] = str(exc)
+            self.store.audit(recorded_at, username, 0, audit)
+            raise
+        except Exception as exc:
+            audit["error"] = str(exc) or exc.__class__.__name__
+            self.store.audit(recorded_at, username, 0, audit)
+            raise
+
+        self.store.audit(recorded_at, username, 0, result)
+        return result
+
+    def _require_sc123_limit_worker(self) -> None:
+        if not str(getattr(self.service, "serial_socket", "") or "").strip():
+            raise TransportError(
+                "SC123-Grenze ist ausschließlich über den exklusiven Serialworker verfügbar"
+            )
+
+    @contextmanager
+    def _sc123_limit_worker_session(self):
+        """Open one worker session after the web serial lease is acquired."""
+        with self.serial_lock:
+            with self.state_lock:
+                if not self.serial_enabled:
+                    raise TransportError("serielle Verbindung ist getrennt")
+            with self.service.session() as session:
+                yield session
+
+    def _read_sc123_block(self, session, block: int, label: str) -> bytes:
+        result = self.service.read_block(session, block)
+        if not result.ok:
+            raise TransportError(
+                f"SC123-Grenze: {label} von Block {block} fehlgeschlagen"
+            )
+        payload = bytes(result.payload)
+        if len(payload) != SC123_LIMIT_PAYLOAD_LENGTH:
+            raise TransportError(
+                f"SC123-Grenze: {label} von Block {block} lieferte "
+                f"{len(payload)} statt {SC123_LIMIT_PAYLOAD_LENGTH} Byte"
+            )
+        return payload
+
+    def _sc123_limit_state(self, session) -> tuple[dict, bytes, bytes]:
+        capability_first = self._read_sc123_block(
+            session, SC123_LIMIT_CAPABILITY_BLOCK, "erste Fähigkeitslesung"
+        )
+        capability_second = self._read_sc123_block(
+            session, SC123_LIMIT_CAPABILITY_BLOCK, "zweite Fähigkeitslesung"
+        )
+        storage_first = self._read_sc123_block(
+            session, SC123_LIMIT_STORAGE_BLOCK, "erste Speicherlesung"
+        )
+        storage_second = self._read_sc123_block(
+            session, SC123_LIMIT_STORAGE_BLOCK, "zweite Speicherlesung"
+        )
+        state = sc123_limit_capability(
+            capability_first, capability_second, storage_first, storage_second
+        )
+        pending_commands = sc123_limit_pending_commands(capability_second)
+        state.update({
+            "pending_commands": pending_commands,
+            "write_safe": bool(state["available"] and not pending_commands),
+            "capability_block": SC123_LIMIT_CAPABILITY_BLOCK,
+            "block": SC123_LIMIT_STORAGE_BLOCK,
+            "record_offset": SC123_LIMIT_RECORD_OFFSET,
+            "record_length": SC123_LIMIT_RECORD_LENGTH,
+            "offset": SC123_LIMIT_THRESHOLD_OFFSET,
+            "persistent": True,
+            "auth_level": SC123_LIMIT_AUTH_LEVEL,
+            "manufacturer_evidence_c": [180, 200],
+            "unvalidated_above_c": 200,
+            "warning": (
+                "201–240 °C sind technisch einstellbar, aber nicht durch eine "
+                "historische Herstellerfreigabe oder thermische Liveprüfung belegt."
+            ),
+        })
+        return state, capability_second, storage_second
+
+    @staticmethod
+    def _sc123_storage_preimage(payload: bytes) -> str:
+        if len(payload) != SC123_LIMIT_PAYLOAD_LENGTH:
+            raise ValueError("SC123-Grenze: ungültige Block-60-Vorlage")
+        return bytes(payload).hex()
+
+    def _poll_sc123_nvm_record(self, session, expected_record: bytes) -> dict:
+        expected_record = bytes(expected_record)
+        if len(expected_record) != SC123_LIMIT_RECORD_LENGTH:
+            raise ValueError("SC123-Grenze: ungültiger erwarteter NVM-Datensatz")
+        last_record = None
+        last_error = None
+        for attempt in range(1, SC123_LIMIT_NVM_POLL_ATTEMPTS + 1):
+            try:
+                response = session.request(
+                    SC123_LIMIT_NVM_READ_REQUEST,
+                    session.next_packet(),
+                    timeout=self.service.timeout,
+                    cpu=0,
+                )
+                last_record = sc123_limit_nvm_record(response)
+                last_error = None
+                if last_record == expected_record:
+                    return {
+                        "ok": True,
+                        "attempts": attempt,
+                        "record_hex": last_record.hex(),
+                        "error": None,
+                    }
+            except Exception:
+                # NVM reads are safely retryable. Keep audit text free of raw
+                # transport payloads and credentials.
+                last_error = "NVM-Lesung nicht exakt validiert"
+            if (
+                attempt < SC123_LIMIT_NVM_POLL_ATTEMPTS
+                and SC123_LIMIT_NVM_POLL_DELAY_SECONDS > 0
+            ):
+                time.sleep(SC123_LIMIT_NVM_POLL_DELAY_SECONDS)
+        return {
+            "ok": False,
+            "attempts": SC123_LIMIT_NVM_POLL_ATTEMPTS,
+            "record_hex": last_record.hex() if last_record is not None else None,
+            "error": last_error or "persistenter NVM-Datensatz stimmt nicht überein",
+        }
+
+    def _clear_sc123_limit_token(self) -> None:
+        with self._sc123_limit_token_lock:
+            self._sc123_limit_token = None
+
+    def _issue_sc123_limit_token(
+        self, username: str, target_c: int, storage_payload: bytes
+    ) -> str:
+        token = secrets.token_urlsafe(32)
+        with self._sc123_limit_token_lock:
+            self._sc123_limit_token = {
+                "token": token,
+                "username": str(username),
+                "target_c": int(target_c),
+                "storage_preimage": self._sc123_storage_preimage(storage_payload),
+                "expires_at": time.monotonic() + SC123_LIMIT_TOKEN_TTL_SECONDS,
+            }
+        return token
+
+    def _consume_sc123_limit_token(
+        self, username: str, target_c: int, request_token: object
+    ) -> dict:
+        if not isinstance(request_token, str) or not request_token:
+            raise ValueError("SC123-Grenze: gültige Vorschau-Bestätigung fehlt")
+        with self._sc123_limit_token_lock:
+            issued = self._sc123_limit_token
+            self._sc123_limit_token = None
+        if issued is None:
+            raise APIRequestConflictError(
+                "SC123-Grenze: Vorschau fehlt oder wurde bereits verwendet"
+            )
+        if time.monotonic() > float(issued["expires_at"]):
+            raise APIRequestConflictError("SC123-Grenze: Vorschau ist abgelaufen")
+        if not secrets.compare_digest(str(issued["token"]), request_token):
+            raise APIRequestConflictError("SC123-Grenze: Vorschau-Token stimmt nicht")
+        if issued["username"] != str(username) or issued["target_c"] != int(target_c):
+            raise APIRequestConflictError(
+                "SC123-Grenze: Vorschau gehört nicht zu dieser Änderung"
+            )
+        return issued
+
+    def _sc123_limit_retry_guard_remaining(self) -> float:
+        with self._sc123_limit_token_lock:
+            attempt = self._sc123_limit_last_attempt
+        if attempt is None:
+            return 0.0
+        return max(
+            0.0,
+            SC123_LIMIT_RETRY_GUARD_SECONDS
+            - (time.monotonic() - float(attempt["attempted_at"])),
+        )
+
+    def _record_sc123_limit_attempt(self, target_c: int) -> None:
+        with self._sc123_limit_token_lock:
+            self._sc123_limit_last_attempt = {
+                "target_c": int(target_c),
+                "attempted_at": time.monotonic(),
+            }
+
+    def sc123_temperature_limit_status(self) -> dict:
+        """Read the dynamic capability twice; stock firmware fails closed."""
+        with self._sc123_limit_flow_lock:
+            self._require_sc123_limit_worker()
+            with self._sc123_limit_worker_session() as session:
+                state, _capability_payload, _storage_payload = (
+                    self._sc123_limit_state(session)
+                )
+            return {
+                **state,
+                "retry_guard_remaining_seconds": round(
+                    self._sc123_limit_retry_guard_remaining(), 3
+                ),
+            }
+
+    def sc123_temperature_limit_preview(
+        self, username: str, value: object
+    ) -> dict:
+        """Issue a one-shot token only after positive firmware detection."""
+        target_c = parse_sc123_limit_c(value)
+        with self._sc123_limit_flow_lock:
+            self._clear_sc123_limit_token()
+            self._require_sc123_limit_worker()
+            with self._sc123_limit_worker_session() as session:
+                state, _capability_payload, storage_payload = (
+                    self._sc123_limit_state(session)
+                )
+            blockers = list(state["blockers"])
+            if state["pending_commands"]:
+                blockers.append(
+                    "aktive Block-50-Befehlsbits: "
+                    + ", ".join(state["pending_commands"])
+                )
+            guard = self._sc123_limit_retry_guard_remaining()
+            transition_required = not (
+                state["configured"] and state["threshold_c"] == target_c
+            )
+            if guard > 0.0 and transition_required:
+                blockers.append(
+                    "vorheriger SC123-Schreibversuch wird nicht automatisch wiederholt; "
+                    f"erneute Vorschau in {guard:.1f} s"
+                )
+            eligible = bool(state["available"] and not blockers)
+            return {
+                **state,
+                "target_c": target_c,
+                "transition_required": transition_required,
+                "eligible": eligible,
+                "blockers": blockers,
+                "request_token": (
+                    self._issue_sc123_limit_token(
+                        username, target_c, storage_payload
+                    )
+                    if eligible else None
+                ),
+                "request_token_ttl_seconds": SC123_LIMIT_TOKEN_TTL_SECONDS,
+                "retry_guard_remaining_seconds": round(guard, 3),
+            }
+
+    def set_sc123_temperature_limit(
+        self,
+        username: str,
+        value: object,
+        confirm: object,
+        write_enabled: object,
+        request_token: object,
+    ) -> dict:
+        """Apply one Auth-3 Block-60 write with RAM and NVM verification."""
+        target_c = parse_sc123_limit_c(value)
+        if confirm is not True:
+            raise ValueError("SC123-Grenze muss ausdrücklich bestätigt werden")
+        if write_enabled is not True:
+            raise ValueError("Hardware-Schreiben muss ausdrücklich aktiviert werden")
+        with self._sc123_limit_flow_lock:
+            return self._set_sc123_temperature_limit_locked(
+                username, target_c, request_token
+            )
+
+    def _set_sc123_temperature_limit_locked(
+        self, username: str, target_c: int, request_token: object
+    ) -> dict:
+        issued = self._consume_sc123_limit_token(
+            username, target_c, request_token
+        )
+        self._require_sc123_limit_worker()
+        recorded_at = _now()
+        audit = {
+            "schema": SC123_LIMIT_SCHEMA,
+            "operation": "sc123-temperature-limit-write",
+            "critical": True,
+            "cpu": 0,
+            "block": SC123_LIMIT_STORAGE_BLOCK,
+            "capability_block": SC123_LIMIT_CAPABILITY_BLOCK,
+            "record_offset": SC123_LIMIT_RECORD_OFFSET,
+            "record_length": SC123_LIMIT_RECORD_LENGTH,
+            "offset": SC123_LIMIT_THRESHOLD_OFFSET,
+            "persistent": True,
+            "nvm_write": True,
+            "nvm_read_request_hex": SC123_LIMIT_NVM_READ_REQUEST.hex(),
+            "target_c": target_c,
+            "before_c": None,
+            "stored_before_record": None,
+            "auth_level_requested": SC123_LIMIT_AUTH_LEVEL,
+            "auth_level_granted": None,
+            "auth_attempted": False,
+            "auth_result_uncertain": False,
+            "write_attempted": False,
+            "write_count": 0,
+            "written": False,
+            "ack_positive": None,
+            "readback_attempts": 0,
+            "ram_readback_attempts": 0,
+            "nvm_readback_attempts": 0,
+            "ram_readback_ok": None,
+            "nvm_readback_ok": None,
+            "readback_ok": None,
+            "readback_scope": "full-block-60-plus-service-04-nvm-record",
+            "deauthenticated": None,
+            "write_confirmed": False,
+            "write_uncertain": False,
+            "cleanup_uncertain": False,
+            "uncertain": False,
+            "unchanged": False,
+            "changed": False,
+            "changed_keys": ["Waermef_Ew.Reserve[0..5]/SC123-Temperaturgrenze"],
+            "error": None,
+        }
+        try:
+            with self._sc123_limit_worker_session() as session:
+                state, _fresh_capability, fresh_storage = (
+                    self._sc123_limit_state(session)
+                )
+                audit["capability"] = state
+                audit["before_c"] = state["threshold_c"]
+                audit["stored_before_record"] = state["record_hex"]
+                if not state["available"]:
+                    raise APIRequestConflictError(
+                        "SC123-Grenze: einstellbare Firmware oder stabiler Speicher nicht sicher erkannt"
+                    )
+                if state["pending_commands"]:
+                    raise APIRequestConflictError(
+                        "SC123-Grenze: aktive Block-50-Befehlsbits: "
+                        + ", ".join(state["pending_commands"])
+                    )
+                if (
+                    self._sc123_storage_preimage(fresh_storage)
+                    != issued["storage_preimage"]
+                ):
+                    raise APIRequestConflictError(
+                        "SC123-Block-60-Speicher änderte sich seit der Vorschau; neu prüfen"
+                    )
+                if state["configured"] and state["threshold_c"] == target_c:
+                    expected_record = fresh_storage[
+                        SC123_LIMIT_RECORD_OFFSET:
+                        SC123_LIMIT_RECORD_OFFSET + SC123_LIMIT_RECORD_LENGTH
+                    ]
+                    nvm_readback = self._poll_sc123_nvm_record(
+                        session, expected_record
+                    )
+                    audit["nvm_readback"] = nvm_readback
+                    audit["nvm_readback_attempts"] = int(
+                        nvm_readback["attempts"]
+                    )
+                    audit["nvm_readback_ok"] = bool(nvm_readback["ok"])
+                    if not nvm_readback["ok"]:
+                        audit["ram_readback_ok"] = True
+                        audit["readback_ok"] = False
+                        raise TransportError(
+                            "SC123-Grenze ist im RAM unverändert, aber im "
+                            "persistenten NVM nicht bestätigt"
+                        )
+                    audit.update({
+                        "unchanged": True,
+                        "ram_readback_ok": True,
+                        "nvm_readback_ok": True,
+                        "readback_ok": True,
+                        "write_confirmed": False,
+                    })
+                else:
+                    guard = self._sc123_limit_retry_guard_remaining()
+                    if guard > 0.0:
+                        raise APIRequestConflictError(
+                            "SC123-Schreibversuch wird nicht automatisch wiederholt; "
+                            f"erneut in {guard:.1f} s"
+                        )
+                    granted_password = ""
+                    auth_attempted = False
+                    operation_error = None
+                    cleanup_error = None
+                    try:
+                        try:
+                            inputs = self.service.authentication_inputs(session)
+                            granted_password = calculate_pw4(
+                                inputs.serial_number, inputs.operating_hours
+                            )
+                            if not re.fullmatch(r"[0-9]{4}", granted_password):
+                                raise ValueError
+                        except Exception:
+                            raise TransportError(
+                                "SC123-Grenze: Auth-Schlüssel konnte nicht frisch abgeleitet werden"
+                            ) from None
+                        auth_attempted = True
+                        audit["auth_attempted"] = True
+                        try:
+                            auth = self.service.authenticate(
+                                session, SC123_LIMIT_AUTH_LEVEL, granted_password
+                            )
+                        except Exception:
+                            audit["auth_result_uncertain"] = True
+                            raise TransportError(
+                                "SC123-Grenze: Authentifizierung konnte nicht bestätigt werden"
+                            ) from None
+                        audit["auth_level_granted"] = getattr(
+                            auth, "granted_level", None
+                        )
+                        if not (
+                            getattr(auth, "ok", False)
+                            and audit["auth_level_granted"] == SC123_LIMIT_AUTH_LEVEL
+                        ):
+                            raise PermissionError("Auth-Level 3 wurde nicht exakt gewährt")
+
+                        prewrite_state, _prewrite_capability, prewrite_storage = (
+                            self._sc123_limit_state(session)
+                        )
+                        audit["prewrite_capability"] = prewrite_state
+                        if not prewrite_state["available"]:
+                            raise APIRequestConflictError(
+                                "SC123-Firmwarefähigkeit oder Block-60-Stabilität unmittelbar vor dem Write verloren"
+                            )
+                        if prewrite_state["pending_commands"]:
+                            raise APIRequestConflictError(
+                                "SC123-Grenze: unmittelbar vor dem Write aktive Block-50-Befehlsbits"
+                            )
+                        if (
+                            self._sc123_storage_preimage(prewrite_storage)
+                            != issued["storage_preimage"]
+                            or prewrite_storage != fresh_storage
+                        ):
+                            raise APIRequestConflictError(
+                                "SC123-Block-60-Speicher änderte sich unmittelbar vor dem Write"
+                            )
+                        wire_payload = sc123_limit_payload(
+                            prewrite_storage, target_c
+                        )
+                        expected_record = wire_payload[
+                            SC123_LIMIT_RECORD_OFFSET:
+                            SC123_LIMIT_RECORD_OFFSET + SC123_LIMIT_RECORD_LENGTH
+                        ]
+                        audit["before_hex"] = prewrite_storage.hex()
+                        audit["after_hex"] = wire_payload.hex()
+                        audit["expected_record_hex"] = expected_record.hex()
+                        self._record_sc123_limit_attempt(target_c)
+                        audit["write_attempted"] = True
+                        audit["write_count"] = 1
+                        response = session.write_block(
+                            SC123_LIMIT_STORAGE_BLOCK,
+                            wire_payload,
+                            packet=None,
+                            timeout=self.service.timeout,
+                        )
+                        audit["ack_positive"] = bool(
+                            getattr(getattr(response, "ack", None), "positive", False)
+                        )
+                        if not audit["ack_positive"]:
+                            raise TransportError(
+                                "SC123-Grenze: Write erhielt kein positives ACK"
+                            )
+                        audit["written"] = True
+
+                        audit["readback_attempts"] = 1
+                        audit["ram_readback_attempts"] = 1
+                        readback_payload = self._read_sc123_block(
+                            session, SC123_LIMIT_STORAGE_BLOCK, "RAM-Rücklesung"
+                        )
+                        readback = sc123_limit_readback(
+                            wire_payload, readback_payload
+                        )
+                        audit["readback"] = readback
+                        audit["ram_readback_ok"] = bool(readback["ok"])
+                        if not readback["ok"]:
+                            raise TransportError(
+                                "SC123-Grenze wurde in Block 60 nicht bytegenau rückgelesen"
+                            )
+
+                        nvm_readback = self._poll_sc123_nvm_record(
+                            session, expected_record
+                        )
+                        audit["nvm_readback"] = nvm_readback
+                        audit["nvm_readback_attempts"] = int(
+                            nvm_readback["attempts"]
+                        )
+                        audit["nvm_readback_ok"] = bool(nvm_readback["ok"])
+                        audit["readback_ok"] = bool(
+                            audit["ram_readback_ok"]
+                            and audit["nvm_readback_ok"]
+                        )
+                        if not nvm_readback["ok"]:
+                            raise TransportError(
+                                "SC123-Grenze wurde im persistenten NVM nicht bestätigt"
+                            )
+                    except Exception as exc:
+                        operation_error = exc
+                    finally:
+                        if auth_attempted:
+                            try:
+                                self.service.deauthenticate(
+                                    session, granted_password
+                                )
+                                audit["deauthenticated"] = True
+                            except Exception:
+                                audit["deauthenticated"] = False
+                                cleanup_error = TransportError(
+                                    "Auth-0-Cleanup konnte nicht bestätigt werden"
+                                )
+                    audit["write_confirmed"] = bool(
+                        audit["written"]
+                        and audit["ram_readback_ok"] is True
+                        and audit["nvm_readback_ok"] is True
+                    )
+                    audit["changed"] = audit["write_confirmed"]
+                    audit["write_uncertain"] = bool(
+                        audit["write_attempted"] and not audit["write_confirmed"]
+                    )
+                    audit["cleanup_uncertain"] = bool(
+                        auth_attempted and audit["deauthenticated"] is not True
+                    )
+                    audit["uncertain"] = bool(
+                        audit["write_uncertain"] or audit["cleanup_uncertain"]
+                    )
+                    if operation_error is not None:
+                        raise operation_error
+                    if cleanup_error is not None:
+                        raise cleanup_error
+            cleanup_ok = bool(
+                audit["auth_attempted"] is not True
+                or audit["deauthenticated"] is True
+            )
+            result = {
+                **audit,
+                "ok": bool(
+                    (audit["write_confirmed"] or audit["unchanged"])
+                    and cleanup_ok
+                    and not audit["error"]
+                ),
+            }
+        except Exception as exc:
+            audit["error"] = str(exc) or exc.__class__.__name__
+            self.store.audit(recorded_at, username, SC123_LIMIT_STORAGE_BLOCK, audit)
+            raise
+        self.store.audit(recorded_at, username, SC123_LIMIT_STORAGE_BLOCK, result)
+        return result
+
+    def runtime_24h_write_preview(self) -> dict:
+        """Return a fresh coherent counter value without authenticating."""
+        with self.state_lock:
+            if not self.serial_enabled:
+                raise TransportError("serielle Verbindung ist getrennt")
+        recorded_at = _now()
+        with self.serial_lock, self.service.session() as session:
+            current = self._read_runtime_24h(session, recorded_at)
+        return {
+            **current,
+            "max_settable_seconds": RUNTIME_24H_MAX_SETTABLE_SECONDS,
+            "prewrite_tolerance_seconds": RUNTIME_24H_PREWRITE_TOLERANCE_SECONDS,
+            "readback_tolerance_seconds": RUNTIME_24H_READBACK_TOLERANCE_SECONDS,
+        }
+
+    def _runtime_24h_guarded_write(self, session, target: int, audit: dict) -> dict:
+        """Auth 3 -> exact RAM write -> bounded readback -> Auth 0 for 0x0f0e.
+
+        Shared by the manual dialog and the automatic reset. The caller holds
+        ``serial_lock`` and the session and has validated the preimage.
+        """
+        target_bytes = int(target).to_bytes(RUNTIME_24H_COUNTER_LENGTH, "little")
+        # Auth level and credential derivation are fixed server-side.
+        # Passing no override makes the authentication service read
+        # its current Block-20/22 inputs and calculate PW4 freshly.
+        auth = self.service.authenticate(
+            session, RUNTIME_24H_WRITE_AUTH_LEVEL, None
+        )
+        audit["auth_level_granted"] = getattr(auth, "granted_level", None)
+        granted_password = str(getattr(auth, "pw4", "") or "")
+        if not getattr(auth, "ok", False) or audit["auth_level_granted"] != 3:
+            try:
+                self.service.deauthenticate(session, granted_password)
+                audit["deauthenticated"] = True
+            except Exception as exc:
+                audit["deauthenticated"] = False
+                raise TransportError(
+                    f"Auth-Level 3 wurde nicht exakt gewährt; Deauth fehlgeschlagen: {exc}"
+                ) from exc
+            raise PermissionError("Auth-Level 3 wurde nicht exakt gewährt")
+        operation_error = None
+        deauth_error = None
+        readback = None
+        try:
+            audit["write_attempted"] = True
+            response = session.request(
+                RUNTIME_24H_WRITE_PREFIX + target_bytes,
+                session.next_packet(),
+                timeout=0.9,
+                cpu=0,
+            )
+            audit["ack_positive"] = bool(
+                getattr(getattr(response, "ack", None), "positive", False)
+            )
+            validate_runtime_24h_write_response(response)
+            audit["written"] = True
+            readback_response = session.request(
+                RUNTIME_24H_REQUEST,
+                session.next_packet(),
+                timeout=0.9,
+                cpu=0,
+            )
+            audit["readback_attempts"] = 1
+            readback = runtime_24h_status(readback_response, _now())
+            readback_counter = int(readback["counter_seconds"])
+            audit["readback_advanced_seconds"] = readback_counter - target
+            # The immediate readback may cross one active-second
+            # tick after an otherwise exact volatile-RAM write.
+            audit["readback_ok"] = target <= readback_counter <= (
+                target + RUNTIME_24H_READBACK_TOLERANCE_SECONDS
+            )
+            if not audit["readback_ok"]:
+                raise TransportError(
+                    f"24-h-Zähler: Readback {readback['counter_seconds']} statt {target}"
+                )
+        except Exception as exc:
+            operation_error = exc
+        finally:
+            try:
+                self.service.deauthenticate(session, granted_password)
+                audit["deauthenticated"] = True
+            except Exception as exc:
+                audit["deauthenticated"] = False
+                deauth_error = exc
+        if operation_error is not None:
+            if deauth_error is not None:
+                raise TransportError(
+                    f"{operation_error}; zusätzlich Deauth fehlgeschlagen: {deauth_error}"
+                ) from operation_error
+            raise operation_error
+        if deauth_error is not None:
+            raise TransportError(f"MSR2-Deauth fehlgeschlagen: {deauth_error}")
+        return readback
+
+    def set_runtime_24h_counter(
+        self,
+        username: str,
+        value: object,
+        expected_counter: object,
+        write_enabled: object,
+    ) -> dict:
+        """CAS-write only the volatile CPU-0 24-hour counter and read it back."""
+        target = runtime_24h_write_seconds(value)
+        if isinstance(expected_counter, bool) or not isinstance(expected_counter, int):
+            raise ValueError("erwarteter 24-h-Zähler muss eine ganze Sekundenzahl sein")
+        if not 0 <= expected_counter <= 0xFFFFFFFF:
+            raise ValueError("erwarteter 24-h-Zähler liegt außerhalb des 4-Byte-Bereichs")
+        if write_enabled is not True:
+            raise ValueError("Hardware-Schreiben muss ausdrücklich aktiviert werden")
+        with self.state_lock:
+            if not self.serial_enabled:
+                raise TransportError("serielle Verbindung ist getrennt")
+
+        recorded_at = _now()
+        target_bytes = target.to_bytes(RUNTIME_24H_COUNTER_LENGTH, "little")
+        audit = {
+            "operation": "runtime-24h-counter-write",
+            "key": "CPU0.RAM.0x000f0e",
+            "cpu": 0,
+            "address": "0x000f0e",
+            "volatile_ram_only": True,
+            "nvm_write": False,
+            "flag_write": False,
+            "auth_level_requested": RUNTIME_24H_WRITE_AUTH_LEVEL,
+            "auth_level_granted": None,
+            "expected_counter": expected_counter,
+            "prewrite_counter": None,
+            "prewrite_tolerance_seconds": RUNTIME_24H_PREWRITE_TOLERANCE_SECONDS,
+            "readback_tolerance_seconds": RUNTIME_24H_READBACK_TOLERANCE_SECONDS,
+            "before_hex": "",
+            "after_hex": target_bytes.hex(),
+            "changed_keys": ["CPU0.RAM.0x000f0e"],
+            "dry_run": False,
+            "changed": False,
+            "write_attempted": False,
+            "written": False,
+            "ack_positive": None,
+            "readback_ok": None,
+            "readback_scope": "exact-service-0x02",
+            "readback_attempts": 0,
+            "deauthenticated": None,
+            "error": None,
+        }
+        try:
+            with self.serial_lock, self.service.session() as session:
+                before = self._read_runtime_24h(session, recorded_at)
+                current = int(before["counter_seconds"])
+                audit["prewrite_counter"] = current
+                audit["before_hex"] = current.to_bytes(4, "little").hex()
+                audit["changed"] = current != target
+                audit["prewrite_validated_samples"] = int(before["validated_samples"])
+                # The dashboard cache is refreshed in the ten-second slow
+                # cycle. The dialog and guarded POST use fresh direct reads.
+                # Accept only bounded monotonic preimage progress. This bound
+                # never modifies the absolute target supplied by the admin.
+                if not expected_counter <= current <= (
+                    expected_counter + RUNTIME_24H_PREWRITE_TOLERANCE_SECONDS
+                ):
+                    raise APIRequestConflictError(
+                        f"24-h-Zähler hat sich von {expected_counter} auf {current} geändert; "
+                        "Istwert neu lesen und Hardware-Schreiben erneut freigeben"
+                    )
+                if current == target:
+                    audit["readback_ok"] = True
+                    result = {**audit, "counter_seconds": current, "unchanged": True}
+                else:
+                    readback = self._runtime_24h_guarded_write(session, target, audit)
+                    result = {**audit, **readback, "unchanged": False}
+                    with self.state_lock:
+                        self.runtime_24h = {**readback, "error": None}
+        except Exception as exc:
+            audit["error"] = str(exc)
+            self.store.audit(recorded_at, username, 0, audit)
+            raise
+        self.store.audit(recorded_at, username, 0, result)
+        return result
+
+    # ------------------------------------------------------------------
+    # Controller automation: clock sync (A), 0x0f0e auto-reset (B) and the
+    # real runtime since start (C). Rules live in controller_automation.py.
+    # ------------------------------------------------------------------
+    def _timedatectl_ntp_status(self) -> tuple[bool, str]:
+        """ODM time is only trusted when systemd reports NTPSynchronized=yes."""
+        try:
+            completed = subprocess.run(
+                ["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"timedatectl nicht verfügbar: {exc}"
+        value = (completed.stdout or "").strip()
+        return value == "yes", f"NTPSynchronized={value or 'leer'}"
+
+    def _load_automation_json(self, path: Path) -> dict | None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _load_clock_sync_settings(self) -> dict:
+        payload = self._load_automation_json(self.clock_sync_settings_path)
+        if payload is None:
+            return {**CLOCK_SYNC_DEFAULTS, "updated_by": None, "updated_at": None}
+        try:
+            settings = normalize_clock_sync_settings(payload)
+        except ValueError:
+            # A damaged file never enables a background write.
+            return {**CLOCK_SYNC_DEFAULTS, "updated_by": None, "updated_at": None}
+        return {
+            **settings,
+            "updated_by": payload.get("updated_by"),
+            "updated_at": payload.get("updated_at"),
+        }
+
+    def _load_runtime_auto_settings(self) -> dict:
+        payload = self._load_automation_json(self.runtime_auto_settings_path)
+        defaults = {
+            **RUNTIME_AUTO_DEFAULTS,
+            "min_runtime_minutes_at_save": None,
+            "updated_by": None,
+            "updated_at": None,
+            "disabled_reason": None,
+        }
+        if payload is None:
+            return defaults
+        minutes = payload.get("min_runtime_minutes_at_save")
+        if isinstance(minutes, bool) or not isinstance(minutes, int):
+            minutes = None
+        try:
+            rule = normalize_runtime_auto_rule(payload, minutes)
+        except ValueError:
+            return defaults
+        return {
+            **rule,
+            "min_runtime_minutes_at_save": minutes,
+            "updated_by": payload.get("updated_by"),
+            "updated_at": payload.get("updated_at"),
+            "disabled_reason": payload.get("disabled_reason"),
+        }
+
+    def _cached_block50(self, max_age: float = 60.0) -> bytes | None:
+        with self.state_lock:
+            cached = self._display_slow_payloads.get(CONTROLLER_CLOCK_BLOCK)
+        if not cached or cached[0] is None:
+            return None
+        payload, read_mono = cached
+        if time.monotonic() - read_mono > max_age or len(payload) != CLOCK_SYNC_PAYLOAD_LENGTH:
+            return None
+        return bytes(payload)
+
+    def _cached_min_runtime_minutes(self) -> int | None:
+        payload = self._cached_block50()
+        if payload is None:
+            return None
+        return int(payload[RUNTIME_AUTO_MIN_RUNTIME_OFFSET])
+
+    def _read_block_raws(self, session, block: int) -> tuple[bytes, dict]:
+        result, fields = self.service.decoded_block(session, block)
+        if not result.ok:
+            raise TransportError(f"Block {block}: Status {result.status!r}")
+        raws = {}
+        for field in fields:
+            raw = field.raw
+            if isinstance(raw, bool):
+                continue
+            try:
+                raws[field.key] = int(raw)
+            except (TypeError, ValueError):
+                continue
+        return bytes(result.payload), raws
+
+    # --- A) Regleruhr-Sync -------------------------------------------------
+    def controller_clock_sync_status(self) -> dict:
+        now = self._utcnow()
+        with self.state_lock:
+            settings = dict(self.clock_sync_config)
+            state = json.loads(json.dumps(self.clock_sync_state))
+        return {
+            "schema": "open-dachs-controller-clock-sync/v1",
+            "settings": settings,
+            "last_run": state.get("last_run"),
+            "last_auto_date": state.get("last_auto_date"),
+            "next_run": next_clock_sync(settings, now, state.get("last_auto_date")),
+            "path": "Block 50 Offset 36 (Hka_Ew.ulSystemTime) + Kommando-Bit 5 in Offset 0",
+            "auth_level": CLOCK_SYNC_AUTH_LEVEL,
+            "readback_tolerance_seconds": CLOCK_SYNC_READBACK_TOLERANCE_SECONDS,
+        }
+
+    def set_controller_clock_sync_settings(self, username: str, payload: object) -> dict:
+        if not isinstance(payload, dict):
+            raise ValueError("Einstellungen für den Uhrabgleich fehlen")
+        forbidden = sorted({"auth_level", "pass4", "pw4"}.intersection(payload))
+        if forbidden:
+            raise ValueError("clientseitige Auth-Felder sind nicht zulässig: " + ", ".join(forbidden))
+        settings = normalize_clock_sync_settings(payload)
+        with self.state_lock:
+            was_enabled = bool(self.clock_sync_config.get("enabled"))
+        if settings["enabled"] and not was_enabled and payload.get("acknowledge") is not True:
+            raise ValueError(
+                "Aktivieren erfordert die Bestätigung, dass ODM die Regleruhr täglich "
+                "ohne Bediener mit Auth 3 stellen darf"
+            )
+        stored = {**settings, "updated_by": str(username), "updated_at": _now()}
+        write_json_atomic(self.clock_sync_settings_path, {"version": 1, **stored})
+        with self.state_lock:
+            self.clock_sync_config = stored
+        return self.controller_clock_sync_status()
+
+    def _save_clock_sync_state(self) -> None:
+        with self.state_lock:
+            state = json.loads(json.dumps(self.clock_sync_state))
+        write_json_atomic(self.clock_sync_state_path, {"version": 1, **state})
+
+    def _clock_sync_tick(self) -> dict | None:
+        now = self._utcnow()
+        with self.state_lock:
+            settings = dict(self.clock_sync_config)
+            last_auto_date = self.clock_sync_state.get("last_auto_date")
+        due, today = clock_sync_due(settings, now, last_auto_date)
+        if not due:
+            return None
+        # Persist the daily marker before any serial access: a crash or
+        # restart during the run can never produce a second run that day.
+        with self.state_lock:
+            self.clock_sync_state["last_auto_date"] = today
+        self._save_clock_sync_state()
+        return self.sync_controller_clock(CONTROLLER_AUTOMATION_USER, "auto")
+
+    def sync_controller_clock(self, username: str, trigger: str) -> dict:
+        if trigger not in {"auto", "manual"}:
+            raise ValueError("unbekannter Auslöser")
+        with self.automation_lock:
+            record = self._sync_controller_clock_locked(str(username), trigger)
+        with self.state_lock:
+            self.clock_sync_state["last_run"] = record
+        self._save_clock_sync_state()
+        return record
+
+    def _sync_controller_clock_locked(self, username: str, trigger: str) -> dict:
+        started = self._utcnow()
+        with self.state_lock:
+            settings = dict(self.clock_sync_config)
+            serial_enabled = self.serial_enabled
+        record = {
+            "at": started.isoformat(),
+            "trigger": trigger,
+            "username": username,
+            "result": None,
+            "reason": None,
+            "ntp": None,
+            "offset_before_seconds": None,
+            "offset_after_seconds": None,
+            "controller_time_before": None,
+            "controller_time_after": None,
+            "write_attempted": False,
+            "uncertain": False,
+            "audit_written": False,
+        }
+
+        def finish(result: str, reason: str | None) -> dict:
+            record["result"] = result
+            record["reason"] = reason
+            return record
+
+        if trigger == "auto" and not settings.get("enabled"):
+            return finish("übersprungen", "Automatik ausgeschaltet")
+        if not serial_enabled:
+            return finish("übersprungen", "serielle Verbindung ist getrennt")
+        ntp_ok, ntp_detail = self._ntp_status()
+        record["ntp"] = ntp_detail
+        if not ntp_ok:
+            return finish("übersprungen", f"ODM-Zeit nicht NTP-synchron ({ntp_detail})")
+        threshold = int(settings["threshold_seconds"])
+        max_offset = int(settings["max_offset_seconds"])
+        audit: dict | None = None
+        recorded_at = _now()
+        try:
+            with self.serial_lock, self.service.session() as session:
+                first = self.service.read_block(session, CLOCK_SYNC_BLOCK)
+                read_at = self._utcnow()
+                if not first.ok or len(bytes(first.payload)) != CLOCK_SYNC_PAYLOAD_LENGTH:
+                    return finish("fehlgeschlagen", "Block 50 nicht lesbar")
+                first_payload = bytes(first.payload)
+                raw_before = decode_controller_time(first_payload)
+                controller_before = controller_naive(raw_before)
+                odm_before = odm_local_naive(read_at)
+                offset = int(round((controller_before - odm_before).total_seconds()))
+                record["offset_before_seconds"] = offset
+                record["controller_time_before"] = controller_before.isoformat()
+                if first_payload[CLOCK_SYNC_COMMAND_OFFSET] & CLOCK_SYNC_COMMAND_BIT:
+                    return finish("fehlgeschlagen", "Kommando-Bit 5 in Block 50 ist bereits gesetzt")
+                if first_payload[CLOCK_SYNC_GUARD_OFFSET] == CLOCK_SYNC_GUARD_REFUSED_VALUE:
+                    return finish(
+                        "übersprungen",
+                        "Firmware-Sperrbedingung möglich (0x202f = 4); Uhrübernahme nicht gesichert",
+                    )
+                if abs(offset) < threshold:
+                    return finish("übersprungen", f"Versatz {offset:+d} s unter Schwelle {threshold} s")
+                if abs(offset) > max_offset:
+                    return finish(
+                        "fehlgeschlagen",
+                        f"Versatz {offset:+d} s über Maximum {max_offset} s; bitte manuell prüfen",
+                    )
+                _payload22, raws22 = self._read_block_raws(session, 22)
+                starts = raws22.get("Hka_Bd.ulAnzahlStarts")
+                window_reason = clock_sync_window_reason(
+                    controller_before, odm_before, read_at, starts
+                )
+                if window_reason:
+                    return finish("übersprungen", window_reason)
+                audit = {
+                    "operation": "controller-clock-sync",
+                    "trigger": trigger,
+                    "key": "Hka_Ew.ulSystemTime",
+                    "cpu": 0,
+                    "block": CLOCK_SYNC_BLOCK,
+                    "path": "block50-offset36+command-bit5",
+                    "firmware_evidence": "f47293 BTST 5,0x1acc -> 0x1af0->0x163e -> f464e1 (RAM+RTC) -> BCLR 5",
+                    "auth_level_requested": CLOCK_SYNC_AUTH_LEVEL,
+                    "auth_level_granted": None,
+                    "ntp": ntp_detail,
+                    "threshold_seconds": threshold,
+                    "starts": starts,
+                    "night_shutdown_second": night_shutdown_second(starts),
+                    "controller_time_before": controller_before.isoformat(),
+                    "odm_time_before": odm_before.isoformat(),
+                    "offset_before_seconds": offset,
+                    "before_hex": "",
+                    "after_hex": "",
+                    "target_raw": None,
+                    "changed_keys": ["Hka_Ew.ulSystemTime"],
+                    "dry_run": False,
+                    "write_attempted": False,
+                    "written": False,
+                    "ack_positive": None,
+                    "readback_ok": None,
+                    "readback_tolerance_seconds": CLOCK_SYNC_READBACK_TOLERANCE_SECONDS,
+                    "controller_time_after": None,
+                    "offset_after_seconds": None,
+                    "deauthenticated": None,
+                    "error": None,
+                }
+                auth = self.service.authenticate(session, CLOCK_SYNC_AUTH_LEVEL, None)
+                audit["auth_level_granted"] = getattr(auth, "granted_level", None)
+                granted_password = str(getattr(auth, "pw4", "") or "")
+                if not getattr(auth, "ok", False) or audit["auth_level_granted"] != CLOCK_SYNC_AUTH_LEVEL:
+                    try:
+                        self.service.deauthenticate(session, granted_password)
+                        audit["deauthenticated"] = True
+                    except Exception as exc:
+                        audit["deauthenticated"] = False
+                        raise TransportError(
+                            f"Auth-Level 3 wurde nicht exakt gewährt; Deauth fehlgeschlagen: {exc}"
+                        ) from exc
+                    raise PermissionError("Auth-Level 3 wurde nicht exakt gewährt")
+                operation_error = None
+                deauth_error = None
+                try:
+                    second = self.service.read_block(session, CLOCK_SYNC_BLOCK)
+                    second_payload = bytes(second.payload) if second.ok else b""
+                    if len(second_payload) != CLOCK_SYNC_PAYLOAD_LENGTH:
+                        raise TransportError("Block 50 vor dem Write nicht lesbar")
+                    if second_payload[CLOCK_SYNC_COMMAND_OFFSET] & CLOCK_SYNC_COMMAND_BIT:
+                        raise TransportError("Kommando-Bit 5 vor dem Write gesetzt")
+                    if not stable_block50_equal(first_payload, second_payload):
+                        raise APIRequestConflictError("Block 50 hat sich seit der Prüfung geändert")
+                    write_at = self._utcnow()
+                    target_raw = controller_raw(odm_local_naive(write_at))
+                    after = clock_sync_payload(second_payload, target_raw)
+                    audit["target_raw"] = target_raw
+                    audit["before_hex"] = second_payload.hex(" ").upper()
+                    audit["after_hex"] = after.hex(" ").upper()
+                    audit["write_attempted"] = True
+                    record["write_attempted"] = True
+                    response = session.write_block(
+                        CLOCK_SYNC_BLOCK, after, packet=None, timeout=self.service.timeout
+                    )
+                    audit["ack_positive"] = bool(
+                        getattr(getattr(response, "ack", None), "positive", False)
+                    )
+                    if not audit["ack_positive"]:
+                        raise TransportError("Uhr-Write erhielt kein positives ACK")
+                    audit["written"] = True
+                    readback = self.service.read_block(session, CLOCK_SYNC_BLOCK)
+                    readback_at = self._utcnow()
+                    readback_payload = bytes(readback.payload) if readback.ok else b""
+                    if len(readback_payload) != CLOCK_SYNC_PAYLOAD_LENGTH:
+                        raise TransportError("Readback Block 50 nicht lesbar")
+                    controller_after = controller_naive(decode_controller_time(readback_payload))
+                    offset_after = int(round(
+                        (controller_after - odm_local_naive(readback_at)).total_seconds()
+                    ))
+                    audit["controller_time_after"] = controller_after.isoformat()
+                    audit["offset_after_seconds"] = offset_after
+                    record["controller_time_after"] = controller_after.isoformat()
+                    record["offset_after_seconds"] = offset_after
+                    if readback_payload[CLOCK_SYNC_COMMAND_OFFSET] & CLOCK_SYNC_COMMAND_BIT:
+                        raise TransportError(
+                            "Kommando-Bit 5 nach dem Write noch gesetzt; Firmware hat die Uhr nicht übernommen"
+                        )
+                    if not stable_block50_equal(second_payload, readback_payload):
+                        raise TransportError("Block 50 nach dem Write in weiteren Bytes verändert")
+                    audit["readback_ok"] = abs(offset_after) <= CLOCK_SYNC_READBACK_TOLERANCE_SECONDS
+                    if not audit["readback_ok"]:
+                        raise TransportError(
+                            f"Readback: Versatz {offset_after:+d} s außerhalb ±"
+                            f"{CLOCK_SYNC_READBACK_TOLERANCE_SECONDS} s"
+                        )
+                except Exception as exc:
+                    operation_error = exc
+                finally:
+                    try:
+                        self.service.deauthenticate(session, granted_password)
+                        audit["deauthenticated"] = True
+                    except Exception as exc:
+                        audit["deauthenticated"] = False
+                        deauth_error = exc
+                if operation_error is not None:
+                    if deauth_error is not None:
+                        raise TransportError(
+                            f"{operation_error}; zusätzlich Deauth fehlgeschlagen: {deauth_error}"
+                        ) from operation_error
+                    raise operation_error
+                if deauth_error is not None:
+                    raise TransportError(f"MSR2-Deauth fehlgeschlagen: {deauth_error}")
+        except Exception as exc:
+            if audit is None:
+                return finish("fehlgeschlagen", str(exc))
+            audit["error"] = str(exc)
+            self.store.audit(recorded_at, username, CLOCK_SYNC_BLOCK, audit)
+            record["audit_written"] = True
+            confirmed = bool(audit.get("readback_ok"))
+            record["uncertain"] = bool(audit["write_attempted"]) and not confirmed
+            if record["uncertain"] and trigger == "auto":
+                self._disable_clock_sync("Uhr-Write unsicher; Automatik bis zur Prüfung ausgeschaltet")
+            return finish("fehlgeschlagen", str(exc))
+        self.store.audit(recorded_at, username, CLOCK_SYNC_BLOCK, audit)
+        record["audit_written"] = True
+        return finish(
+            "synchronisiert",
+            f"Versatz {record['offset_before_seconds']:+d} s → {record['offset_after_seconds']:+d} s",
+        )
+
+    def _disable_clock_sync(self, reason: str) -> None:
+        with self.state_lock:
+            stored = {**self.clock_sync_config, "enabled": False,
+                      "updated_by": CONTROLLER_AUTOMATION_USER, "updated_at": _now(),
+                      "disabled_reason": reason}
+            self.clock_sync_config = stored
+        write_json_atomic(self.clock_sync_settings_path, {"version": 1, **stored})
+
+    def _controller_clock_sync_summary(self) -> dict:
+        with self.state_lock:
+            settings = self.clock_sync_config
+            last = self.clock_sync_state.get("last_run") or {}
+            return {
+                "enabled": bool(settings.get("enabled")),
+                "time": settings.get("time"),
+                "disabled_reason": settings.get("disabled_reason"),
+                "last_result": last.get("result"),
+                "last_at": last.get("at"),
+                "last_reason": last.get("reason"),
+            }
+
+    # --- B) Automatische Rücksetzung 0x0f0e ---------------------------------
+    def _runtime_auto_reset_summary(self) -> dict:
+        with self.state_lock:
+            settings = self.runtime_auto_config
+            live = dict(self.runtime_auto_live)
+            last = self.runtime_auto_state.get("last_result") or {}
+            return {
+                "enabled": bool(settings.get("enabled")),
+                "threshold_seconds": settings.get("threshold_seconds"),
+                "target_seconds": settings.get("target_seconds"),
+                "max_resets_per_run": settings.get("max_resets_per_run"),
+                "disabled_reason": settings.get("disabled_reason"),
+                "phase": live.get("phase"),
+                "reason": live.get("reason"),
+                "last_result": last.get("result"),
+                "last_at": last.get("at"),
+            }
+
+    def runtime_auto_reset_status(self) -> dict:
+        with self.state_lock:
+            settings = dict(self.runtime_auto_config)
+            state = json.loads(json.dumps(self.runtime_auto_state))
+            status = dict(self.runtime_auto_live)
+        minutes = self._cached_min_runtime_minutes()
+        run_key = None
+        with suppress(Exception):
+            run_key = self.real_runtime().get("run_key")
+        resets = int(state.get("resets_in_run") or 0) if state.get("run_key") == run_key and run_key else 0
+        return {
+            "schema": "open-dachs-runtime-auto-reset/v1",
+            "settings": settings,
+            "phase": status.get("phase", "disabled" if not settings["enabled"] else "watching"),
+            "reason": status.get("reason"),
+            "checked_at": status.get("checked_at"),
+            "last_write_at": state.get("last_write_at"),
+            "last_result": state.get("last_result"),
+            "resets_in_run": resets,
+            "run_key": run_key,
+            "limits": {
+                "min_target_seconds": runtime_auto_min_target(minutes),
+                "min_runtime_minutes": minutes,
+                "universal_target_seconds": RUNTIME_AUTO_UNIVERSAL_TARGET_SECONDS,
+                "min_gap_seconds": RUNTIME_AUTO_MIN_GAP_SECONDS,
+                "max_threshold_seconds": RUNTIME_AUTO_MAX_THRESHOLD_SECONDS,
+                "max_resets_per_run": RUNTIME_AUTO_MAX_RESETS,
+                "rate_limit_seconds": RUNTIME_AUTO_RATE_LIMIT_SECONDS,
+            },
+            "defaults": dict(RUNTIME_AUTO_DEFAULTS),
+        }
+
+    def set_runtime_auto_reset_settings(self, username: str, payload: object) -> dict:
+        if not isinstance(payload, dict):
+            raise ValueError("Regel für die automatische Rücksetzung fehlt")
+        forbidden = sorted({"auth_level", "pass4", "pw4", "address"}.intersection(payload))
+        if forbidden:
+            raise ValueError("unzulässige Felder: " + ", ".join(forbidden))
+        minutes = self._cached_min_runtime_minutes()
+        rule = normalize_runtime_auto_rule(payload, minutes)
+        with self.state_lock:
+            was_enabled = bool(self.runtime_auto_config.get("enabled"))
+        if rule["enabled"] and not was_enabled and payload.get("acknowledge") is not True:
+            raise ValueError(
+                "Aktivieren erfordert die Bestätigung, dass ODM den Zähler 0x0f0e ohne "
+                "Bediener mit Auth 3 schreiben darf"
+            )
+        stored = {
+            **rule,
+            "min_runtime_minutes_at_save": minutes,
+            "updated_by": str(username),
+            "updated_at": _now(),
+            "disabled_reason": None,
+        }
+        write_json_atomic(self.runtime_auto_settings_path, {"version": 1, **stored})
+        with self.state_lock:
+            self.runtime_auto_config = stored
+            self.runtime_auto_live = {
+                "phase": "watching" if rule["enabled"] else "disabled",
+                "reason": None,
+                "checked_at": _now(),
+            }
+            history = list(self.runtime_auto_state.get("changes") or [])[-19:]
+            history.append({
+                "at": stored["updated_at"], "by": stored["updated_by"],
+                "enabled": rule["enabled"], "rule": {k: rule[k] for k in (
+                    "threshold_seconds", "target_seconds", "max_resets_per_run")},
+            })
+            self.runtime_auto_state["changes"] = history
+        self._save_runtime_auto_state()
+        return self.runtime_auto_reset_status()
+
+    def _save_runtime_auto_state(self) -> None:
+        with self.state_lock:
+            state = json.loads(json.dumps(self.runtime_auto_state))
+        write_json_atomic(self.runtime_auto_state_path, {"version": 1, **state})
+
+    def _disable_runtime_auto(self, reason: str) -> None:
+        with self.state_lock:
+            stored = {**self.runtime_auto_config, "enabled": False,
+                      "updated_by": CONTROLLER_AUTOMATION_USER, "updated_at": _now(),
+                      "disabled_reason": reason}
+            self.runtime_auto_config = stored
+        write_json_atomic(self.runtime_auto_settings_path, {"version": 1, **stored})
+
+    def _set_runtime_auto_live(self, phase: str, reason: str | None) -> dict:
+        live = {"phase": phase, "reason": reason, "checked_at": _now()}
+        with self.state_lock:
+            self.runtime_auto_live = live
+        return live
+
+    def _runtime_auto_reset_tick(self) -> dict:
+        with self.automation_lock:
+            return self._runtime_auto_reset_locked()
+
+    def _runtime_auto_reset_locked(self) -> dict:
+        now = self._utcnow()
+        with self.state_lock:
+            settings = dict(self.runtime_auto_config)
+            state = json.loads(json.dumps(self.runtime_auto_state))
+            runtime = dict(self.runtime_24h)
+            serial_enabled = self.serial_enabled
+        counter = None
+        if runtime.get("available") is True and runtime.get("counter_seconds") is not None:
+            recorded = DachsStore._parse_recorded_at(runtime.get("recorded_at"))
+            if recorded is not None and 0 <= (now - recorded).total_seconds() <= RUNTIME_AUTO_COUNTER_MAX_AGE_SECONDS:
+                counter = int(runtime["counter_seconds"])
+        real = self.real_runtime()
+        run_key = real.get("run_key") if real.get("running") else None
+        phase, reason = runtime_auto_precheck(settings, state, counter, run_key, now)
+        if phase != "due":
+            return self._set_runtime_auto_live(phase, reason)
+        if time.monotonic() < self._runtime_auto_backoff_until:
+            with self.state_lock:
+                previous = self.runtime_auto_live.get("reason")
+            return self._set_runtime_auto_live("blocked", previous or "Wartezeit nach abgelehnter Prüfung")
+        if not serial_enabled:
+            return self._set_runtime_auto_live("blocked", "serielle Verbindung ist getrennt")
+        target = int(settings["target_seconds"])
+        rule = {key: settings[key] for key in ("threshold_seconds", "target_seconds", "max_resets_per_run")}
+        recorded_at = _now()
+        used = int(state.get("resets_in_run") or 0) if state.get("run_key") == run_key and run_key else 0
+        audit = {
+            "operation": "runtime-auto-reset",
+            "key": "CPU0.RAM.0x000f0e",
+            "cpu": 0,
+            "address": "0x000f0e",
+            "volatile_ram_only": True,
+            "nvm_write": False,
+            "flag_write": False,
+            "rule": rule,
+            "run_key": run_key,
+            "reset_index_in_run": used + 1,
+            "eligibility": None,
+            "auth_level_requested": RUNTIME_24H_WRITE_AUTH_LEVEL,
+            "auth_level_granted": None,
+            "prewrite_counter": None,
+            "readback_tolerance_seconds": RUNTIME_24H_READBACK_TOLERANCE_SECONDS,
+            "before_hex": "",
+            "after_hex": target.to_bytes(4, "little").hex(),
+            "changed_keys": ["CPU0.RAM.0x000f0e"],
+            "dry_run": False,
+            "changed": True,
+            "write_attempted": False,
+            "written": False,
+            "ack_positive": None,
+            "readback_ok": None,
+            "readback_scope": "exact-service-0x02",
+            "readback_attempts": 0,
+            "deauthenticated": None,
+            "error": None,
+        }
+        attempted = False
+        try:
+            with self.serial_lock, self.service.session() as session:
+                _p24, raws24 = self._read_block_raws(session, MOTOR_STATUS_BLOCK)
+                _p22, raws22 = self._read_block_raws(session, 22)
+                manual = self._read_ram_fields(session, (RUNTIME_AUTO_MANUAL_MODE_FIELD,), recorded_at)[
+                    RUNTIME_AUTO_MANUAL_MODE_FIELD["key"]
+                ]
+                block50 = self.service.read_block(session, CLOCK_SYNC_BLOCK)
+                block50_payload = bytes(block50.payload) if block50.ok else b""
+                minutes = (
+                    int(block50_payload[RUNTIME_AUTO_MIN_RUNTIME_OFFSET])
+                    if len(block50_payload) == CLOCK_SYNC_PAYLOAD_LENGTH
+                    else None
+                )
+                current = self._read_runtime_24h(session, recorded_at)
+                counter_now = int(current["counter_seconds"])
+                # Re-read the motor state immediately before authentication.
+                _p24b, raws24b = self._read_block_raws(session, MOTOR_STATUS_BLOCK)
+                statuses = [raws24.get(MOTOR_STATUS_KEY), raws24b.get(MOTOR_STATUS_KEY)]
+                motor_status = None if None in statuses else min(statuses)
+                eligibility = {
+                    "motor_status": statuses,
+                    "service_code": raws22.get("Hka_Bd.bStoerung"),
+                    "manual_mode": manual.get("value") if manual.get("available") else None,
+                    "min_runtime_minutes": minutes,
+                    "counter_seconds": counter_now,
+                    "validated_samples": int(current.get("validated_samples") or 0),
+                }
+                audit["eligibility"] = eligibility
+                audit["prewrite_counter"] = counter_now
+                audit["before_hex"] = counter_now.to_bytes(4, "little").hex()
+                block_reason = runtime_auto_eligibility(
+                    settings,
+                    motor_status=motor_status,
+                    service_code=eligibility["service_code"],
+                    manual_mode=eligibility["manual_mode"],
+                    min_runtime_minutes=minutes,
+                    counter_seconds=counter_now,
+                )
+                if block_reason:
+                    self._runtime_auto_backoff_until = time.monotonic() + RUNTIME_AUTO_BACKOFF_SECONDS
+                    return self._set_runtime_auto_live("blocked", block_reason)
+                # Persist the attempt before authenticating: rate limit and
+                # per-run count hold even if the process dies mid-write.
+                attempted = True
+                with self.state_lock:
+                    self.runtime_auto_state.update({
+                        "last_write_at": now.isoformat(),
+                        "run_key": run_key,
+                        "resets_in_run": used + 1,
+                        "last_result": {"at": now.isoformat(), "result": "läuft", "rule": rule},
+                    })
+                self._save_runtime_auto_state()
+                self._set_runtime_auto_live("executing", None)
+                readback = self._runtime_24h_guarded_write(session, target, audit)
+                with self.state_lock:
+                    self.runtime_24h = {**readback, "error": None}
+        except Exception as exc:
+            if not attempted:
+                self._runtime_auto_backoff_until = time.monotonic() + RUNTIME_AUTO_BACKOFF_SECONDS
+                return self._set_runtime_auto_live("blocked", f"Prüfung fehlgeschlagen: {exc}")
+            audit["error"] = str(exc)
+            self.store.audit(recorded_at, CONTROLLER_AUTOMATION_USER, 0, audit)
+            uncertain = bool(audit["write_attempted"]) and not audit.get("readback_ok")
+            cleanup_failed = audit.get("deauthenticated") is False
+            with self.state_lock:
+                self.runtime_auto_state["last_result"] = {
+                    "at": now.isoformat(), "result": "fehlgeschlagen", "rule": rule,
+                    "error": str(exc), "uncertain": uncertain, "cleanup_failed": cleanup_failed,
+                }
+            self._save_runtime_auto_state()
+            if uncertain or cleanup_failed:
+                self._disable_runtime_auto(
+                    "Write/Deauth unsicher; Automatik bis zur Prüfung ausgeschaltet"
+                )
+                return self._set_runtime_auto_live("blocked", "unsicher: " + str(exc))
+            return self._set_runtime_auto_live("blocked", str(exc))
+        self.store.audit(recorded_at, CONTROLLER_AUTOMATION_USER, 0, {**audit, **readback})
+        with self.state_lock:
+            self.runtime_auto_state["last_result"] = {
+                "at": now.isoformat(), "result": "gesetzt", "rule": rule,
+                "before": audit["prewrite_counter"], "after": readback.get("counter_seconds"),
+                "reset_index_in_run": used + 1,
+            }
+        self._save_runtime_auto_state()
+        return self._set_runtime_auto_live("confirmed", None)
+
+    # --- C) Echte Laufzeit seit Start ---------------------------------------
+    def real_runtime(self) -> dict:
+        now = self._utcnow()
+        now_mono = time.monotonic()
+        with self.state_lock:
+            status_row = self.live_values.get((MOTOR_STATUS_BLOCK, MOTOR_STATUS_KEY))
+            seconds_row = self.live_values.get((22, "Hka_Bd.ulBetriebssekunden"))
+            counter_row = self.live_values.get((24, "Hka_Mw1.ulMotorlaufsekunden"))
+            runtime = dict(self.runtime_24h)
+            cached = self._real_runtime_history_cache
+
+        def fresh_raw(row) -> int | None:
+            if not row:
+                return None
+            recorded = DachsStore._parse_recorded_at(row.get("recorded_at"))
+            if recorded is None or not 0 <= (now - recorded).total_seconds() <= REAL_RUNTIME_LIVE_MAX_AGE_SECONDS:
+                return None
+            raw = row.get("raw")
+            if isinstance(raw, bool):
+                return None
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return None
+
+        motor_status = fresh_raw(status_row)
+        counter = fresh_raw(counter_row)
+        if counter is None and runtime.get("available") is True and runtime.get("counter_seconds") is not None:
+            counter = int(runtime["counter_seconds"])
+        if cached is None or now_mono - cached[0] > REAL_RUNTIME_CACHE_SECONDS or cached[2] != motor_status:
+            try:
+                history = self.store.real_runtime_history()
+            except Exception as exc:
+                return {**real_runtime_status(
+                    now_utc=now, motor_status=None, history={},
+                    operating_seconds_now=None, counter_0f0e=counter,
+                ), "error": f"Historie: {exc}"}
+            with self.state_lock:
+                self._real_runtime_history_cache = (now_mono, history, motor_status)
+        else:
+            history = cached[1]
+        return real_runtime_status(
+            now_utc=now,
+            motor_status=motor_status,
+            history=history,
+            operating_seconds_now=fresh_raw(seconds_row),
+            counter_0f0e=counter,
+        )
+
+    def _automation_loop(self) -> None:
+        while not self.stop_event.wait(AUTOMATION_TICK_SECONDS):
+            try:
+                self._clock_sync_tick()
+            except Exception as exc:
+                with self.state_lock:
+                    self.clock_sync_state["tick_error"] = str(exc)
+            try:
+                self._runtime_auto_reset_tick()
+            except Exception as exc:
+                self._set_runtime_auto_live("blocked", f"interner Fehler: {exc}")
+
     def write_block(self, username: str, block: int, changes: list[dict], auth_level: int, pass4: str, write_enabled: bool) -> dict:
         if not isinstance(write_enabled, bool):
             raise ValueError("write_enabled muss true oder false sein")
@@ -5353,6 +11204,7 @@ class DachsWebApp:
                     raise KeyError(f"Feld {key!r} ist in Block {block} nicht vorhanden")
                 self.pack.encode_value(after, key, str(change.get("value", "")), block=block)
                 changed_keys.append(key)
+            validate_generic_write_payload(0, block, before, bytes(after))
             self._validate_power_target_changes(session, block, changes, bytes(after))
             if write_enabled and auth_level >= 0 and bytes(after) != before:
                 auth = self.service.authenticate(session, auth_level, pass4 or None)
@@ -5773,6 +11625,29 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     if user.get("role") != "admin":
                         return self._error(403, "admin role required")
                     return self._json(self.app.local_access_settings())
+                if path == "/api/settings/email-notifications":
+                    if user.get("role") != "admin":
+                        return self._error(403, "admin role required")
+                    return self._json(self.app.email_notification_settings())
+                if path == "/api/update/status":
+                    status = self.app.update_manager.public_status()
+                    if user.get("role") != "admin" or self.local_access:
+                        release = status.get("available")
+                        status = {
+                            "schema": status["schema"],
+                            "current_version": status["current_version"],
+                            "checked_at": status.get("checked_at"),
+                            "update_available": bool(release),
+                            "target_version": release.get("version") if release else None,
+                            "error": status.get("error"),
+                        }
+                    return self._json(status)
+                if path == "/api/notifications/outbox":
+                    if user.get("role") != "admin":
+                        return self._error(403, "admin role required")
+                    query = parse_qs(parsed.query)
+                    limit = int(query.get("limit", ["50"])[0])
+                    return self._json(self.app.email_notification_outbox(limit))
                 if path == "/api/users":
                     if user.get("role") != "admin":
                         return self._error(403, "admin role required")
@@ -5828,6 +11703,34 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     if user.get("role") != "admin":
                         return self._error(403, "admin role required")
                     return self._json(self.app.auth_preview())
+                if path == "/api/service-reset/preview":
+                    if user.get("role") != "admin":
+                        return self._error(403, "admin role required")
+                    return self._json(self.app.service_reset_preview(user["username"]))
+                if path == "/api/dachs-control/preview":
+                    if user.get("role") != "admin":
+                        return self._error(403, "admin role required")
+                    query = parse_qs(parsed.query)
+                    action = query.get("action", [""])[0]
+                    return self._json(
+                        self.app.dachs_control_preview(user["username"], action)
+                    )
+                if path == "/api/runtime-24h/write-preview":
+                    if user.get("role") != "admin":
+                        return self._error(403, "admin role required")
+                    return self._json(self.app.runtime_24h_write_preview())
+                if path == "/api/sc123-temperature-limit":
+                    if user.get("role") != "admin":
+                        return self._error(403, "admin role required")
+                    return self._json(self.app.sc123_temperature_limit_status())
+                if path == "/api/controller-clock/sync":
+                    if user.get("role") != "admin":
+                        return self._error(403, "admin role required")
+                    return self._json(self.app.controller_clock_sync_status())
+                if path == "/api/runtime-auto-reset":
+                    if user.get("role") != "admin":
+                        return self._error(403, "admin role required")
+                    return self._json(self.app.runtime_auto_reset_status())
                 if path == "/api/history-batch":
                     query = parse_qs(parsed.query)
                     try:
@@ -5838,6 +11741,7 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                         raise ValueError("Diagrammserien müssen zwischen 1 und 16 Einträge enthalten")
                     requests: list[tuple[str, int, str]] = []
                     seen_ids: set[str] = set()
+                    derived_ids: list[str] = []
                     for item in requested:
                         if not isinstance(item, dict):
                             raise ValueError("ungültige Diagrammserie")
@@ -5849,13 +11753,18 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                             block = validate_block(int(item.get("block")))
                         except (TypeError, ValueError) as exc:
                             raise ValueError("ungültiger Diagrammblock") from exc
+                        seen_ids.add(series_id)
+                        if (block, key) == (HISTORY_REAL_RUNTIME_SERIES["block"], HISTORY_REAL_RUNTIME_SERIES["key"]):
+                            derived_ids.append(series_id)
+                            continue
                         if key not in self.app.pack.field_map(block):
                             raise KeyError(f"unknown field: {key}")
-                        seen_ids.add(series_id)
                         requests.append((series_id, block, key))
                     limit = min(HISTORY_MAX_POINTS, max(1, int(query.get("limit", [str(HISTORY_MAX_POINTS)])[0])))
                     start, end, duration = _history_bounds(query)
                     points = self.app.store.measurements_batch(requests, start, end, limit)
+                    for series_id in derived_ids:
+                        points[series_id] = self.app.store.real_runtime_series(start, end, limit)
                     return self._json({
                         "series": points,
                         "from": start.isoformat(),
@@ -5873,6 +11782,13 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                         "backfill_complete": self.app.store.history_migration(
                             MOTOR_STATUS_MIGRATION
                         ) is not None,
+                    })
+                if path == "/api/display-status/events":
+                    query = parse_qs(parsed.query)
+                    limit = int(query.get("limit", [str(DISPLAY_STATUS_EVENT_LIMIT)])[0])
+                    return self._json({
+                        "schema": "open-dachs-display-status-events/v1",
+                        "items": self.app.store.display_status_events(limit),
                     })
                 if path == "/api/diagnosis/250h":
                     query = parse_qs(parsed.query)
@@ -6024,6 +11940,109 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                 if self._require(admin=True) is None:
                     return
                 return self._json(self.app.set_local_access_settings(payload))
+            if path == "/api/settings/email-notifications":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                if self.local_access:
+                    return self._error(403, "SMTP-Secrets dürfen nicht über lokalen Override geändert werden")
+                if self.headers.get("X-Open-Dachs-Request") != "1":
+                    return self._error(403, "missing Open Dachs request guard")
+                return self._json(
+                    self.app.set_email_notification_settings(payload, user["username"])
+                )
+            if path == "/api/update/check":
+                if self._require(admin=True) is None:
+                    return
+                if self.headers.get("X-Open-Dachs-Request") != "1":
+                    return self._error(403, "missing Open Dachs request guard")
+                if self.local_access:
+                    return self._error(403, "Updatedetails erfordern einen normalen Admin-Login")
+                if payload:
+                    raise ValueError("Updateprüfung erwartet ein leeres JSON-Objekt")
+                return self._json(self.app.update_manager.check(force=True))
+            if path == "/api/update/settings":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                if self.headers.get("X-Open-Dachs-Request") != "1":
+                    return self._error(403, "missing Open Dachs request guard")
+                required = {"automatic", "timezone", "window_start", "window_end", "password", "acknowledge"}
+                if set(payload) != required or type(payload.get("acknowledge")) is not bool:
+                    raise ValueError("Updateeinstellung erwartet ein striktes Reauth-/Bestätigungspayload")
+                enabling = payload.get("automatic") is True
+                password_ok = bool(
+                    enabling and payload.get("acknowledge") is True
+                    and self.app.verify_admin_password(
+                        user["username"], str(payload.get("password") or "")
+                    )
+                )
+                settings = {
+                    key: payload[key]
+                    for key in ("automatic", "timezone", "window_start", "window_end")
+                }
+                result = self.app.update_manager.save_settings(
+                    settings, local_access=self.local_access, password_ok=password_ok
+                )
+                self.app.store.update_audit(
+                    _now(), user["username"], "settings", None, None,
+                    {"automatic": bool(settings["automatic"]),
+                     "reauthenticated": password_ok, "local_access": self.local_access},
+                )
+                return self._json(result)
+            if path == "/api/update/preview":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                if self.headers.get("X-Open-Dachs-Request") != "1":
+                    return self._error(403, "missing Open Dachs request guard")
+                if set(payload) != {"password"}:
+                    raise ValueError("Updatevorschau erwartet exakt password")
+                password_ok = self.app.verify_admin_password(
+                    user["username"], str(payload.get("password") or "")
+                )
+                session_nonce, auth_epoch = self.app.session_update_identity(self._token())
+                return self._json(
+                    self.app.update_manager.preview_update(
+                        user["username"], password_ok,
+                        local_access=self.local_access,
+                        session_nonce=session_nonce, auth_epoch=auth_epoch,
+                    )
+                )
+            if path == "/api/update/apply":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                if self.headers.get("X-Open-Dachs-Request") != "1":
+                    return self._error(403, "missing Open Dachs request guard")
+                session_nonce, auth_epoch = self.app.session_update_identity(self._token())
+                operation = self.app.update_manager.apply(
+                    user["username"], payload, local_access=self.local_access,
+                    session_nonce=session_nonce, auth_epoch=auth_epoch,
+                )
+                self.app.store.update_audit(
+                    _now(), user["username"], "apply-request",
+                    operation["request_id"], operation["version"], {
+                        "automatic": False, "controller_written": False,
+                        "auth_used": False, "serial_session_opened": False,
+                    },
+                )
+                return self._json(operation, status=202)
+            if path == "/api/notifications/test":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                if self.local_access:
+                    return self._error(403, "Testmail ist über lokalen Override gesperrt")
+                if self.headers.get("X-Open-Dachs-Request") != "1":
+                    return self._error(403, "missing Open Dachs request guard")
+                if set(payload) != {"request_id"}:
+                    raise ValueError("Testmail-Anfrage erlaubt nur request_id")
+                return self._json(
+                    self.app.test_email_notification(
+                        user["username"], str(payload.get("request_id") or "")
+                    )
+                )
             if path == "/api/users":
                 if self._require(admin=True) is None:
                     return
@@ -6070,11 +12089,153 @@ class DachsRequestHandler(http.server.BaseHTTPRequestHandler):
                     user["username"], payload.get("value", ""),
                 )
                 return self._json(result, status=502 if result.get("error") else 200)
+            if path == "/api/service-reset":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                if not isinstance(payload, dict):
+                    raise ValueError("Entstörung: JSON-Objekt erforderlich")
+                unexpected = sorted(
+                    set(payload).difference({
+                        "confirm", "expected_service_code", "request_token",
+                    })
+                )
+                if unexpected:
+                    raise ValueError(
+                        "Entstörung: unzulässige Felder: " + ", ".join(unexpected)
+                    )
+                result = self.app.reset_service_code(
+                    user["username"],
+                    payload.get("expected_service_code"),
+                    payload.get("confirm"),
+                    payload.get("request_token"),
+                )
+                status = 200 if result.get("ok") else 409 if result.get("conflict") else 502
+                return self._json(result, status=status)
+            if path == "/api/dachs-control":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                if not isinstance(payload, dict):
+                    raise ValueError("Dachs Ein/Aus: JSON-Objekt erforderlich")
+                unexpected = sorted(
+                    set(payload).difference({"action", "confirm", "request_token"})
+                )
+                if unexpected:
+                    raise ValueError(
+                        "Dachs Ein/Aus: unzulässige Felder: " + ", ".join(unexpected)
+                    )
+                result = self.app.set_dachs_control(
+                    user["username"],
+                    payload.get("action"),
+                    payload.get("confirm"),
+                    payload.get("request_token"),
+                )
+                status = (
+                    200
+                    if result.get("ok")
+                    else 409
+                    if result.get("conflict")
+                    else 502
+                )
+                return self._json(result, status=status)
+            if path == "/api/sc123-temperature-limit/preview":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                if not isinstance(payload, dict):
+                    raise ValueError("SC123-Grenze: JSON-Objekt erforderlich")
+                unexpected = sorted(set(payload).difference({"value"}))
+                if unexpected:
+                    raise ValueError(
+                        "SC123-Grenze: unzulässige Felder: "
+                        + ", ".join(unexpected)
+                    )
+                return self._json(
+                    self.app.sc123_temperature_limit_preview(
+                        user["username"], payload.get("value")
+                    )
+                )
+            if path == "/api/sc123-temperature-limit":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                if not isinstance(payload, dict):
+                    raise ValueError("SC123-Grenze: JSON-Objekt erforderlich")
+                allowed = {"value", "confirm", "write_enabled", "request_token"}
+                unexpected = sorted(set(payload).difference(allowed))
+                if unexpected:
+                    raise ValueError(
+                        "SC123-Grenze: unzulässige Felder: "
+                        + ", ".join(unexpected)
+                    )
+                result = self.app.set_sc123_temperature_limit(
+                    user["username"],
+                    payload.get("value"),
+                    payload.get("confirm"),
+                    payload.get("write_enabled"),
+                    payload.get("request_token"),
+                )
+                return self._json(result, status=200 if result.get("ok") else 502)
+            if path == "/api/controller-clock/sync/settings":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                return self._json(
+                    self.app.set_controller_clock_sync_settings(user["username"], payload)
+                )
+            if path == "/api/controller-clock/sync":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                forbidden = sorted({"auth_level", "pass4", "pw4", "target", "value"}.intersection(payload))
+                if forbidden:
+                    raise ValueError("unzulässige Felder: " + ", ".join(forbidden))
+                if payload.get("confirm") is not True:
+                    raise ValueError("Uhrabgleich muss ausdrücklich bestätigt werden")
+                result = self.app.sync_controller_clock(user["username"], "manual")
+                return self._json(result, status=502 if result.get("result") == "fehlgeschlagen" else 200)
+            if path == "/api/runtime-auto-reset":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                return self._json(
+                    self.app.set_runtime_auto_reset_settings(user["username"], payload)
+                )
+            if path == "/api/runtime-24h/counter":
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                forbidden = sorted(
+                    {"auth_level", "pass4", "confirmation"}.intersection(payload)
+                )
+                if forbidden:
+                    raise ValueError(
+                        "24-h-Zähler: clientseitige Auth-/Bestätigungsfelder sind nicht zulässig: "
+                        + ", ".join(forbidden)
+                    )
+                return self._json(self.app.set_runtime_24h_counter(
+                    user["username"],
+                    payload.get("value", ""),
+                    payload.get("expected_counter"),
+                    payload.get("write_enabled", False),
+                ))
             if path == "/api/maintenance/reports":
                 user = self._require(admin=True)
                 if user is None:
                     return
                 return self._json(self.app.create_maintenance_report(user["username"]))
+            intermediate_match = re.fullmatch(
+                r"/api/maintenance/reports/(\d+)/complete-local-intermediate", path
+            )
+            if intermediate_match:
+                user = self._require(admin=True)
+                if user is None:
+                    return
+                return self._json(self.app.complete_local_intermediate_maintenance(
+                    user["username"], int(intermediate_match.group(1)),
+                    dict(payload.get("protocol") or {}), str(payload.get("reason", "")),
+                ))
             completion_match = re.fullmatch(r"/api/maintenance/reports/(\d+)/complete", path)
             if completion_match:
                 user = self._require(admin=True)
@@ -6391,6 +12552,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("OPEN_DACHS_MAINTENANCE_LIVE_WRITES", "0").strip().lower() in {"1", "true", "yes", "on"},
         help="enable the real block-100/block-104 maintenance completion; default is safe demo mode",
     )
+    parser.add_argument(
+        "--service-reset-temperature-policy-approved",
+        action="store_true",
+        default=os.environ.get(
+            "OPEN_DACHS_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"},
+        help=(
+            "enable manual service-code reset only after the installation-specific "
+            "temperature/restart policy has been reviewed; default is fail-closed"
+        ),
+    )
     return parser
 
 
@@ -6406,6 +12578,9 @@ def main(argv: list[str] | None = None) -> int:
         history_interval=args.history_interval,
         serial_socket=args.serial_socket,
         maintenance_live_writes=args.maintenance_live_writes,
+        service_reset_temperature_policy_approved=(
+            args.service_reset_temperature_policy_approved
+        ),
     )
     base_path = normalize_base_path(args.base_path)
     server = DachsHTTPServer((args.host, args.web_port), app, base_path=base_path)

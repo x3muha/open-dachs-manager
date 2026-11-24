@@ -1,0 +1,23 @@
+[Unit]
+Description=Apply one verified Open Dachs Manager release
+ConditionPathExists=/var/lib/open-dachs-manager/update-request.json
+After=local-fs.target network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/libexec/open-dachs-update-helper
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/open-dachs-manager /var/lib/open-dachs-manager-updater /var/lib/open-dachs-manager /run/open-dachs-manager-updater
+RuntimeDirectory=open-dachs-manager-updater
+RuntimeDirectoryMode=0700
+TimeoutStartSec=30min
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native

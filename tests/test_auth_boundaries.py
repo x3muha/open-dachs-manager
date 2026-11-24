@@ -4,9 +4,9 @@ from contextlib import contextmanager, redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from open_dachs_manager import cli
+from open_dachs_manager import cli, tui
 from open_dachs_manager.auth import validate_auth_level
-from open_dachs_manager.mapping import PackRepository
+from open_dachs_manager.mapping import PackRepository, WriteAllowlist
 from open_dachs_manager.tui import run_tui
 
 
@@ -47,6 +47,16 @@ class LevelFiveService:
 
     def read_block(self, _session, block):
         return SimpleNamespace(ok=True, status=150, payload=bytes(70), block=block)
+
+
+class ProtectedWriteService(LevelFiveService):
+    def __init__(self):
+        super().__init__()
+        self.write_calls = 0
+
+    def write_payload(self, *_args, **_kwargs):
+        self.write_calls += 1
+        raise AssertionError("protected SC123 payload reached generic write service")
 
 
 class AuthSurfaceBoundaryTests(unittest.TestCase):
@@ -114,6 +124,47 @@ class AuthSurfaceBoundaryTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "zwischen 1 und 5"):
                         run_tui(service, args)
                     self.assertEqual(service.session_entries, 0)
+
+    def test_cli_rejects_protected_sc123_byte_before_authentication(self):
+        parser = cli.build_parser()
+        service = ProtectedWriteService()
+        args = parser.parse_args([
+            "write", "apply",
+            "--block", "60",
+            "--key", "Waermef_Ew.Reserve[0]",
+            "--value", "83",
+            "--raw",
+            "--write-enabled",
+            "--auth-level", "3",
+        ])
+        with patch.object(cli, "_service", return_value=service):
+            with self.assertRaisesRegex(PermissionError, "dedizierten SC123-Pfad"):
+                cli._run(args)
+        self.assertEqual(service.auth_levels, [])
+        self.assertEqual(service.write_calls, 0)
+        self.assertEqual(service.session_entries, 1)
+
+    def test_tui_rejects_protected_sc123_byte_before_session_or_auth(self):
+        service = ProtectedWriteService()
+        payload = bytearray(70)
+        payload[40] = 83
+        state = {
+            "block": 60,
+            "baseline": bytes(70),
+            "payload": payload,
+            "changed": {"Waermef_Ew.Reserve[0]"},
+            "write_enabled": True,
+            "auth_level": 3,
+            "pass4": "4567",
+            "allowlist": WriteAllowlist(),
+            "auth": None,
+            "message": "",
+        }
+        with self.assertRaisesRegex(PermissionError, "dedizierten SC123-Pfad"):
+            tui._save(service, state)
+        self.assertEqual(service.auth_levels, [])
+        self.assertEqual(service.write_calls, 0)
+        self.assertEqual(service.session_entries, 0)
 
 
 if __name__ == "__main__":

@@ -21,12 +21,15 @@ from open_dachs_manager.service import (
     BACKUP_PAYLOAD_LENGTHS,
     BACKUP_TARGETS,
     DachsService,
+    protected_sc123_write_offsets,
     write_json_atomic,
 )
 from open_dachs_manager.maintenance import (
     MAINTENANCE_CONFIRMATION,
     MAINTENANCE_DEMO_CONFIRMATION,
     checklist_definition,
+    fuel_type_from_block24,
+    maintenance_fuel_check,
     maintenance_status,
     report_comparison,
     report_html,
@@ -38,21 +41,39 @@ from open_dachs_manager.maintenance import (
 from open_dachs_manager.web import (
     APIRequestConflictError,
     DASHBOARD_OPERATING_HOURS_PER_START_KEY,
+    DASHBOARD_RUNTIME_24H_KEY,
     DEFAULT_DASHBOARD_SERIES,
     DEFAULT_FAST_MONITOR_BLOCKS,
     DEFAULT_HISTORY_SAMPLE_INTERVAL,
     DEFAULT_SLOW_MONITOR_BLOCKS,
+    OPERATING_HOURS_PER_START_BLOCK,
+    OPERATING_HOURS_PER_START_KEY,
     DachsHTTPServer,
     DachsWebApp,
     DachsStore,
     HISTORY_MEASUREMENT_KEYS,
     HISTORY_SERIES,
     POWER_TARGET_LIMITS_KW,
+    RAM_TELEMETRY_FIELDS,
+    DASHBOARD_RAM_TELEMETRY_KEY,
+    DASHBOARD_SOOT_REGENERATION_KEY,
+    SOOT_REGENERATION_FIELDS,
+    SOOT_REGENERATION_TYPE_BLOCK,
+    SOOT_REGENERATION_TYPE_KEY,
+    soot_regeneration_status,
+    soot_regeneration_supported,
+    RUNTIME_24H_REQUEST,
+    RUNTIME_24H_SHUTDOWN_SECONDS,
     PowerTargetRangeError,
     init_users,
     normalize_base_path,
     operating_hours_per_start,
+    ram_telemetry_request,
+    ram_telemetry_status,
+    ram_telemetry_unavailable,
+    runtime_24h_status,
     soot_filter_estimate,
+    controller_clock_status,
     web_monitor_field_visible,
 )
 from open_dachs_manager.transport import (
@@ -60,6 +81,7 @@ from open_dachs_manager.transport import (
     Frame,
     Response,
     SerialSession,
+    TransportError,
     encode_ack,
     encode_data,
     parse_frame,
@@ -238,39 +260,489 @@ class CoreTests(unittest.TestCase):
             True,
         ))
 
-    def test_operating_hours_per_start_uses_coherent_raw_block_22_counters(self):
-        recorded_at = "2026-08-18T12:00:00+00:00"
+    def test_operating_hours_per_start_uses_native_block_38_value(self):
+        recorded_at = "2026-11-24T09:30:00+00:00"
 
-        def metric(seconds=25_200, starts=1, *, second_time=recorded_at):
+        def metric(raw=38, value=3.8, *, timestamp=recorded_at, block=38, key=None):
             return operating_hours_per_start([
                 {
-                    "block": 22,
-                    "key": "Hka_Bd.ulBetriebssekunden",
-                    "raw": seconds,
-                    "recorded_at": recorded_at,
+                    "block": block,
+                    "key": key or OPERATING_HOURS_PER_START_KEY,
+                    "raw": raw,
+                    "value": value,
+                    "unit": "Bh/Start",
+                    "recorded_at": timestamp,
                 },
-                {
-                    "block": 22,
-                    "key": "Hka_Bd.ulAnzahlStarts",
-                    "raw": starts,
-                    "recorded_at": second_time,
-                },
+                # Former Block-22 inputs must never influence the native value.
+                {"block": 22, "key": "Hka_Bd.ulBetriebssekunden", "raw": 999999},
+                {"block": 22, "key": "Hka_Bd.ulAnzahlStarts", "raw": 1},
             ])
 
-        self.assertEqual(metric()["value"], 7.0)
-        self.assertAlmostEqual(metric(90_000, 3)["value"], 8.3333333333)
-        self.assertEqual(metric(0, 3)["value"], 0.0)
-        for seconds, starts in (
-            (25_200, 0),
-            (-1, 1),
-            (0x1_0000_0000, 1),
-            (1.5, 1),
-            (25_200, True),
+        result = metric()
+        self.assertTrue(result["available"])
+        self.assertEqual(result["value"], 3.8)
+        self.assertEqual(result["raw"], 38)
+        self.assertEqual(result["source_block"], OPERATING_HOURS_PER_START_BLOCK)
+        self.assertEqual(result["source_key"], OPERATING_HOURS_PER_START_KEY)
+        self.assertEqual(result["recorded_at"], recorded_at)
+        for kwargs in (
+            {"raw": -1, "value": -0.1},
+            {"raw": 256, "value": 25.6},
+            {"raw": True, "value": 0.1},
+            {"raw": 38, "value": 3.9},
+            {"raw": 38, "value": float("nan")},
+            {"timestamp": ""},
+            {"block": 22},
+            {"key": "Motbel250[0].bFehlstartfaktor"},
         ):
-            with self.subTest(seconds=seconds, starts=starts):
-                self.assertFalse(metric(seconds, starts)["available"])
-        self.assertFalse(metric(second_time="2026-08-18T12:00:01+00:00")["available"])
+            with self.subTest(kwargs=kwargs):
+                self.assertFalse(metric(**kwargs)["available"])
         self.assertFalse(operating_hours_per_start([])["available"])
+        self.assertIn(OPERATING_HOURS_PER_START_BLOCK, DEFAULT_SLOW_MONITOR_BLOCKS)
+        self.assertTrue(
+            web_monitor_field_visible(
+                OPERATING_HOURS_PER_START_BLOCK, OPERATING_HOURS_PER_START_KEY
+            )
+        )
+        self.assertFalse(
+            web_monitor_field_visible(
+                OPERATING_HOURS_PER_START_BLOCK,
+                "Motbel250[0].bFehlstartfaktor",
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            row = {
+                "block": OPERATING_HOURS_PER_START_BLOCK,
+                "key": OPERATING_HOURS_PER_START_KEY,
+                "label": "Betriebsstunden je Start",
+                "raw": 38,
+                "value": 3.8,
+                "unit": "Bh/Start",
+                "recorded_at": recorded_at,
+            }
+            app.live_values[(
+                OPERATING_HOURS_PER_START_BLOCK, OPERATING_HOURS_PER_START_KEY
+            )] = row
+            live = app.live()
+            self.assertEqual(live["operating_hours_per_start"]["value"], 3.8)
+            self.assertIn(row, live["values"])
+
+    def test_runtime_24h_counter_is_exactly_validated_and_remaining_time_is_clamped(self):
+        def response(counter, *, prefix=b"\x82\x0f\x0e\x04", positive=True):
+            return Response(
+                tx=b"",
+                ack=Frame("ack", 1, b"", positive=positive),
+                data=Frame(
+                    "data", 1, b"", prefix + int(counter).to_bytes(4, "little")
+                ),
+                elapsed_ms=61.27,
+            )
+
+        status = runtime_24h_status(response(1739), "2026-10-24T07:00:00+00:00")
+        self.assertEqual(status["counter_seconds"], 1739)
+        self.assertEqual(status["remaining_run_seconds"], 84631)
+        self.assertEqual(status["shutdown_threshold_seconds"], 86370)
+        self.assertEqual(status["counter_address"], "0x0f0e")
+        self.assertFalse(status["wall_clock_countdown"])
+        self.assertFalse(status["threshold_reached"])
+        self.assertEqual(status["night_shutdown_gate_seconds"], 21600)
+        self.assertEqual(status["remaining_to_night_gate_seconds"], 19861)
+        self.assertFalse(status["night_shutdown_gate_reached"])
+        self.assertEqual(status["rtt_ms"], 61.3)
+
+        reached = runtime_24h_status(
+            response(RUNTIME_24H_SHUTDOWN_SECONDS + 10),
+            "2026-10-24T07:00:01+00:00",
+        )
+        self.assertEqual(reached["remaining_run_seconds"], 0)
+        self.assertTrue(reached["threshold_reached"])
+        self.assertEqual(reached["remaining_to_night_gate_seconds"], 0)
+        self.assertTrue(reached["night_shutdown_gate_reached"])
+        for invalid in (
+            response(1, positive=False),
+            response(1, prefix=b"\x82\x0f\x0f\x04"),
+        ):
+            with self.assertRaises(TransportError):
+                runtime_24h_status(invalid, "2026-10-24T07:00:00+00:00")
+
+    def test_runtime_24h_reader_retries_one_torn_sample_and_uses_cpu_zero(self):
+        class Session:
+            def __init__(self, values=(255, 0, 256)):
+                self.values = iter(values)
+                self.packet = 0
+                self.calls = []
+
+            def next_packet(self):
+                self.packet += 1
+                return self.packet
+
+            def request(self, payload, packet, timeout, cpu):
+                self.calls.append((payload, packet, timeout, cpu))
+                counter = next(self.values)
+                return Response(
+                    tx=b"",
+                    ack=Frame("ack", packet, b"", positive=True),
+                    data=Frame(
+                        "data", packet, b"",
+                        b"\x82\x0f\x0e\x04" + counter.to_bytes(4, "little"),
+                    ),
+                    elapsed_ms=1.0,
+                )
+
+        session = Session()
+        status = DachsWebApp._read_runtime_24h(
+            session, "2026-10-24T07:00:00+00:00"
+        )
+        self.assertEqual(status["counter_seconds"], 256)
+        self.assertEqual(status["validated_samples"], 3)
+        self.assertEqual(
+            session.calls,
+            [
+                (RUNTIME_24H_REQUEST, 1, 0.9, 0),
+                (RUNTIME_24H_REQUEST, 2, 0.9, 0),
+                (RUNTIME_24H_REQUEST, 3, 0.9, 0),
+            ],
+        )
+
+        reset = DachsWebApp._read_runtime_24h(
+            Session((1739, 0, 0)), "2026-10-24T07:00:01+00:00"
+        )
+        self.assertEqual(reset["counter_seconds"], 0)
+        self.assertEqual(reset["validated_samples"], 3)
+
+    def test_ram_telemetry_allowlist_is_exactly_three_read_only_cpu0_fields(self):
+        self.assertEqual(
+            [field["key"] for field in RAM_TELEMETRY_FIELDS],
+            ["CPU0.RAM.0x00222e", "CPU0.RAM.0x000dca", "CPU0.RAM.0x001ad4"],
+        )
+        by_key = {field["key"]: field for field in RAM_TELEMETRY_FIELDS}
+        self.assertEqual(ram_telemetry_request(by_key["CPU0.RAM.0x00222e"]), b"\x02\x22\x2e\x02")
+        self.assertEqual(ram_telemetry_request(by_key["CPU0.RAM.0x000dca"]), b"\x02\x0d\xca\x02")
+        self.assertEqual(ram_telemetry_request(by_key["CPU0.RAM.0x001ad4"]), b"\x02\x1a\xd4\x02")
+        self.assertTrue(by_key["CPU0.RAM.0x000dca"]["signed"])
+        self.assertFalse(by_key["CPU0.RAM.0x00222e"]["signed"])
+        self.assertFalse(by_key["CPU0.RAM.0x001ad4"]["signed"])
+        self.assertEqual(by_key["CPU0.RAM.0x000dca"]["confidence"], "mittel")
+        for field in RAM_TELEMETRY_FIELDS:
+            self.assertEqual(field["length"], 2)
+            self.assertEqual(field["unit"], "W")
+            # Service 0x02 is a pure RAM read; no write service is ever built.
+            self.assertEqual(ram_telemetry_request(field)[0], 0x02)
+        with self.assertRaises(ValueError):
+            ram_telemetry_request({"key": "x", "address": 0x10000, "length": 2})
+        with self.assertRaises(ValueError):
+            ram_telemetry_request({"key": "x", "address": 0x10, "length": 65})
+
+    def test_ram_telemetry_decodes_signed_and_unsigned_and_fails_closed(self):
+        by_key = {field["key"]: field for field in RAM_TELEMETRY_FIELDS}
+
+        def response(payload, *, positive=True):
+            return Response(
+                tx=b"",
+                ack=Frame("ack", 1, b"", positive=positive),
+                data=Frame("data", 1, b"", payload),
+                elapsed_ms=42.26,
+            )
+
+        target = ram_telemetry_status(
+            by_key["CPU0.RAM.0x00222e"],
+            response(b"\x82\x22\x2e\x02" + (5000).to_bytes(2, "little")),
+            "2026-10-24T16:00:00+00:00",
+        )
+        self.assertTrue(target["available"])
+        self.assertEqual(target["value"], 5000)
+        self.assertEqual(target["raw"], 5000)
+        self.assertEqual(target["unit"], "W")
+        self.assertEqual(target["address"], "0x00222e")
+        self.assertEqual(target["rtt_ms"], 42.3)
+        self.assertEqual(target["recorded_at"], "2026-10-24T16:00:00+00:00")
+        self.assertIsNone(target["error"])
+
+        negative = ram_telemetry_status(
+            by_key["CPU0.RAM.0x000dca"],
+            response(b"\x82\x0d\xca\x02" + (-300).to_bytes(2, "little", signed=True)),
+            "2026-10-24T16:00:00+00:00",
+        )
+        self.assertEqual(negative["value"], -300)
+        self.assertEqual(negative["raw"], 0xFED4)
+        self.assertTrue(negative["signed"])
+        self.assertEqual(negative["confidence"], "mittel")
+
+        # The unsigned fields never flip sign for high raw values.
+        high = ram_telemetry_status(
+            by_key["CPU0.RAM.0x001ad4"],
+            response(b"\x82\x1a\xd4\x02\xd4\xfe"),
+            "2026-10-24T16:00:00+00:00",
+        )
+        self.assertEqual(high["value"], 0xFED4)
+
+        for invalid in (
+            response(b"\x82\x22\x2e\x02\x88\x13", positive=False),
+            response(b"\x82\x22\x2f\x02\x88\x13"),
+            response(b"\x82\x22\x2e\x04\x88\x13\x00\x00"),
+            response(b"\x82\x22\x2e\x02\x88"),
+            response(b"\x82\x22\x2e\x02\x88\x13\x00"),
+            response(b""),
+        ):
+            with self.assertRaises(TransportError):
+                ram_telemetry_status(by_key["CPU0.RAM.0x00222e"], invalid, "2026-10-24T16:00:00+00:00")
+
+        unavailable = ram_telemetry_unavailable(by_key["CPU0.RAM.0x00222e"], error="timeout")
+        self.assertFalse(unavailable["available"])
+        self.assertIsNone(unavailable["value"])
+        self.assertEqual(unavailable["error"], "timeout")
+
+    def test_ram_telemetry_reader_isolates_failures_and_live_api_exposes_fields(self):
+        class Session:
+            def __init__(self):
+                self.packet = 0
+                self.calls = []
+
+            def next_packet(self):
+                self.packet += 1
+                return self.packet
+
+            def request(self, payload, packet, timeout, cpu):
+                self.calls.append((payload, packet, timeout, cpu))
+                if payload == b"\x02\x0d\xca\x02":
+                    raise TransportError("Timeout")
+                if payload == b"\x02\x1a\xd4\x02":
+                    body = b"\x82\x1a\xd4\x02\x7c\x15"  # 5500 W
+                else:
+                    body = b"\x82\x22\x2e\x02\x88\x13"  # 5000 W
+                return Response(
+                    tx=b"",
+                    ack=Frame("ack", packet, b"", positive=True),
+                    data=Frame("data", packet, b"", body),
+                    elapsed_ms=1.0,
+                )
+
+        session = Session()
+        results = DachsWebApp._read_ram_telemetry(session, "2026-10-24T16:00:00+00:00")
+        self.assertEqual(
+            [call[0] for call in session.calls],
+            [b"\x02\x22\x2e\x02", b"\x02\x0d\xca\x02", b"\x02\x1a\xd4\x02"],
+        )
+        self.assertTrue(all(call[3] == 0 and call[2] == 0.9 for call in session.calls))
+        self.assertEqual(results["CPU0.RAM.0x00222e"]["value"], 5000)
+        self.assertEqual(results["CPU0.RAM.0x001ad4"]["value"], 5500)
+        failed = results["CPU0.RAM.0x000dca"]
+        self.assertFalse(failed["available"])
+        self.assertIsNone(failed["value"])
+        self.assertIn("Timeout", failed["error"])
+        self.assertEqual(failed["recorded_at"], "2026-10-24T16:00:00+00:00")
+
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            live = app.live()
+            self.assertEqual(
+                [item["key"] for item in live["ram_telemetry"]],
+                ["CPU0.RAM.0x00222e", "CPU0.RAM.0x000dca", "CPU0.RAM.0x001ad4"],
+            )
+            self.assertTrue(all(item["available"] is False for item in live["ram_telemetry"]))
+            self.assertTrue(all(item["value"] is None for item in live["ram_telemetry"]))
+            # A stale/failed read never resurfaces an older value.
+            with app.state_lock:
+                app.ram_telemetry = results
+            stale = app.live()["ram_telemetry"]
+            self.assertEqual(stale[0]["value"], 5000)
+            self.assertIsNone(stale[1]["value"])
+            self.assertEqual(stale[1]["label"], "Abgas-Regelkorrektur")
+
+    def test_soot_regeneration_allowlist_and_type_gate(self):
+        self.assertEqual(
+            [field["key"] for field in SOOT_REGENERATION_FIELDS],
+            ["CPU0.RAM.0x000db3", "CPU0.RAM.0x000de6", "CPU0.RAM.0x000d82"],
+        )
+        by_key = {field["key"]: field for field in SOOT_REGENERATION_FIELDS}
+        self.assertEqual(ram_telemetry_request(by_key["CPU0.RAM.0x000db3"]), b"\x02\x0d\xb3\x01")
+        self.assertEqual(ram_telemetry_request(by_key["CPU0.RAM.0x000de6"]), b"\x02\x0d\xe6\x02")
+        self.assertEqual(ram_telemetry_request(by_key["CPU0.RAM.0x000d82"]), b"\x02\x0d\x82\x01")
+        for field in SOOT_REGENERATION_FIELDS:
+            self.assertEqual(ram_telemetry_request(field)[0], 0x02)
+            self.assertFalse(field["signed"])
+        # Gate: the mapped Block-24 type byte (RAM 0x000f0a) bit 3.
+        self.assertEqual(SOOT_REGENERATION_TYPE_KEY, "Hka_Mw1.bKraftstofftyp")
+        self.assertEqual(SOOT_REGENERATION_TYPE_BLOCK, 24)
+        for oil in (0x08, 0x0A, 0x09, 0x0B):
+            self.assertTrue(soot_regeneration_supported(oil))
+        for other in (0x00, 0xC0, 0xD0, 0x80, 0x07, 0xFF & ~0x08):
+            self.assertFalse(soot_regeneration_supported(other))
+        for unknown in (None, "", "x", -1, 256, True):
+            self.assertIsNone(soot_regeneration_supported(unknown))
+
+    def test_soot_regeneration_decodes_all_states_and_fails_closed(self):
+        def fields(state, since, during, counter):
+            packed = since | (during << 8)
+            return {
+                "CPU0.RAM.0x000db3": {"available": True, "raw": state},
+                "CPU0.RAM.0x000de6": {"available": True, "raw": packed},
+                "CPU0.RAM.0x000d82": {"available": True, "raw": counter},
+            }
+
+        at = "2026-10-24T16:00:00+00:00"
+        idle = soot_regeneration_status(0x08, fields(0, 150, 0, 2), at)
+        self.assertTrue(idle["available"])
+        self.assertTrue(idle["supported"])
+        self.assertEqual(idle["type_code"], 0x08)
+        self.assertEqual(idle["state"], 0)
+        self.assertEqual(idle["state_label"], "inaktiv")
+        self.assertEqual(idle["minutes_since_regeneration"], 150)
+        self.assertEqual(idle["minutes_until_next"], 30)
+        self.assertFalse(idle["regeneration_due"])
+        self.assertEqual(idle["minutes_in_regeneration"], 0)
+        self.assertEqual(idle["minutes_remaining"], 12)
+        self.assertEqual(idle["interruptions"], 2)
+        self.assertFalse(idle["interruption_latched"])
+        self.assertEqual(idle["interval_minutes"], 180)
+        self.assertEqual(idle["duration_minutes"], 12)
+        self.assertEqual(idle["interruption_limit"], 5)
+        self.assertEqual(idle["semantics"], "active_runtime_minutes")
+        self.assertEqual(
+            idle["raw"],
+            {"0x000db3": 0, "0x000de6": 150, "0x000de7": 0, "0x000d82": 2},
+        )
+        self.assertEqual(idle["recorded_at"], at)
+        self.assertIsNone(idle["error"])
+
+        due = soot_regeneration_status(0x0A, fields(0, 200, 0, 0), at)
+        self.assertTrue(due["regeneration_due"])
+        self.assertEqual(due["minutes_until_next"], 0)
+        boundary = soot_regeneration_status(0x0A, fields(0, 180, 0, 0), at)
+        self.assertTrue(boundary["regeneration_due"])
+
+        running = soot_regeneration_status(0x08, fields(1, 0, 7, 0x84), at)
+        self.assertEqual(running["state"], 1)
+        self.assertEqual(running["state_label"], "Regeneration läuft")
+        self.assertEqual(running["minutes_in_regeneration"], 7)
+        self.assertEqual(running["minutes_remaining"], 5)
+        # Bit 7 is the per-standstill latch, bits 0..6 the counter.
+        self.assertEqual(running["interruptions"], 4)
+        self.assertTrue(running["interruption_latched"])
+        self.assertEqual(running["raw"]["0x000d82"], 0x84)
+        over = soot_regeneration_status(0x08, fields(1, 0, 20, 0x7F), at)
+        self.assertEqual(over["minutes_remaining"], 0)
+        self.assertEqual(over["interruptions"], 127)
+        self.assertFalse(over["interruption_latched"])
+
+        interrupted = soot_regeneration_status(0x08, fields(2, 0, 0, 5), at)
+        self.assertEqual(interrupted["state"], 2)
+        self.assertIn("unterbrochen", interrupted["state_label"])
+        self.assertEqual(interrupted["interruptions"], 5)
+
+        # Fail closed: unknown state byte, unsupported type, unreadable type,
+        # or any single missing/failed read -> no derived values at all.
+        unknown_state = soot_regeneration_status(0x08, fields(3, 10, 0, 0), at)
+        self.assertFalse(unknown_state["available"])
+        self.assertIsNone(unknown_state["state"])
+        self.assertIsNone(unknown_state["minutes_until_next"])
+        self.assertIn("nicht belegt", unknown_state["error"])
+        self.assertEqual(unknown_state["raw"]["0x000db3"], 3)
+
+        gas = soot_regeneration_status(0xC0, fields(1, 0, 7, 0), at)
+        self.assertFalse(gas["available"])
+        self.assertFalse(gas["supported"])
+        self.assertEqual(gas["type_code"], 0xC0)
+        self.assertIsNone(gas["state"])
+        self.assertIn("nicht unterstützt", gas["error"])
+
+        no_type = soot_regeneration_status(None, fields(1, 0, 7, 0), at)
+        self.assertFalse(no_type["available"])
+        self.assertIsNone(no_type["supported"])
+        self.assertIsNone(no_type["type_code"])
+        self.assertIn("Typcode", no_type["error"])
+
+        partial = fields(1, 0, 7, 0)
+        partial["CPU0.RAM.0x000d82"] = {"available": False, "raw": None, "error": "Timeout"}
+        failed = soot_regeneration_status(0x08, partial, at)
+        self.assertFalse(failed["available"])
+        self.assertTrue(failed["supported"])
+        self.assertIsNone(failed["state"])
+        self.assertIsNone(failed["minutes_remaining"])
+        self.assertIn("Unterbrechungszähler", failed["error"])
+        self.assertIn("Timeout", failed["error"])
+        self.assertEqual(failed["raw"], {})
+        missing = soot_regeneration_status(0x08, {}, at)
+        self.assertFalse(missing["available"])
+        self.assertIn("nicht gelesen", missing["error"])
+
+    def test_soot_regeneration_reader_gates_on_live_type_code_and_live_api(self):
+        class Session:
+            def __init__(self):
+                self.packet = 0
+                self.calls = []
+
+            def next_packet(self):
+                self.packet += 1
+                return self.packet
+
+            def request(self, payload, packet, timeout, cpu):
+                self.calls.append((payload, packet, timeout, cpu))
+                bodies = {
+                    b"\x02\x0d\xb3\x01": b"\x82\x0d\xb3\x01\x01",
+                    b"\x02\x0d\xe6\x02": b"\x82\x0d\xe6\x02\x00\x09",
+                    b"\x02\x0d\x82\x01": b"\x82\x0d\x82\x01\x81",
+                }
+                return Response(
+                    tx=b"",
+                    ack=Frame("ack", packet, b"", positive=True),
+                    data=Frame("data", packet, b"", bodies[payload]),
+                    elapsed_ms=1.0,
+                )
+
+        at = "2026-10-24T16:00:00+00:00"
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            initial = app.live()["soot_filter_regeneration"]
+            self.assertFalse(initial["available"])
+            self.assertIsNone(initial["supported"])
+            self.assertIsNone(initial["state"])
+
+            # No type code in the live cache: no RAM read is issued.
+            session = Session()
+            status = app._read_soot_regeneration(session, at)
+            self.assertEqual(session.calls, [])
+            self.assertIsNone(status["supported"])
+            self.assertFalse(status["available"])
+
+            # Gas type code: still no RAM read, explicit "unsupported".
+            with app.state_lock:
+                app.live_values[(24, "Hka_Mw1.bKraftstofftyp")] = {
+                    "block": 24, "key": "Hka_Mw1.bKraftstofftyp", "raw": 0xC0,
+                }
+            status = app._read_soot_regeneration(session, at)
+            self.assertEqual(session.calls, [])
+            self.assertFalse(status["supported"])
+            self.assertFalse(status["available"])
+            self.assertEqual(status["type_code"], 0xC0)
+
+            # Oil type with soot filter bit: exactly the three reads, CPU 0.
+            with app.state_lock:
+                app.live_values[(24, "Hka_Mw1.bKraftstofftyp")]["raw"] = 0x0A
+            status = app._read_soot_regeneration(session, at)
+            self.assertEqual(
+                [call[0] for call in session.calls],
+                [b"\x02\x0d\xb3\x01", b"\x02\x0d\xe6\x02", b"\x02\x0d\x82\x01"],
+            )
+            self.assertTrue(all(call[3] == 0 and call[2] == 0.9 for call in session.calls))
+            self.assertTrue(status["available"])
+            self.assertEqual(status["state"], 1)
+            self.assertEqual(status["minutes_in_regeneration"], 9)
+            self.assertEqual(status["minutes_remaining"], 3)
+            self.assertEqual(status["minutes_since_regeneration"], 0)
+            self.assertEqual(status["interruptions"], 1)
+            self.assertTrue(status["interruption_latched"])
+
+            with app.state_lock:
+                app.soot_regeneration = status
+            live = app.live()["soot_filter_regeneration"]
+            self.assertEqual(live["state_label"], "Regeneration läuft")
+            self.assertEqual(live["raw"]["0x000de7"], 9)
+            json.dumps(live)
+            # The estimated exhaust-temperature soot_filter field stays separate.
+            self.assertIn("soot_filter", app.live())
+            self.assertIn("percent", app.live()["soot_filter"])
 
     def test_generator_target_uses_source_ranges_for_known_fuel_types(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -525,16 +997,71 @@ class CoreTests(unittest.TestCase):
             defaults = settings["cards"]
             self.assertGreater(len(defaults), 10)
             self.assertIn({"block": 24, "key": "Hka_Mw1.Temp.sbMotor"}, defaults)
-            derived = {"block": 22, "key": DASHBOARD_OPERATING_HOURS_PER_START_KEY}
-            self.assertNotIn(derived, defaults)
-            self.assertEqual(settings["derived_fields"], [{
-                "source": "operating_hours_per_start",
-                "label": "Betriebsstunden je Start",
-                "block": 22,
-                "key": DASHBOARD_OPERATING_HOURS_PER_START_KEY,
-                "unit": "Bh/Start",
-                "derived": True,
-            }])
+            retired_ratio = {
+                "block": 22, "key": DASHBOARD_OPERATING_HOURS_PER_START_KEY
+            }
+            native_ratio = {
+                "block": OPERATING_HOURS_PER_START_BLOCK,
+                "key": OPERATING_HOURS_PER_START_KEY,
+            }
+            runtime_24h = {"block": 22, "key": DASHBOARD_RUNTIME_24H_KEY}
+            self.assertNotIn(retired_ratio, defaults)
+            self.assertNotIn(native_ratio, defaults)
+            self.assertIn(runtime_24h, defaults)
+            self.assertIn(
+                OPERATING_HOURS_PER_START_KEY,
+                app._dashboard_available_keys(OPERATING_HOURS_PER_START_BLOCK),
+            )
+            self.assertNotIn(
+                DASHBOARD_OPERATING_HOURS_PER_START_KEY,
+                app._dashboard_available_keys(22),
+            )
+            # The real runtime is the main value of the runtime tile; the
+            # former separate tile and the raw 0x0f0e tile are no defaults.
+            self.assertNotIn({"block": 24, "key": "derived.real_runtime"}, defaults)
+            self.assertNotIn({"block": 24, "key": "Hka_Mw1.ulMotorlaufsekunden"}, defaults)
+            self.assertNotIn("derived.real_runtime", app._dashboard_available_keys(24))
+            soot_tile = {"block": 24, "key": DASHBOARD_SOOT_REGENERATION_KEY}
+            ram_tile = {"block": 24, "key": DASHBOARD_RAM_TELEMETRY_KEY}
+            # Both new tiles are selectable but off by default.
+            self.assertNotIn(soot_tile, defaults)
+            self.assertNotIn(ram_tile, defaults)
+            self.assertIn(DASHBOARD_SOOT_REGENERATION_KEY, app._dashboard_available_keys(24))
+            self.assertIn(DASHBOARD_RAM_TELEMETRY_KEY, app._dashboard_available_keys(24))
+            self.assertEqual(settings["derived_fields"], [
+                {
+                    "source": "runtime_24h_shutdown",
+                    "label": "Laufzeit seit Start",
+                    "block": 22,
+                    "key": DASHBOARD_RUNTIME_24H_KEY,
+                    "unit": "",
+                    "derived": True,
+                },
+                {
+                    "source": "soot_filter_regeneration",
+                    "label": "Rußfilterregeneration",
+                    "block": 24,
+                    "key": DASHBOARD_SOOT_REGENERATION_KEY,
+                    "unit": "",
+                    "derived": True,
+                },
+                {
+                    "source": "ram_telemetry",
+                    "label": "Interne Reglerwerte",
+                    "block": 24,
+                    "key": DASHBOARD_RAM_TELEMETRY_KEY,
+                    "unit": "",
+                    "derived": True,
+                },
+                {
+                    "source": "display_status",
+                    "label": "Display-Status",
+                    "block": 22,
+                    "key": "derived.display_status",
+                    "unit": "",
+                    "derived": True,
+                },
+            ])
             self.assertEqual(
                 app.schema()["dashboard"]["derived_fields"],
                 settings["derived_fields"],
@@ -547,9 +1074,15 @@ class CoreTests(unittest.TestCase):
                 (22, DASHBOARD_OPERATING_HOURS_PER_START_KEY),
                 HISTORY_MEASUREMENT_KEYS,
             )
+            self.assertNotIn(
+                (OPERATING_HOURS_PER_START_BLOCK, OPERATING_HOURS_PER_START_KEY),
+                HISTORY_MEASUREMENT_KEYS,
+            )
 
             cards = [
-                derived,
+                native_ratio,
+                soot_tile,
+                ram_tile,
                 {"block": 24, "key": "Hka_Mw1.sWirkleistung"},
                 {"block": 110, "key": next(iter(app._dashboard_available_keys(110)))},
             ]
@@ -565,6 +1098,53 @@ class CoreTests(unittest.TestCase):
                 app.set_dashboard_settings([{"block": 24, "key": "Gibt.Es.Nicht"}])
             with self.assertRaises(KeyError):
                 app.set_dashboard_settings([{"block": 22, "key": "derived.gibt_es_nicht"}])
+
+    def test_dashboard_migrates_retired_calculated_ratio_to_native_block38(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dashboard_settings.json"
+            path.write_text(json.dumps({
+                "version": 2,
+                "cards": [
+                    {
+                        "block": 22,
+                        "key": DASHBOARD_OPERATING_HOURS_PER_START_KEY,
+                    },
+                    {"block": 24, "key": "Hka_Mw1.sWirkleistung"},
+                ],
+            }))
+            app = DachsWebApp(data_dir=directory, interval=60)
+            expected = [
+                {
+                    "block": OPERATING_HOURS_PER_START_BLOCK,
+                    "key": OPERATING_HOURS_PER_START_KEY,
+                },
+                {"block": 24, "key": "Hka_Mw1.sWirkleistung"},
+            ]
+            self.assertEqual(app.dashboard_settings()["cards"], expected)
+            self.assertEqual(json.loads(path.read_text())["cards"], expected)
+
+    def test_dashboard_v1_settings_gain_runtime_tile_once_and_preserve_user_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dashboard_settings.json"
+            original = [{"block": 24, "key": "Hka_Mw1.sWirkleistung"}]
+            path.write_text(json.dumps({"version": 1, "cards": original}))
+
+            migrated = DachsWebApp(data_dir=directory, interval=60)
+            runtime_card = {"block": 22, "key": DASHBOARD_RUNTIME_24H_KEY}
+            self.assertEqual(migrated.dashboard_settings()["cards"], original + [runtime_card])
+            persisted = json.loads(path.read_text())
+            self.assertEqual(persisted["version"], 2)
+            self.assertEqual(persisted["cards"], original + [runtime_card])
+
+            migrated.set_dashboard_settings(original)
+            restarted = DachsWebApp(data_dir=directory, interval=60)
+            self.assertEqual(restarted.dashboard_settings()["cards"], original)
+            # Current-version settings are never touched: the optional soot
+            # and RAM tiles are not injected into an existing selection.
+            persisted = json.loads(path.read_text())
+            self.assertEqual(persisted["version"], 2)
+            self.assertEqual(persisted["cards"], original)
+            self.assertEqual(DachsWebApp(data_dir=directory, interval=60).dashboard_settings()["cards"], original)
 
     def test_soot_filter_estimate_uses_requested_curve_and_colours(self):
         self.assertEqual(soot_filter_estimate(419)["percent"], 0)
@@ -1094,6 +1674,51 @@ class CoreTests(unittest.TestCase):
         combined = pack.run_history({28: bytes(p28), 30: bytes(p30), 31: bytes(p31), 32: bytes(p32)})
         self.assertEqual(combined["shutdowns"][0]["reason"], "Anlagenstörung; Dachs ausgeschaltet")
 
+    def test_run_history_marks_safety_and_fault_shutdowns_on_their_quarter(self):
+        pack = PackRepository()
+        p28, p30, p31, p32 = (bytearray(70), bytearray(70), bytearray(14), bytearray(70))
+        yesterday = (datetime.now() - timedelta(days=1)).replace(second=0, microsecond=0)
+
+        def msr_seconds(hour, minute):
+            moment = yesterday.replace(hour=hour, minute=minute)
+            return int((moment - datetime(2000, 1, 1)).total_seconds())
+
+        entries = (
+            (0xFFF7, msr_seconds(10, 20)),  # bit 3: Sicherheitsabschaltung nach 24h bzw. Nachtabschaltung
+            (0xFFEF, msr_seconds(18, 5)),   # bit 4: Anlagenstörung
+            (0xFFFE, msr_seconds(12, 0)),   # bit 0: Keine Anforderung (normal)
+            (0xFFE7, msr_seconds(10, 29)),  # bits 3+4 in the same quarter: fault wins
+        )
+        for (code, seconds), offset in zip(entries, (26, 32, 38, 44)):
+            p30[offset:offset + 2] = code.to_bytes(2, "little")
+            p30[offset + 2:offset + 6] = seconds.to_bytes(4, "little")
+
+        history = pack.run_history({28: bytes(p28), 30: bytes(p30), 31: bytes(p31), 32: bytes(p32)})
+        severities = [entry["severity"] for entry in history["shutdowns"]]
+        self.assertEqual(severities, ["safety", "fault", "normal", "fault", None])
+        self.assertEqual(history["shutdowns"][0]["reason"], "Sicherheitsabschaltung nach 24h bzw. tägliche Nachtabschaltung nach ≥ 6 h Lauf")
+        self.assertEqual(history["shutdowns"][0]["quarter"], 41)
+        self.assertEqual(history["shutdowns"][0]["date"], yesterday.date().isoformat())
+        marks = history["days"][1]["shutdown_marks"]
+        self.assertEqual([(mark["quarter"], mark["severity"]) for mark in marks], [(41, "fault"), (72, "fault")])
+        self.assertEqual(history["days"][0]["shutdown_marks"], [])
+
+        p30[44:50] = bytes(6)
+        history = pack.run_history({28: bytes(p28), 30: bytes(p30), 31: bytes(p31), 32: bytes(p32)})
+        marks = history["days"][1]["shutdown_marks"]
+        self.assertEqual([(mark["quarter"], mark["severity"]) for mark in marks], [(41, "safety"), (72, "fault")])
+        self.assertEqual(marks[0]["reason"], "Sicherheitsabschaltung nach 24h bzw. tägliche Nachtabschaltung nach ≥ 6 h Lauf")
+
+        app = (Path(__file__).resolve().parents[1] / "src/open_dachs_manager/web/app.js").read_text(encoding="utf-8")
+        style = (Path(__file__).resolve().parents[1] / "src/open_dachs_manager/web/style.css").read_text(encoding="utf-8")
+        render = app[app.index("function runShutdownClass(severity)"):app.index("function renderFieldEditor(")]
+        self.assertIn("day.shutdown_marks", render)
+        self.assertIn('"shutdown-fault"', render)
+        self.assertIn('"shutdown-safety"', render)
+        self.assertIn("runShutdownClass(entry.severity)", render)
+        self.assertIn(".run-raster i.shutdown-safety { background:#dc9216; }", style)
+        self.assertIn(".run-raster i.shutdown-fault { background:#d13e4b; }", style)
+
     def test_service_history_codes_use_bundled_fault_catalogue(self):
         pack = PackRepository()
         payload = bytearray(70)
@@ -1241,6 +1866,18 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(first.raw, 38)
         self.assertEqual(first.value, 3.8)
         self.assertEqual(first.unit, "Bh/Start")
+        self.assertEqual(first.label, "Betriebsstunden je Start")
+
+        # Exact read-only payload observed through the live serial worker on
+        # 2026-11-24: 0x26 = 38 -> 3.8 Bh/Start, 0x01 = factor 1.
+        live = pack.decode(38, bytes.fromhex("2601"))
+        self.assertEqual(
+            [(field.key, field.raw, field.value) for field in live],
+            [
+                ("Motbel250[0].bQuotientBh_Start", 38, 3.8),
+                ("Motbel250[0].bFehlstartfaktor", 1, 1),
+            ],
+        )
 
         pack.encode_value(
             payload,
@@ -1266,6 +1903,44 @@ class CoreTests(unittest.TestCase):
             self.assertIn("not allowlisted", denied.error)
         finally:
             os.unlink(path)
+
+    def test_generic_write_service_rejects_every_firmware_owned_sc123_byte(self):
+        service = DachsService("/dev/null", 19200, 0.1, PackRepository())
+        cases = ((50, (31,)), (60, tuple(range(40, 46))))
+        for block, offsets in cases:
+            for offset in offsets:
+                with self.subTest(block=block, offset=offset):
+                    before = bytes(70)
+                    after = bytearray(before)
+                    after[offset] = 1
+                    self.assertEqual(
+                        protected_sc123_write_offsets(0, block, before, bytes(after)),
+                        (offset,),
+                    )
+                    audit = service.write_payload(
+                        object(),
+                        block,
+                        before,
+                        bytes(after),
+                        ["Hka_Ew.usSollGenerator"],
+                        WriteAllowlist(),
+                        False,
+                    )
+                    self.assertFalse(audit.written)
+                    self.assertFalse(audit.write_attempted)
+                    self.assertIsNone(audit.readback_ok)
+                    self.assertIn("dedizierten SC123-Pfad", audit.error)
+                    self.assertIn(f"Offset(s) {offset}", audit.error)
+
+        before = bytes(70)
+        after = bytearray(before)
+        after[2] = 1
+        allowed = service.write_payload(
+            object(), 60, before, bytes(after), ["benign.key"],
+            WriteAllowlist(), True,
+        )
+        self.assertIsNone(allowed.error)
+        self.assertFalse(allowed.written)
 
     def test_auth_uses_dynamic_pw4_and_next_packet(self):
         pack = PackRepository()
@@ -1447,6 +2122,200 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(audit.rebased_volatile_keys, ("Hka_Ew.ulSystemTime",))
         self.assertEqual(audit.readback_scope, "changed-fields")
         self.assertEqual(audit.readback_attempts, 1)
+
+    def test_live_write_rebases_optional_sc123_heartbeat_without_overwriting_it(self):
+        pack = PackRepository()
+        service = DachsService(
+            "/dev/null", 19200, 0.1, pack, readback_attempts=1, readback_delay=0
+        )
+        before = bytearray(70)
+        before[31] = 10
+        pack.encode_value(before, "Hka_Ew.usSollGenerator", "5.3", block=50)
+        requested = bytearray(before)
+        pack.encode_value(requested, "Hka_Ew.usSollGenerator", "4.7", block=50)
+        fresh = bytearray(before)
+        fresh[31] = 11
+        expected_wire = bytearray(fresh)
+        pack.encode_value(expected_wire, "Hka_Ew.usSollGenerator", "4.7", block=50)
+        readback = bytearray(expected_wire)
+        readback[31] = 12
+        reads = deque([bytes(fresh), bytes(readback)])
+        ack = Frame("ack", 2, b"", positive=True)
+
+        class WriteSession:
+            written = None
+
+            def read_block(self, block, packet=None, timeout=0.9):
+                payload = reads.popleft()
+                frame = Frame("data", 1, b"", payload=b"\x00" + payload)
+                return BlockResult(block, 1, Response(b"", None, frame, 1.0), 0, payload)
+
+            def write_block(self, block, payload, packet=None, timeout=0.9):
+                self.written = bytes(payload)
+                return Response(b"", ack, None, 1.0)
+
+        session = WriteSession()
+        audit = service.write_payload(
+            session,
+            50,
+            bytes(before),
+            bytes(requested),
+            ["Hka_Ew.usSollGenerator"],
+            WriteAllowlist(),
+            False,
+        )
+
+        self.assertTrue(audit.written and audit.readback_ok)
+        self.assertEqual(session.written, bytes(expected_wire))
+        self.assertEqual(session.written[31], 11)
+        self.assertEqual(
+            audit.rebased_volatile_keys,
+            ("Hka_Ew.Reserve_2",),
+        )
+
+    def test_restore_block50_rebases_and_ignores_only_sc123_heartbeat(self):
+        pack = PackRepository()
+        service = DachsService(
+            "/dev/null", 19200, 0.1, pack, readback_attempts=1, readback_delay=0
+        )
+        before = bytearray(70)
+        before[1] = 200
+        before[31] = 10
+        target = bytearray(before)
+        target[1] = 220
+        current = bytearray(before)
+        current[31] = 11
+        expected_wire = bytearray(target)
+        expected_wire[31] = 11
+        readback = bytearray(expected_wire)
+        readback[31] = 12
+        reads = deque([bytes(current), bytes(readback)])
+        ack = Frame("ack", 2, b"", positive=True)
+
+        class RestoreSession:
+            written = None
+
+            def read_block(self, block, packet=None, timeout=0.9):
+                payload = reads.popleft()
+                frame = Frame("data", 1, b"", payload=b"\x00" + payload)
+                return BlockResult(block, 1, Response(b"", None, frame, 1.0), 0, payload)
+
+            def write_block(self, block, payload, packet=None, timeout=0.9):
+                self.written = bytes(payload)
+                return Response(b"", ack, None, 1.0)
+
+        session = RestoreSession()
+        audit = service.restore_payload(
+            session, 50, bytes(before), bytes(target), False
+        )
+
+        self.assertTrue(audit.written and audit.readback_ok)
+        self.assertEqual(
+            audit.readback_scope,
+            "stable-block-excluding-sc123-heartbeat",
+        )
+        self.assertEqual(session.written, bytes(expected_wire))
+        self.assertEqual(session.written[1], 220)
+        self.assertEqual(session.written[31], 11)
+
+    def test_restore_block60_preserves_firmware_owned_sc123_record(self):
+        pack = PackRepository()
+        service = DachsService(
+            "/dev/null", 19200, 0.1, pack, readback_attempts=1, readback_delay=0
+        )
+        before = bytearray(70)
+        before[2] = 10
+        before[40:46] = bytes.fromhex("53 43 31 01 C8 37")
+        target = bytearray(before)
+        target[2] = 11
+        # A backup must not own or restore the firmware record.
+        target[40:46] = bytes.fromhex("53 43 31 01 DC 23")
+        current = bytearray(before)
+        current[40:46] = bytes.fromhex("53 43 31 01 D2 2D")
+        expected_wire = bytearray(target)
+        expected_wire[40:46] = current[40:46]
+        reads = deque([bytes(current), bytes(expected_wire)])
+        ack = Frame("ack", 2, b"", positive=True)
+
+        class RestoreSession:
+            written = None
+
+            def read_block(self, block, packet=None, timeout=0.9):
+                payload = reads.popleft()
+                frame = Frame("data", 1, b"", payload=b"\x00" + payload)
+                return BlockResult(
+                    block, 1, Response(b"", None, frame, 1.0), 0, payload
+                )
+
+            def write_block(self, block, payload, packet=None, timeout=0.9):
+                self.written = bytes(payload)
+                return Response(b"", ack, None, 1.0)
+
+        session = RestoreSession()
+        audit = service.restore_payload(
+            session, 60, bytes(before), bytes(target), False
+        )
+
+        self.assertTrue(audit.written and audit.readback_ok)
+        self.assertEqual(
+            audit.readback_scope,
+            "full-block-including-preserved-sc123-record",
+        )
+        self.assertEqual(session.written, bytes(expected_wire))
+        self.assertEqual(session.written[2], 11)
+        self.assertEqual(session.written[40:46], current[40:46])
+
+        record_only_target = bytearray(current)
+        record_only_target[40:46] = bytes.fromhex("53 43 31 01 DC 23")
+        record_only = service.restore_payload(
+            session, 60, bytes(current), bytes(record_only_target), False
+        )
+        self.assertFalse(record_only.written)
+        self.assertFalse(record_only.write_attempted)
+        self.assertTrue(record_only.readback_ok)
+
+    def test_restore_block60_fails_if_preserved_record_changes_on_readback(self):
+        service = DachsService(
+            "/dev/null", 19200, 0.1, PackRepository(),
+            readback_attempts=1, readback_delay=0,
+        )
+        before = bytearray(70)
+        before[2] = 10
+        before[40:46] = bytes.fromhex("53 43 31 01 C8 37")
+        target = bytearray(before)
+        target[2] = 11
+        target[40:46] = bytes.fromhex("53 43 31 01 DC 23")
+        expected_wire = bytearray(target)
+        expected_wire[40:46] = before[40:46]
+        corrupt_readback = bytearray(expected_wire)
+        corrupt_readback[44] ^= 1
+        reads = deque([bytes(before), bytes(corrupt_readback)])
+        ack = Frame("ack", 2, b"", positive=True)
+
+        class RestoreSession:
+            written = None
+
+            def read_block(self, block, packet=None, timeout=0.9):
+                payload = reads.popleft()
+                frame = Frame("data", 1, b"", payload=b"\x00" + payload)
+                return BlockResult(
+                    block, 1, Response(b"", None, frame, 1.0), 0, payload
+                )
+
+            def write_block(self, block, payload, packet=None, timeout=0.9):
+                self.written = bytes(payload)
+                return Response(b"", ack, None, 1.0)
+
+        session = RestoreSession()
+        audit = service.restore_payload(
+            session, 60, bytes(before), bytes(target), False
+        )
+        self.assertEqual(session.written, bytes(expected_wire))
+        self.assertTrue(audit.write_attempted)
+        self.assertTrue(audit.ack_positive)
+        self.assertFalse(audit.written)
+        self.assertFalse(audit.readback_ok)
+        self.assertIn("full-block readback mismatch", audit.error)
 
     def test_live_write_rebase_rejects_nonvolatile_and_target_races(self):
         pack = PackRepository()
@@ -1890,14 +2759,17 @@ class CoreTests(unittest.TestCase):
             ]
             self.assertEqual(len(snapshot_seeks), 4)
 
-    def test_history_persists_selected_fast_blocks_as_one_snapshot_per_cycle(self):
-        self.assertEqual(DEFAULT_FAST_MONITOR_BLOCKS, (22, 24))
+    def test_history_persists_selected_poll_fields_as_one_snapshot_per_cycle(self):
+        self.assertEqual(DEFAULT_FAST_MONITOR_BLOCKS, (22, 24, 26))
         self.assertIn(20, DEFAULT_SLOW_MONITOR_BLOCKS)
+        self.assertIn(38, DEFAULT_SLOW_MONITOR_BLOCKS)
+        self.assertNotIn(26, DEFAULT_SLOW_MONITOR_BLOCKS)
         self.assertEqual(DEFAULT_HISTORY_SAMPLE_INTERVAL, 0.0)
-        self.assertEqual(len(HISTORY_SERIES), 21)
-        self.assertEqual({block for block, _key in HISTORY_MEASUREMENT_KEYS}, {22, 24})
+        self.assertEqual(len(HISTORY_SERIES), 22)
+        self.assertEqual({block for block, _key in HISTORY_MEASUREMENT_KEYS}, {22, 24, 26})
         self.assertIn((22, "Hka_Bd.ulBetriebssekunden"), HISTORY_MEASUREMENT_KEYS)
         self.assertIn((24, "Hka_Mw1.sWirkleistung"), HISTORY_MEASUREMENT_KEYS)
+        self.assertIn((26, "Hka_Mw2.Hka_UC.usFrequency1"), HISTORY_MEASUREMENT_KEYS)
         app = object.__new__(DachsWebApp)
         app.history_interval = DEFAULT_HISTORY_SAMPLE_INTERVAL
         app._last_history_sample = 100.0
@@ -1938,6 +2810,7 @@ class CoreTests(unittest.TestCase):
                 [
                     ("hours", 22, "Hka_Bd.ulBetriebssekunden"),
                     ("power", 24, "Hka_Mw1.sWirkleistung"),
+                    ("frequency", 26, "Hka_Mw2.Hka_UC.usFrequency1"),
                 ],
                 now - timedelta(minutes=1),
                 now + timedelta(minutes=1),
@@ -1946,6 +2819,10 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(len(rows["hours"]), 2)
             self.assertEqual(rows["hours"][0]["field_key"], "Hka_Bd.ulBetriebssekunden")
             self.assertEqual(rows["power"][0]["field_key"], "Hka_Mw1.sWirkleistung")
+            self.assertEqual(
+                rows["frequency"][0]["field_key"],
+                "Hka_Mw2.Hka_UC.usFrequency1",
+            )
 
     def test_motor_status_history_records_transitions_and_sparse_heartbeats(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2766,6 +3643,85 @@ class CoreTests(unittest.TestCase):
                 list((Path(directory) / "backup-archive").glob("*.json")), []
             )
 
+    def test_maintenance_fuel_type_is_cross_checked_locked_and_inconsistency_is_visible(self):
+        fields = [{"key": "Hka_Mw1.bKraftstofftyp", "raw": 8}]
+        payload = bytearray(70)
+        payload[54] = 0x08
+        self.assertEqual(fuel_type_from_block24(fields, bytes(payload)), ("oil", 8))
+        # Pre-1.1.0 decoding: wrong offset gave raw 0 while the payload held 0x08.
+        self.assertEqual(
+            fuel_type_from_block24([{"key": "Hka_Mw1.bKraftstofftyp", "raw": 0}], bytes(payload))[0],
+            "unknown",
+        )
+        legacy = {
+            "version": 1,
+            "fuel_type": "gas",
+            "blocks": {"24": {"payload_hex": bytes(payload).hex(), "fields": []}},
+        }
+        check = maintenance_fuel_check(legacy, {"fuel_type": "oil"}, "oil")
+        self.assertEqual(check["fuel_type"], "oil")
+        self.assertFalse(check["consistent"])
+        self.assertFalse(check["locked"])
+        self.assertEqual(check["payload_fuel_type"], "oil")
+        self.assertIn("Führend ist Heizöl", check["message"])
+        self.assertIn("Snapshot nennt Gas", check["message"])
+        self.assertIn("0x08 = Heizöl", check["message"])
+        # Legacy reports keep their stored values; validation stays unlocked.
+        self.assertEqual(validate_protocol({"fuel_type": "oil"}, report=legacy)["fuel_type"], "oil")
+
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            app.service = SyntheticMaintenanceService(app.pack, fuel_raw=8)
+            item = app.create_maintenance_report("admin")
+            self.assertEqual(item["report"]["fuel_type"], "oil")
+            self.assertEqual(
+                item["report"]["fuel_source"],
+                {"key": "Hka_Mw1.bKraftstofftyp", "address": "0x000f0a", "raw": 8},
+            )
+            self.assertTrue(item["fuel_check"]["consistent"])
+            self.assertTrue(item["fuel_check"]["locked"])
+            self.assertIsNone(item["fuel_check"]["message"])
+            protocol = dict(item["protocol"], fuel_type="gas")
+            with self.assertRaisesRegex(ValueError, "Regler-Typcode festgelegt"):
+                app.save_maintenance_report(item["id"], protocol)
+            saved = app.save_maintenance_report(item["id"], dict(item["protocol"]))
+            self.assertEqual(saved["fuel_type"], "oil")
+
+    def test_controller_clock_offset_is_read_only_and_fail_closed(self):
+        now = datetime(2026, 10, 26, 7, 30, 0, tzinfo=timezone.utc)  # 08:30:00 MEZ
+        controller = datetime(2026, 10, 26, 8, 35, 51)
+        raw = int((controller - datetime(2000, 1, 1)).total_seconds())
+        payload = bytearray(70)
+        payload[36:40] = raw.to_bytes(4, "little")
+        clock = controller_clock_status(bytes(payload), 0.0, 25.0, now=now)
+        self.assertTrue(clock["available"])
+        self.assertEqual(clock["controller_time"], "2026-10-26T08:35:51")
+        self.assertEqual(clock["offset_seconds"], 351)
+        self.assertEqual(clock["odm_time"], "2026-10-26T08:30:00+01:00")
+        # Offset refers to the read moment, not to the API request time.
+        self.assertEqual(controller_clock_status(bytes(payload), 10.0, 25.0, now=now)["offset_seconds"], 361)
+        for args, error in (
+            ((None, None), "nicht gelesen"),
+            ((bytes(payload), 26.0), "veraltet"),
+            ((bytes(40), 0.0), "ungültige Reglerzeit"),
+            ((bytes(30), 0.0), "zu kurz"),
+        ):
+            stale = controller_clock_status(*args, 25.0, now=now)
+            self.assertFalse(stale["available"])
+            self.assertIsNone(stale["controller_time"])
+            self.assertIsNone(stale["offset_seconds"])
+            self.assertIn(error, stale["error"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            app = DachsWebApp(data_dir=directory, interval=60)
+            self.assertFalse(app.live()["controller_clock"]["available"])
+            app._display_slow_payloads[50] = (bytes(payload), time.monotonic())
+            live_clock = app.live()["controller_clock"]
+            self.assertTrue(live_clock["available"])
+            self.assertEqual(live_clock["controller_time"], "2026-10-26T08:35:51")
+            app._display_slow_payloads[50] = (bytes(payload), time.monotonic() - 3600)
+            self.assertFalse(app.live()["controller_clock"]["available"])
+
     def test_maintenance_report_comparison_calculates_counter_deltas(self):
         def report(hours, starts):
             return {"blocks": {
@@ -2904,6 +3860,140 @@ class CoreTests(unittest.TestCase):
             self.assertEqual([item[0] for item in service.writes], [100])
             with self.assertRaisesRegex(ValueError, "unklarem Abschlusszustand"):
                 app.delete_maintenance_report(report["id"])
+
+    def test_local_intermediate_maintenance_http_endpoint_is_admin_only(self):
+        class App:
+            def __init__(self):
+                self.calls = []
+
+            @staticmethod
+            def session_user(token):
+                return {
+                    "admin-token": {"username": "admin", "role": "admin"},
+                    "guest-token": {"username": "gast", "role": "guest"},
+                }.get(token)
+
+            def complete_local_intermediate_maintenance(self, username, report_id, protocol, reason):
+                self.calls.append((username, report_id, protocol, reason))
+                return {"id": report_id, "maintenance_number": "4.1"}
+
+        app = App()
+        server = DachsHTTPServer(("127.0.0.1", 0), app)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def request(token=None):
+            connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["Cookie"] = f"open_dachs_session={token}"
+            connection.request(
+                "POST", "/api/maintenance/reports/7/complete-local-intermediate",
+                body=json.dumps({"protocol": {"fuel_type": "gas"}, "reason": "Lokal"}),
+                headers=headers,
+            )
+            response = connection.getresponse()
+            body = json.loads(response.read().decode("utf-8"))
+            connection.close()
+            return response.status, body
+
+        try:
+            self.assertEqual(request()[0], 401)
+            self.assertEqual(request("guest-token")[0], 403)
+            status, body = request("admin-token")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["maintenance_number"], "4.1")
+            self.assertEqual(app.calls, [("admin", 7, {"fuel_type": "gas"}, "Lokal")])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_local_intermediate_maintenance_requires_reason_numbers_persists_and_exports(self):
+        class NoHardwareService:
+            def __getattr__(self, name):
+                raise AssertionError(f"local intermediate maintenance must not call transport/auth/write: {name}")
+
+        protocol = {
+            "fuel_type": "gas", "technician": "", "notes": "Zwischenstand",
+            "checklist": {}, "supplemental": {}, "measurements": {},
+        }
+        report = {
+            "generated_at": "2026-10-23T12:00:00+00:00",
+            "generated_by": "admin",
+            "blocks": {"104": {"fields": [
+                {"key": "Wartung_Cache.bZaehler", "value": 4},
+            ]}},
+            "maintenance_status": {},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.db"
+            store = DachsStore(path)
+            app = SimpleNamespace(store=store, service=NoHardwareService(), pack=PackRepository())
+            app.maintenance_report = lambda item_id: DachsWebApp.maintenance_report(app, item_id)
+
+            first_id = store.create_maintenance_report("admin", "gas", report, protocol)["id"]
+            with self.assertRaisesRegex(ValueError, "Grund"):
+                DachsWebApp.complete_local_intermediate_maintenance(
+                    app, "admin", first_id, protocol, "   "
+                )
+            self.assertEqual(store.maintenance_report(first_id)["status"], "draft")
+            with self.assertRaisesRegex(ValueError, "500"):
+                DachsWebApp.complete_local_intermediate_maintenance(
+                    app, "admin", first_id, protocol, "x" * 501
+                )
+
+            first = DachsWebApp.complete_local_intermediate_maintenance(
+                app, "admin", first_id, protocol, "Ölstand kontrolliert"
+            )
+            second_id = store.create_maintenance_report("admin", "gas", report, protocol)["id"]
+            second = DachsWebApp.complete_local_intermediate_maintenance(
+                app, "admin", second_id, protocol, "Filter vorzeitig erneuert"
+            )
+            self.assertEqual(first["maintenance_number"], "4.1")
+            self.assertEqual(second["maintenance_number"], "4.2")
+            self.assertEqual(first["completion_mode"], "local_intermediate")
+            self.assertFalse(first["completion"]["controller_written"])
+            self.assertFalse(first["completion"]["auth_used"])
+            self.assertFalse(first["completion"]["serial_session_opened"])
+            self.assertEqual(first["completion"]["audits"], [])
+
+            restarted = DachsStore(path)
+            persisted = restarted.maintenance_report(second_id)
+            self.assertEqual(persisted["maintenance_number"], "4.2")
+            self.assertEqual(persisted["local_reason"], "Filter vorzeitig erneuert")
+            export = report_html(
+                persisted["report"], persisted["protocol"], persisted["completion"]
+            ).decode("utf-8")
+            self.assertIn("ZWISCHENWARTUNG 4.2", export)
+            self.assertIn("Filter vorzeitig erneuert", export)
+            json_body = json.loads(
+                DachsWebApp.maintenance_export(app, second_id, "json")[0]
+            )
+            self.assertEqual(json_body["completion"]["maintenance_number"], "4.2")
+
+    def test_local_intermediate_fallback_and_regular_completion_remain_compatible(self):
+        protocol = {
+            "fuel_type": "gas", "technician": "Firma", "notes": "",
+            "checklist": {item["id"]: "yes" for item in checklist_definition("gas")},
+            "supplemental": {}, "measurements": {},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            store = DachsStore(Path(directory) / "history.db")
+            missing_counter = {"generated_at": "2026-10-23T12:00:00+00:00", "blocks": {}}
+            local_id = store.create_maintenance_report("admin", "gas", missing_counter, protocol)["id"]
+            local = store.complete_local_intermediate_maintenance(
+                local_id, protocol, "admin", "Fallback prüfen"
+            )
+            self.assertEqual(local["maintenance_number"], "0.1")
+
+            regular_id = store.create_maintenance_report("admin", "gas", missing_counter, protocol)["id"]
+            regular = store.complete_maintenance_report(regular_id, {
+                "mode": "demo", "controller_written": False,
+            })
+            self.assertEqual(regular["maintenance_kind"], "regular")
+            self.assertIsNone(regular["maintenance_number"])
+            self.assertEqual(regular["completion_mode"], "demo")
 
     def test_maintenance_demo_completion_never_opens_serial_or_writes(self):
         class NoHardwareService:

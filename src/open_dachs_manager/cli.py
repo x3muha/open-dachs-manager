@@ -14,7 +14,7 @@ from . import __version__
 from .auth import validate_auth_level
 from .mapping import PackRepository, WriteAllowlist, default_allowlist_path, is_reserved_key
 from .serial_worker import DEFAULT_SERIAL_WORKER_SOCKET, SerialWorkerSession
-from .service import DachsService, write_json_atomic
+from .service import DachsService, validate_generic_write_payload, write_json_atomic
 from .transport import TransportError, serial, validate_block
 
 
@@ -356,16 +356,17 @@ def _run(args) -> int:
         validate_block(block_id, writable=not dry_run)
         with service.session() as session:
             auth_result = None
-            if args.write_enabled:
-                auth_result = service.authenticate(session, args.auth_level, args.pass4 or None)
-                if not auth_result.ok:
-                    raise RuntimeError(f"requested auth level was not granted: {auth_result.granted_level}")
             before_result = service.read_block(session, block_id)
             if not before_result.ok:
                 raise RuntimeError(f"block {block_id} read failed (status={before_result.status!r})")
             before = bytes(before_result.payload)
             after = bytearray(before)
             service.pack.encode_value(after, key, args.value, raw_mode=args.raw, block=block_id)
+            validate_generic_write_payload(0, block_id, before, bytes(after))
+            if args.write_enabled and before != bytes(after):
+                auth_result = service.authenticate(session, args.auth_level, args.pass4 or None)
+                if not auth_result.ok:
+                    raise RuntimeError(f"requested auth level was not granted: {auth_result.granted_level}")
             if before == bytes(after):
                 audit = {
                     "schema": "dachs-msr2-write-audit/v3",
@@ -413,7 +414,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         return _run(args)
-    except (ValueError, RuntimeError, TransportError, FileNotFoundError) as exc:
+    except (ValueError, RuntimeError, PermissionError, TransportError, FileNotFoundError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

@@ -1,9 +1,9 @@
-# Open Dachs Manager · V3 1.8.0
+# Open Dachs Manager · V3 1.8.17
 
 Lokale Bedienung, Überwachung und Wartungsdokumentation für Dachs-Anlagen mit
 MSR2-Regler – über die optische serielle Schnittstelle und ohne Cloud-Zwang.
 
-> **Projektstatus: Version 1.8.0.** Lesen, Dekodieren, Wartungs-Testmodus und der
+> **Projektstatus: Version 1.8.17.** Lesen, Dekodieren, Wartungs-Testmodus und der
 > zentrale Serialworker sind an einer Anlage praktisch erprobt. Ein echter
 > Schreibvorgang erfordert immer die ausdrückliche Schreibfreigabe,
 > Authentifizierung, eine positive Antwort und die anschließende Rückleseprüfung.
@@ -16,13 +16,13 @@ Open Dachs Manager ist ein unabhängiges Open-Source-Community-Projekt.
 
 | Bereich | Funktionen |
 |---|---|
-| **Übersicht** | Wirkleistung Ist/Soll mit automatisch berechnetem PW4, Betriebsstunden je Start im Motorstatus und optional als auswählbare Kachel, Wartungsrestzeit, frei auswählbare Live-Kacheln und technisches Anlagenbild mit Rußfilterschätzung |
+| **Übersicht** | Dachs Ein/Aus und Entstören als getrennte geschützte Adminaktionen, Wirkleistung Ist/Soll mit automatisch berechnetem PW4, Betriebsstunden je Start direkt aus Reglerblock 38, reale Laufzeit seit Start aus der Motorstatus-Historie mit dem validiert gelesenen Reglerzähler `0x0f0e` und dessen Schwellen 6 h (Nachtabschaltung) und 24 h als Unterzeile, Wartungsrestzeit, frei auswählbare Live-Kacheln und technisches Anlagenbild mit Rußfilterschätzung |
 | **Bedienplatz** | Auf 1366 × 768 optimierte Touch-Ansicht mit derselben technischen Anlagenübersicht und gemeinsamem 2-Stunden-Verlauf für Drehzahl, Wirkleistung und Motorabgas |
 | **Überwachung** | Live-Werte und Historien mit Stunden-/Datumsauswahl, gemeinsamer Zeitachse und Zoom, Laufzustandsbändern sowie ereignistreuer Block-24-Motorstatusleiste |
 | **Wartung** | Vollständiges 42-Ziele-Pflichtbackup, schreibfreier Gesamtsnapshot, digitale Checkliste, PW4-Leseknopf, Vorher-/Nachher-Werte und PDF/HTML/JSON |
 | **Backup** | Geschütztes Wartungsarchiv, 36 Reglerblöcke sowie Block 16/20/21 beider Netzschutz-CPUs sichern; ausschließlich die 36 Reglerblöcke lassen sich im Dry-Run oder kontrolliert wiederherstellen |
 | **Einstellung** | Vollständig dekodierte Register, kontrollierte Schreibvorgänge sowie je Netzschutz-CPU Legacy-Schutz, zusätzliche Schutzparameter und Live-Netzwerte |
-| **System** | Mehrere Benutzer, optionaler lokaler Bedienplatz, Rollen, Passwortverwaltung, API-Freigabe, Token-Manager und offline prüfendes Firmware-Center |
+| **System** | Mehrere Benutzer, optionaler lokaler Bedienplatz, Rollen, Passwortverwaltung, API-Freigabe, Token-Manager, standardmäßig deaktivierte SMTP-Benachrichtigungen mit auswählbaren Kategorien und Textvorlagen, offline prüfendes Firmware-Center und fail-closed erkannte SC123-Grenze für die passende einstellbare Firmware |
 | **Werkzeuge** | Weboberfläche, CLI, TUI, JSON-Backups, Audit-Protokoll und systemd-Dienste |
 
 Weitere Merkmale:
@@ -49,6 +49,17 @@ Weitere Merkmale:
 - Installation und Aktualisierung mit einem Skript
 - integrierter deutscher Klartextkatalog im eigenen Open-Dachs-JSON-Schema;
   aktive Fehler erscheinen zum Beispiel als `SC 163 · Leistung zu klein`
+- manueller Admin-Entstörknopf nur bei aktiver Störung und sicher bestätigtem
+  Stillstand sowie ausdrücklich fachlich freigegebener installationsbezogener
+  Temperatur-/Wiederanlaufpolitik: frische doppelte Zustandslesung,
+  Störereignisbindung, Auth 3, genau eine flüchtige Quittierung, exaktes
+  ACK/Echo, stabiler Servicecode-0-Readback, Auth-0-Cleanup, bestätigungsfestes
+  Einmaltoken, persistenter Neustartschutz und Audit ohne PW4
+- getrennte Adminaktionen `Dachs Ein` und `Dachs Aus` für das flüchtige
+  Automatikfreigabebit: feste Adresse und Auth 3, doppelte Direktlesung,
+  byteerhaltendes Lesen-Ändern-Schreiben, genau ein Telegramm, doppelte exakte
+  Rücklesung und keine automatische Verkettung mit `Entstören`; Ein ist kein
+  Zwangsstart, Aus kein Not-Aus
 - optionaler lokaler Diagnosekatalog für zusätzliche Ursachen und Maßnahmen;
   diese Quelldatei wird nicht in das öffentliche Repository kopiert
 - geschätzter Rußfilter-Füllstand aus einer lokal einstellbaren
@@ -103,6 +114,8 @@ automatisch gespeichert. Im standardmäßig aktiven
 Testmodus bleibt der Regler auch beim Abschluss unverändert. Ein Admin kann
 den Modus persistent unter `System → Wartungsabschluss` umschalten; der Echtabschluss
 verlangt weiterhin PW4, exakte Bestätigung, positives ACK und Readback.
+Zusätzlich kann ein Admin einen offenen Entwurf mit Pflichtgrund als lokale **Zwischenwartung** abschließen. Ihre dauerhaft gespeicherte Nummer basiert auf dem eingefrorenen Regler-Wartungszähler (zum Beispiel `4.1`, danach `4.2`); fehlt der Zähler, gilt als stabile Basis der höchste bereits gespeicherte Zwischenwartungs-/Snapshot-Stand, andernfalls `0`. Dieser Sonderweg nutzt weder Authentifizierung noch Serialworker und verändert Block 100, Block 104 und den Dachs nicht. Grund und Nummer erscheinen in Liste, Bericht und allen Exporten.
+
 Offene und abgeschlossene Wartungsberichte können nach einer Sicherheitsabfrage
 gelöscht werden; das verknüpfte Backup bleibt im geschützten Archiv erhalten.
 Ein bereits erfolgter Reglerabschluss und das Schreib-Audit bleiben ebenfalls
@@ -156,6 +169,22 @@ Frame-/ACK-Regeln und Abschlussprüfung des Golden Trace vollständig verifizier
 sind; bis dahin bleibt der originale Updater über die kontrollierte
 COM3/RFC2217-Brücke der freigegebene Flashweg.
 
+Mit einer separat installierten, passenden einstellbaren R-000.004.043-Firmware
+zeigt derselbe Reiter zusätzlich die persistente SC123-Abgasgrenze von 180 bis
+240 °C. ODM schaltet die Bedienung nur frei, wenn zwei frische Block-50-Lesungen
+den exakten +1-Heartbeat der Patch-Firmware zeigen und zwei Block-60-Lesungen
+bytegenau stabil sind. Der Grenzwert liegt als versionierter Datensatz mit
+Kennung, Wert und Komplement in Block 60; ein ungültiger Datensatz bedeutet
+Firmware-Fallback 180 °C. Der Browser kann weder Adresse noch Auth-Level oder
+PW4 vorgeben. Der Server bindet die Vorschau an den vollständigen
+Block-60-Ausgangszustand, führt Auth 3, höchstens einen Block-60-Schreibvorgang,
+eine RAM-Rücklesung, eine begrenzte persistente NVM-Prüfung über Lesedienst
+0x04, Auth 0 und Audit aus. Nach Rückflash auf Stock-Firmware fehlt der
+Heartbeat und die Bedienung bleibt automatisch gesperrt. Historisch belegt sind
+nur 180 und 200 °C; 201–240 °C sind technisch einstellbar, aber nicht
+herstellerseitig oder thermisch live validiert. ODM installiert oder flasht
+diese Firmware nicht.
+
 ![Rot gekennzeichnete Netzschutzfelder](docs/assets/screenshots/netzschutz.png)
 
 ### Systemverwaltung und EDOMI-API
@@ -165,6 +194,13 @@ Benutzer, Rollen, Passwörter, API-Schreibfreigabe und Tokens verwaltet; die
 Dachs/MSR2-Register bleiben davon vollständig getrennt. Tokens besitzen
 unabhängige Rechte für `read`, `history` und `write` und werden nur einmal im
 Klartext angezeigt.
+
+Der Unterbereich `E-Mail` konfiguriert Benachrichtigungen für Wartung, neue
+Fehler, ohne bestätigte ODM-Entstörung verschwundene Fehler und bewusst
+gesetzte Temperaturgrenzen. Betreff und Text sind je Kategorie editierbar.
+Versand ist standardmäßig aus und läuft aus einer persistenten SQLite-Outbox
+in einem eigenen Thread; der Serialworker wird dafür weder geöffnet noch
+blockiert.
 
 Für einen direkt am Server betriebenen Touch-Bedienplatz kann dort zusätzlich
 ein lokaler Benutzer aktiviert werden. Er lauscht auf einem frei wählbaren
@@ -318,3 +354,15 @@ Repository mitgeliefert; siehe [Abhängigkeiten](DEPENDENCIES.md).
 
 Beiträge sind willkommen. Die technischen Anforderungen stehen in
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Signierte Aktualisierungen ab 1.8.17
+
+ODM prüft im Hintergrund ausschließlich das feste öffentliche Repository
+x3muha/open-dachs-manager auf neuere stabile Releases. Ein Update besteht aus
+kanonischem Manifest, Ed25519-Signatur und exakt benanntem Universal-Wheel. Die
+Webanwendung prüft Signatur, SHA-256 und Wheel-RECORD, installiert aber nie
+selbst. Erst eine passwortbestätigte Admin-Vorschau und die exakte Bestätigung
+erzeugen eine einmalige Anfrage an den root-eigenen systemd-Helfer.
+Automatische Updates sind standardmäßig aus und erfordern einen sichtbaren
+Opt-in; sie warten mindestens 48 Stunden und laufen nur im Wartungsfenster
+02:00–04:00 Europe/Berlin. Bei einem Fehler wird die Automatik abgeschaltet.

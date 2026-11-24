@@ -199,15 +199,17 @@ Dateien bleiben als Rückfallquelle erhalten.
 
 ## Aktualisieren
 
-```bash
-cd open-dachs-manager
-git pull --ff-only
-sudo ./install.sh
-```
+Normale Produktaktualisierungen erfolgen als Administrator unter
+`System → Updates`. ODM akzeptiert ausschließlich stabile Releases mit
+kanonischem Manifest, gepinnter Ed25519-Signatur und geprüftem Wheel. Die
+Installation startet erst nach Passwort-Reauthentifizierung, exakter Vorschau
+und Bestätigung; Automatik ist standardmäßig aus.
 
-Lokale Datenbank, Benutzerdatei und das getrennte Verzeichnis
-`backup-archive` bleiben erhalten. Die beiden Dienste werden erst neu
-gestartet, nachdem Paket und Konfiguration vollständig installiert wurden.
+`sudo ./install.sh` aus einem separat geprüften Quellbaum bleibt als manueller
+Wiederherstellungsweg. Lokale Datenbank, Benutzerdatei und das getrennte
+Verzeichnis `backup-archive` bleiben dabei erhalten. Die beiden Dienste werden
+erst neu gestartet, nachdem Paket und Konfiguration vollständig installiert
+wurden.
 
 ## Deinstallieren
 
@@ -225,3 +227,14 @@ sudo ./uninstall.sh --purge-data
 
 Das vollständige Löschen ist ohne vorherige Sicherung von
 `/var/lib/open-dachs-manager` nicht rückgängig zu machen.
+
+## Release-Layout und Update-Helfer (1.8.17)
+
+Installationen verwenden /opt/open-dachs-manager/releases/<version>-<digest>/venv
+und den root-eigenen Symlink /opt/open-dachs-manager/current. Beide festen
+Produktdienste starten aus current/venv. install.sh migriert eine bisherige
+Installation einmalig in dieses Layout und installiert außerdem den root-eigenen
+Helfer, die systemd-path/service-Units und den öffentlichen Release-Schlüssel.
+Der Webdienst behält NoNewPrivileges=true und schreibt nur verifizierte
+Staging-Dateien sowie die atomare Anfrage. Vor dem ersten öffentlichen Tag muss
+das GitHub-Secret ODM_RELEASE_SIGNING_KEY exakt zum gepinnten Schlüssel gehören.

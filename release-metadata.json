@@ -1,0 +1,1 @@
+{"schema":"open-dachs-release-metadata/v1","releases":{"1.8.17":{"auto_eligible":true,"db_schema_from":1,"db_schema_to":1,"min_helper_version":"1.0.0","rollback_compatible":true}}}

@@ -141,6 +141,69 @@ def fuel_type_from_raw(value: object) -> str:
     return "unknown"
 
 
+FUEL_TYPE_KEY = "Hka_Mw1.bKraftstofftyp"
+# Block-24-Basis 0x0ed4 + 54 = RAM-Typcode 0x000f0a (0x08 = HR 5.3 Öl).
+FUEL_TYPE_OFFSET = 54
+FUEL_TYPE_ADDRESS = "0x000f0a"
+FUEL_LABELS = {"gas": "Gas", "oil": "Heizöl"}
+
+
+def _payload_fuel_raw(payload: bytes | None) -> int | None:
+    if payload is None or len(payload) <= FUEL_TYPE_OFFSET:
+        return None
+    return int(payload[FUEL_TYPE_OFFSET])
+
+
+def fuel_type_from_block24(fields: list[dict], payload: bytes | None) -> tuple[str, object]:
+    """Fuel from the decoded type code, cross-checked against the raw payload byte.
+
+    Reports before 1.1.0 decoded this field at a wrong offset (raw 0) and
+    silently fell back to gas.  A disagreement between the decoded field and
+    the payload byte at offset 54 is therefore treated as unknown.
+    """
+    decoded = next((item for item in fields if item.get("key") == FUEL_TYPE_KEY), {})
+    raw = decoded.get("raw")
+    payload_raw = _payload_fuel_raw(payload)
+    if payload_raw is not None and raw != payload_raw:
+        return "unknown", raw
+    return fuel_type_from_raw(raw), raw
+
+
+def maintenance_fuel_check(report: dict, protocol: dict, stored: object = None) -> dict:
+    """Leading fuel type plus visible inconsistency with the frozen snapshot."""
+    leading = str(stored or protocol.get("fuel_type") or "gas")
+    report_fuel = report.get("fuel_type")
+    payload_hex = str(((report.get("blocks") or {}).get("24") or {}).get("payload_hex") or "")
+    try:
+        payload_raw = _payload_fuel_raw(bytes.fromhex(payload_hex)) if payload_hex else None
+    except ValueError:
+        payload_raw = None
+    payload_fuel = fuel_type_from_raw(payload_raw) if payload_raw is not None else None
+    consistent = report_fuel in {None, leading} and payload_fuel in {None, "unknown", leading}
+    message = None
+    if not consistent:
+        parts = [f"Führend ist {FUEL_LABELS.get(leading, leading)} (Berichtsfeld)."]
+        if report_fuel not in {None, leading}:
+            parts.append(
+                f"Der eingefrorene Snapshot nennt {FUEL_LABELS.get(str(report_fuel), report_fuel)}."
+            )
+        if payload_fuel not in {None, "unknown"}:
+            parts.append(
+                f"Typcode im Block-24-Payload: 0x{payload_raw:02x} = "
+                f"{FUEL_LABELS.get(payload_fuel, payload_fuel)}."
+            )
+        message = "Brennstoff uneinheitlich: " + " ".join(parts)
+    return {
+        "fuel_type": leading,
+        "report_fuel_type": report_fuel,
+        "payload_raw": payload_raw,
+        "payload_fuel_type": payload_fuel,
+        "consistent": consistent,
+        "locked": bool(report.get("fuel_source")) and report_fuel in {"gas", "oil"},
+        "message": message,
+    }
+
+
 def checklist_definition(fuel_type: str) -> list[dict]:
     items = OIL_CHECKLIST if fuel_type == "oil" else GAS_CHECKLIST
     return [
@@ -208,10 +271,18 @@ def new_protocol(fuel_type: str, block100_fields: list[dict]) -> dict:
     }
 
 
-def validate_protocol(protocol: dict, *, complete: bool = False) -> dict:
+def validate_protocol(
+    protocol: dict, *, complete: bool = False, report: dict | None = None
+) -> dict:
     fuel_type = str(protocol.get("fuel_type", "gas"))
     if fuel_type not in {"gas", "oil"}:
         raise ValueError("Kraftstoffart muss Gas oder Heizöl sein")
+    if report is not None and report.get("fuel_source") and report.get("fuel_type") in {"gas", "oil"}:
+        if fuel_type != report["fuel_type"]:
+            raise ValueError(
+                "Kraftstoffart ist durch den Regler-Typcode festgelegt "
+                f"({FUEL_LABELS[report['fuel_type']]})"
+            )
     technician = str(protocol.get("technician", "")).strip()
     if len(technician) > 19:
         raise ValueError("Monteur/Firma darf höchstens 19 Zeichen haben (Reglerfeld)")
@@ -435,6 +506,16 @@ def _completion_view(completion: dict | None) -> dict:
             ),
             "class": "bad",
         }
+    if completion.get("mode") == "local_intermediate":
+        reason = _text(completion.get("reason"))
+        number = _text(completion.get("maintenance_number"))
+        return {
+            "mode": "local_intermediate",
+            "label": f"ZWISCHENWARTUNG {number}",
+            "detail": f"Grund: {reason}",
+            "controller": "Nur lokal archiviert · keine Authentifizierung · keine Reglerdaten geschrieben",
+            "class": "demo",
+        }
     if completion.get("mode") == "demo" or completion.get("controller_written") is False:
         return {
             "mode": "demo",
@@ -477,8 +558,10 @@ def report_text_lines(report: dict, protocol: dict, completion: dict | None = No
         f"Backup file_sha256: {_text(archive.get('file_sha256'))}",
         f"Betriebsstunden: {_text(summary.get('operating_hours'))}; Starts: {_text(summary.get('starts'))}",
         f"Wartungsstatus: {_text(status.get('title'))}",
+        f"Wartungsnummer: {_text((completion or {}).get('maintenance_number') or summary.get('maintenance_count'))}",
         f"Monteur/Firma: {_text(protocol.get('technician'))}",
         f"Abschluss: {completion_view['label']} – {completion_view['controller']}",
+        f"Grund Zwischenwartung: {_text((completion or {}).get('reason'))}",
         "",
         "Regler-Prüfpunkte",
     ]
@@ -545,7 +628,7 @@ def report_html(report: dict, protocol: dict, completion: dict | None = None) ->
     failed_text = ", ".join(str(item.get("block")) for item in (report.get("snapshot") or {}).get("failed_blocks", [])) or "keine"
     controller_step = (
         "Demo – übersprungen"
-        if completion_view["mode"] == "demo"
+        if completion_view["mode"] in {"demo", "local_intermediate"}
         else "Ausstehend"
         if completion_view["mode"] == "draft"
         else "Zustand unklar – ACK/Readback prüfen"
@@ -554,6 +637,7 @@ def report_html(report: dict, protocol: dict, completion: dict | None = None) ->
     )
     sequence_controller_steps = {
         "demo": ("Demo: aus", "Demo: aus"),
+        "local_intermediate": ("lokal: aus", "lokal: aus"),
         "draft": ("ausstehend", "ausstehend"),
         "uncertain": ("Zustand unklar", "Zustand unklar"),
         "live": ("kontrolliert", "Bestätigung"),
@@ -562,12 +646,12 @@ def report_html(report: dict, protocol: dict, completion: dict | None = None) ->
     software = " · ".join(_text(summary.get(key)) for key in ("software_regler", "software_ueberw", "software_messen"))
     html = f"""<!doctype html><html lang='de'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'><title>{document_id} · Wartungsnachweis</title><style>{_REPORT_CSS}</style></head><body>
 <section class='page'>{"<div class='ribbon'>DEMOLAUF · KEIN REGLERWRITE</div>" if completion_view['mode'] == 'demo' else ""}{_html_header(document_id,1,'Wartungsnachweis')}
-<div class='band'><div class='datum'><span class='label'>Anlage</span><span class='value'>Dachs · {fuel}</span></div><div class='datum'><span class='label'>Seriennummer</span><span class='value'>{_h(summary.get('serial_number'))}</span></div><div class='datum'><span class='label'>Wartung</span><span class='value'>Nr. {_h(summary.get('maintenance_count'))}</span></div><div class='datum'><span class='label'>Erfasst</span><span class='value'>{_h(_date_text(report.get('generated_at')))}</span></div></div>
+<div class='band'><div class='datum'><span class='label'>Anlage</span><span class='value'>Dachs · {fuel}</span></div><div class='datum'><span class='label'>Seriennummer</span><span class='value'>{_h(summary.get('serial_number'))}</span></div><div class='datum'><span class='label'>Wartung</span><span class='value'>Nr. {_h((completion or {}).get('maintenance_number') or summary.get('maintenance_count'))}</span></div><div class='datum'><span class='label'>Erfasst</span><span class='value'>{_h(_date_text(report.get('generated_at')))}</span></div></div>
 <div class='section-title'>Anlage und Auftrag <small>Automatische Werte beim Wartungsstart eingefroren</small></div><div class='grid-2'><article class='card'><div class='card-title'>Anlagenstand</div><dl style='margin:0'><div class='kv'><dt>Anlagentyp</dt><dd>Dachs {fuel} · MSR2</dd></div><div class='kv'><dt>Softwarestände</dt><dd>{_h(software)}</dd></div><div class='kv'><dt>Wartungsstatus</dt><dd>{_h(status.get('title'))}</dd></div><div class='kv'><dt>Restzeit</dt><dd>{_h(status.get('remaining_hours'))} Bh · {_h(status.get('remaining_days'))} Tage</dd></div></dl></article><article class='card'><div class='card-title'>Wartungsauftrag</div><dl style='margin:0'><div class='kv'><dt>Monteur / Firma</dt><dd>{_h(protocol.get('technician'))}</dd></div><div class='kv'><dt>Betriebsstunden</dt><dd>{_h(summary.get('operating_hours'))} Bh</dd></div><div class='kv'><dt>Starts / Störungen</dt><dd>{_h(summary.get('starts'))} / {_h(summary.get('fault_count'))}</dd></div><div class='kv'><dt>Erstellt von</dt><dd>{_h(report.get('generated_by'))}</dd></div></dl></article></div>
 <div class='states'><article class='state'><span class='label'>Anlagen-Snapshot</span><b>{captured}/{attempted}</b><p>Blöcke gemeinsam gelesen</p></article><article class='state'><span class='label'>Regler-Prüfpunkte</span><b>{len(checklist)}</b><p>für {fuel}</p></article><article class='state'><span class='label'>Zusatzarbeiten</span><b>{len(SUPPLEMENTAL_WORK)}</b><p>nur lokal dokumentiert</p></article><article class='state'><span class='label'>Messfelder</span><b>{len(MAINTENANCE_MEASUREMENTS)}</b><p>Vorher-/Nachher-Werte</p></article></div>
 <div class='section-title'>Messwerte <small>Vorher-/Nachher-Vergleich</small></div><table class='data-table'><thead><tr><th>Messgröße</th><th class='right'>Vorher</th><th class='right'>Nachher</th><th class='right'>Änderung</th><th>Bewertung</th></tr></thead><tbody>{measurement_rows}</tbody></table>
 <div class='section-title'>Ergebnis und Besonderheiten</div><div class='result'><div class='result-copy'><strong>{_h(completion_view['detail'])}</strong><p>{_h(protocol.get('notes'))}</p></div><div class='result-state {completion_view['class']}'>{_h(completion_view['label'])}<br><small>{_h(completion_view['controller'])}</small></div></div>
-<div class='section-title'>Abschlussweg <small>Demo und echter Reglerabschluss bleiben eindeutig getrennt</small></div><div class='audit'><div class='audit-step'><strong>1 · Protokoll</strong><span>Prüfpunkte und Messwerte lokal validiert.</span></div><div class='arrow'>›</div><div class='audit-step'><strong>2 · Block 100</strong><span>{_h(controller_step)}</span></div><div class='arrow'>›</div><div class='audit-step'><strong>3 · Block 104</strong><span>{_h('Demo – Bestätigungsbit unverändert' if completion_view['mode']=='demo' else controller_step)}</span></div></div>
+<div class='section-title'>Abschlussweg <small>Demo und echter Reglerabschluss bleiben eindeutig getrennt</small></div><div class='audit'><div class='audit-step'><strong>1 · Protokoll</strong><span>Prüfpunkte und Messwerte lokal validiert.</span></div><div class='arrow'>›</div><div class='audit-step'><strong>2 · Block 100</strong><span>{_h(controller_step)}</span></div><div class='arrow'>›</div><div class='audit-step'><strong>3 · Block 104</strong><span>{_h('Demo – Bestätigungsbit unverändert' if completion_view['mode'] in {'demo','local_intermediate'} else controller_step)}</span></div></div>
 <div class='signatures'><div class='signature'><span class='label'>Ausführender Betrieb</span><strong>{_h(protocol.get('technician'))}</strong><div class='signature-line'>Name / digitale Freigabe / Datum</div></div><div class='signature'><span class='label'>Betreiber</span><strong>Kenntnisnahme optional</strong><div class='signature-line'>Name / Unterschrift / Datum</div></div></div><footer class='footer'><span>Open Dachs Manager · V3 {__version__} · unabhängiges Open-Source-Projekt</span><span>{document_id} · 1/3</span></footer></section>
 <section class='page'>{_html_header(document_id,2,'')}<h1 style='margin:0;color:#14473d'>Arbeitsliste · Anlagenvariante {fuel}</h1><p style='color:#61706b'>Reglergestützte Prüfpunkte und ergänzende, ausschließlich lokal protokollierte Arbeitsschritte.</p><div class='task-intro'><div class='callout'><strong>Digitale Arbeitsliste</strong><br>Die Liste dokumentiert Ergebnisse, ersetzt jedoch keine gültige Wartungsanleitung oder fachliche Sicherheitsprüfung.</div><div class='legend'><span class='badge good'>Ja / i. O.</span> <span class='badge warn'>Korrigiert</span> <span class='badge bad'>Nein</span> <span class='badge neutral'>offen</span></div></div><table class='task-table'><thead><tr><th>Nr.</th><th>Arbeitsgang / Prüfumfang</th><th>Datenziel</th><th>Ergebnis</th><th>Befund</th></tr></thead><tbody><tr class='group'><td colspan='5'>A · MSR2-Prüfpunkte</td></tr>{checklist_rows}<tr class='group'><td colspan='5'>B · Ergänzende lokale Arbeiten</td></tr>{supplemental_rows}</tbody></table><div class='note-box'><strong>Hinweis:</strong> Nur die MSR2-Prüfpunkte und vorhandenen Wartungsmesswerte besitzen definierte Reglerfelder. Zusatzarbeiten, Bemerkungen und Signaturen bleiben ausschließlich im lokalen Pi-Archiv.</div><footer class='footer'><span>Open Dachs Manager · Arbeitsliste</span><span>{document_id} · 2/3</span></footer></section>
 <section class='page'>{_html_header(document_id,3,'')}<h1 style='margin:0;color:#14473d'>Technischer Anlagenanhang</h1><p style='color:#61706b'>Kompakter Nachweis des gemeinsamen Anlagenzustands und des Abschlusswegs.</p><div class='provenance'><div class='prov'><span class='label'>Snapshot</span><strong>{captured}/{attempted}</strong><small>adressierbare Blöcke</small></div><div class='prov'><span class='label'>Lesefehler</span><strong>{failed}</strong><small>Blöcke: {_h(failed_text)}</small></div><div class='prov'><span class='label'>Packrevision</span><strong>{_h(report.get('pack_rev'))}</strong><small>Mappingstand</small></div><div class='prov'><span class='label'>Abschluss</span><strong>{_h(completion_view['mode'].upper())}</strong><small>{_h(completion_view['controller'])}</small></div></div>
@@ -651,7 +735,7 @@ def report_pdf(report: dict, protocol: dict, completion: dict | None = None) -> 
     header = Table([[brand_cell, Paragraph("<b>Wartungsnachweis</b><br/><font size='7' color='#61706b'>Digitales Anlagen- und Arbeitsprotokoll</font>", title), pm(f"Dokument<br/><b>{document_id}</b><br/>Revision 01 · Seite 1/3", small)]], colWidths=[43 * mm, 91 * mm, 54 * mm])
     header.setStyle(TableStyle([("BOX",(0,0),(-1,-1),0.8,palette["brand_dark"]), ("VALIGN",(0,0),(-1,-1),"MIDDLE"), ("LEFTPADDING",(1,0),(-1,-1),9), ("RIGHTPADDING",(0,0),(-1,-1),7)]))
     story.extend([header, Spacer(1, 4)])
-    band = styled_table([[pm("<font size='6' color='#61706b'>ANLAGE</font><br/><b>Dachs · " + escape(fuel) + "</b>"), pm("<font size='6' color='#61706b'>SERIENNUMMER</font><br/><b>" + escape(_text(summary.get("serial_number"))) + "</b>"), pm("<font size='6' color='#61706b'>WARTUNG</font><br/><b>Nr. " + escape(_text(summary.get("maintenance_count"))) + "</b>"), pm("<font size='6' color='#61706b'>ERFASST</font><br/><b>" + escape(_date_text(report.get("generated_at"))) + "</b>")]], [48*mm,42*mm,35*mm,63*mm], [("LINEBEFORE",(0,0),(0,-1),3,palette["brand"]), ("TOPPADDING",(0,0),(-1,-1),7), ("BOTTOMPADDING",(0,0),(-1,-1),7)])
+    band = styled_table([[pm("<font size='6' color='#61706b'>ANLAGE</font><br/><b>Dachs · " + escape(fuel) + "</b>"), pm("<font size='6' color='#61706b'>SERIENNUMMER</font><br/><b>" + escape(_text(summary.get("serial_number"))) + "</b>"), pm("<font size='6' color='#61706b'>WARTUNG</font><br/><b>Nr. " + escape(_text((completion or {}).get("maintenance_number") or summary.get("maintenance_count"))) + "</b>"), pm("<font size='6' color='#61706b'>ERFASST</font><br/><b>" + escape(_date_text(report.get("generated_at"))) + "</b>")]], [48*mm,42*mm,35*mm,63*mm], [("LINEBEFORE",(0,0),(0,-1),3,palette["brand"]), ("TOPPADDING",(0,0),(-1,-1),7), ("BOTTOMPADDING",(0,0),(-1,-1),7)])
     story.extend([band, Paragraph("Anlage und Auftrag", heading)])
     software = " · ".join(_text(summary.get(key)) for key in ("software_regler", "software_ueberw", "software_messen"))
     left_data = [[p("Anlagentyp", small), p(f"Dachs {fuel} · MSR2")], [p("Softwarestände", small), p(software)], [p("Wartungsstatus", small), p(status.get("title"))], [p("Restzeit", small), p(f"{_text(status.get('remaining_hours'))} Bh · {_text(status.get('remaining_days'))} Tage")]]
@@ -672,7 +756,7 @@ def report_pdf(report: dict, protocol: dict, completion: dict | None = None) -> 
     story.extend([result, Spacer(1, 5)])
     controller_step = (
         "Demo: übersprungen"
-        if completion_view["mode"] == "demo"
+        if completion_view["mode"] in {"demo", "local_intermediate"}
         else "noch nicht ausgeführt"
         if completion_view["mode"] == "draft"
         else "Zustand unklar – ACK/Readback prüfen"
@@ -681,12 +765,13 @@ def report_pdf(report: dict, protocol: dict, completion: dict | None = None) -> 
     )
     sequence_controller_steps = {
         "demo": ("Demo: aus", "Demo: aus"),
+        "local_intermediate": ("lokal: aus", "lokal: aus"),
         "draft": ("ausstehend", "ausstehend"),
         "uncertain": ("Zustand unklar", "Zustand unklar"),
         "live": ("kontrolliert", "Bestätigung"),
     }
     sequence_block_100, sequence_block_104 = sequence_controller_steps[completion_view["mode"]]
-    audit = styled_table([[p("1 · Protokoll", normal), p("2 · Block 100", normal), p("3 · Block 104", normal)], [p("Prüfpunkte und Messwerte lokal validiert.", small), p(controller_step, small), p("Demo: Bestätigungsbit unverändert" if completion_view["mode"] == "demo" else controller_step, small)]], [62.7*mm]*3, [("BACKGROUND",(0,0),(-1,-1),palette["soft"]), ("LINEABOVE",(0,0),(-1,0),2,palette["brand"])])
+    audit = styled_table([[p("1 · Protokoll", normal), p("2 · Block 100", normal), p("3 · Block 104", normal)], [p("Prüfpunkte und Messwerte lokal validiert.", small), p(controller_step, small), p("Lokal: Bestätigungsbit unverändert" if completion_view["mode"] in {"demo", "local_intermediate"} else controller_step, small)]], [62.7*mm]*3, [("BACKGROUND",(0,0),(-1,-1),palette["soft"]), ("LINEABOVE",(0,0),(-1,0),2,palette["brand"])])
     story.extend([audit, Spacer(1, 5), styled_table([[p("Ausführender Betrieb", small), p("Betreiber / Kenntnisnahme", small)], [p(protocol.get("technician")), p("____________________________")], [p("Name / digitale Freigabe / Datum", small), p("Name / Unterschrift / Datum", small)]], [94*mm,94*mm], [("TOPPADDING",(0,1),(-1,1),8), ("BOTTOMPADDING",(0,1),(-1,1),8)])])
 
     story.append(PageBreak())

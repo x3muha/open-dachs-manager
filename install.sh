@@ -2,13 +2,17 @@
 set -euo pipefail
 
 readonly ODM_INSTALL_ROOT="/opt/open-dachs-manager"
-readonly ODM_VENV="$ODM_INSTALL_ROOT/venv"
+readonly ODM_RELEASES="$ODM_INSTALL_ROOT/releases"
+readonly ODM_CURRENT="$ODM_INSTALL_ROOT/current"
+readonly ODM_VENV="$ODM_CURRENT/venv"
 readonly ODM_CONFIG_DIR="/etc/open-dachs-manager"
 readonly ODM_CONFIG_FILE="$ODM_CONFIG_DIR/open-dachs-manager.env"
 readonly ODM_DATA_DIR="/var/lib/open-dachs-manager"
 readonly ODM_SERVICE_USER="open-dachs"
 readonly ODM_SERIAL_SERVICE="open-dachs-manager-serial.service"
 readonly ODM_WEB_SERVICE="open-dachs-manager-web.service"
+readonly ODM_UPDATE_PATH="open-dachs-manager-update.path"
+readonly ODM_UPDATE_SERVICE="open-dachs-manager-update.service"
 readonly ODM_LEGACY_SERIAL_SERVICE="dachs-v3-serial-worker.service"
 readonly ODM_LEGACY_WEB_SERVICE="dachs-v3-web.service"
 readonly ODM_LEGACY_DATA_DIR="/var/lib/dachs-v3-web"
@@ -40,7 +44,8 @@ Optionen:
   --replace-legacy    Alte dachs-v3-Dienste stoppen und lokale Daten übernehmen
   -h, --help          Diese Hilfe anzeigen
 
-Ein erneuter Aufruf nach `git pull` aktualisiert die bestehende Installation.
+Ein erneuter Aufruf aus einem bewusst geprüften Quellbaum ist nur der manuelle
+Rückfallweg; normale Aktualisierungen laufen signiert unter System → Updates.
 Auf Debian und Raspberry Pi OS installiert das Skript fehlende Systempakete
 (Python, venv, pip, Git und CA-Zertifikate) automatisch über apt.
 EOF
@@ -113,7 +118,7 @@ if [[ -n "$ODM_SERVICE_CODES_FILE" ]]; then
 fi
 
 install_system_dependencies() {
-  local packages=(git python3 python3-venv python3-pip ca-certificates)
+  local packages=(git python3 python3-venv python3-pip ca-certificates openssl psmisc)
   local missing=()
   local package_name
 
@@ -144,7 +149,7 @@ install_system_dependencies() {
 
 install_system_dependencies
 
-for command_name in python3 systemctl getent groupadd useradd usermod install stat mktemp tar readlink chmod chown; do
+for command_name in python3 systemctl getent groupadd useradd usermod install stat mktemp tar readlink chmod chown openssl sha256sum find sort xargs cut mv ln fuser; do
   command -v "$command_name" >/dev/null 2>&1 || die "benötigter Befehl fehlt: $command_name"
 done
 
@@ -203,8 +208,48 @@ if [[ -e "$ODM_SERIAL_PORT" ]]; then
   fi
 fi
 
-install -d -m 0755 -o root -g root "$ODM_INSTALL_ROOT"
+install -d -m 0755 -o root -g root "$ODM_INSTALL_ROOT" "$ODM_RELEASES"
 install -d -m 0750 -o "$ODM_SERVICE_USER" -g "$ODM_SERVICE_USER" "$ODM_DATA_DIR"
+python3 - <<'PY' || die "Updater-Verzeichnisse konnten nicht sicher angelegt werden"
+import os
+import stat
+
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+parent = os.open("/var/lib", flags)
+try:
+    try:
+        os.mkdir("open-dachs-manager-updater", 0o700, dir_fd=parent)
+    except FileExistsError:
+        pass
+    updater = os.open("open-dachs-manager-updater", flags, dir_fd=parent)
+    try:
+        info = os.fstat(updater)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0:
+            raise PermissionError("unsicheres Updater-Verzeichnis")
+        os.fchmod(updater, 0o700)
+        os.fchown(updater, 0, 0)
+        for name in ("evidence", "backups"):
+            try:
+                os.mkdir(name, 0o700, dir_fd=updater)
+            except FileExistsError:
+                pass
+            child = os.open(name, flags, dir_fd=updater)
+            try:
+                child_info = os.fstat(child)
+                if not stat.S_ISDIR(child_info.st_mode) or child_info.st_uid != 0:
+                    raise PermissionError(f"unsicheres Updater-Unterverzeichnis: {name}")
+                os.fchmod(child, 0o700)
+                os.fchown(child, 0, 0)
+            finally:
+                os.close(child)
+    finally:
+        os.close(updater)
+finally:
+    os.close(parent)
+PY
+install -d -m 0750 -o "$ODM_SERVICE_USER" -g "$ODM_SERVICE_USER" \
+  "$ODM_DATA_DIR/update-staging"
+chmod 0700 "$ODM_DATA_DIR/update-staging"
 python3 - "$ODM_DATA_DIR" "$ODM_SERVICE_USER" <<'PY' || die "Backup-Archiv konnte nicht sicher angelegt werden"
 import os
 import pwd
@@ -244,8 +289,6 @@ if [[ -n "$ODM_SERVICE_CODES_FILE" ]]; then
   printf 'Lokaler Fehlerkatalog installiert: %s\n' "$ODM_INSTALLED_SERVICE_CODES"
 fi
 
-python3 -m venv "$ODM_VENV" || die "Python-Umgebung konnte nicht erstellt werden"
-
 # Build from a fresh staging tree.  Setuptools may otherwise reuse an ignored
 # build/ directory from an older checkout and accidentally retain files that
 # were deliberately removed from a newer release.
@@ -258,11 +301,25 @@ tar \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
   -C "$ODM_PROJECT_DIR" -cf - . | tar -C "$ODM_BUILD_SOURCE" -xf -
-"$ODM_VENV/bin/python" -m pip \
+ODM_RELEASE_VERSION="$(python3 -c 'import sys; ns={}; exec(open(sys.argv[1]).read(),ns); print(ns["__version__"])' \
+  "$ODM_BUILD_SOURCE/src/open_dachs_manager/__init__.py" \
+  2>/dev/null)" || die "Releaseversion konnte nicht gelesen werden"
+ODM_RELEASE_DIGEST="$(cd "$ODM_BUILD_SOURCE" && find . -type f -print0 | sort -z | \
+  xargs -0 sha256sum | sha256sum | cut -c1-16)"
+ODM_RELEASE_DIR="$ODM_RELEASES/$ODM_RELEASE_VERSION-$ODM_RELEASE_DIGEST"
+if [[ ! -d "$ODM_RELEASE_DIR/venv" ]]; then
+  install -d -m 0755 -o root -g root "$ODM_RELEASE_DIR"
+  python3 -m venv "$ODM_RELEASE_DIR/venv" || die "Python-Umgebung konnte nicht erstellt werden"
+fi
+"$ODM_RELEASE_DIR/venv/bin/python" -m pip \
   --disable-pip-version-check \
   --no-cache-dir \
   install --upgrade "$ODM_BUILD_SOURCE"
 rm -rf -- "$ODM_BUILD_SOURCE"
+chown -R root:root "$ODM_RELEASE_DIR"
+ODM_CURRENT_TEMP="$ODM_INSTALL_ROOT/.current.$$"
+ln -s "$ODM_RELEASE_DIR" "$ODM_CURRENT_TEMP"
+mv -Tf "$ODM_CURRENT_TEMP" "$ODM_CURRENT"
 ln -sfn "$ODM_VENV/bin/open-dachs" /usr/local/bin/open-dachs
 ln -sfn "$ODM_VENV/bin/open-dachs-manager" /usr/local/bin/open-dachs-manager
 
@@ -277,6 +334,40 @@ if [[ ! -f "$ODM_DATA_DIR/maintenance_settings.json" && -f "$ODM_CONFIG_FILE" ]]
   ODM_EXISTING_MAINTENANCE_MODE="$(sed -n 's/^OPEN_DACHS_MAINTENANCE_LIVE_WRITES=//p' "$ODM_CONFIG_FILE" | tail -n 1)"
   case "${ODM_EXISTING_MAINTENANCE_MODE,,}" in
     1|true|yes|on) ODM_MAINTENANCE_LIVE_WRITES=1 ;;
+  esac
+fi
+
+# Manual service-code reset remains fail-closed on new installations. Preserve
+# only an explicit prior installation-specific approval when upgrading; the
+# installer must not silently enable it or discard an operator's reviewed gate.
+ODM_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=0
+if [[ -f "$ODM_CONFIG_FILE" ]]; then
+  ODM_EXISTING_SERVICE_RESET_POLICY="$(sed -n 's/^OPEN_DACHS_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=//p' "$ODM_CONFIG_FILE" | tail -n 1)"
+  case "${ODM_EXISTING_SERVICE_RESET_POLICY,,}" in
+    1|true|yes|on) ODM_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=1 ;;
+  esac
+fi
+
+# Private SMTP targets are blocked in the web application unless root pins an
+# exact comma-separated host:port allowlist here. Preserve only a syntactically
+# bounded existing value; the web UI cannot create or modify this variable.
+ODM_SMTP_PRIVATE_ALLOWLIST=""
+if [[ -f "$ODM_CONFIG_FILE" ]]; then
+  ODM_EXISTING_SMTP_ALLOWLIST="$(sed -n 's/^OPEN_DACHS_SMTP_PRIVATE_ALLOWLIST=//p' "$ODM_CONFIG_FILE" | tail -n 1)"
+  case "$ODM_EXISTING_SMTP_ALLOWLIST" in
+    *[!A-Za-z0-9._,:-]*) ;;
+    *) ODM_SMTP_PRIVATE_ALLOWLIST="$ODM_EXISTING_SMTP_ALLOWLIST" ;;
+  esac
+fi
+
+# Plain SMTP is a separate, stronger opt-in: only exact internal host:port
+# entries are accepted, and the application forbids authentication in this mode.
+ODM_SMTP_PLAIN_ALLOWLIST=""
+if [[ -f "$ODM_CONFIG_FILE" ]]; then
+  ODM_EXISTING_SMTP_PLAIN_ALLOWLIST="$(sed -n 's/^OPEN_DACHS_SMTP_PLAIN_ALLOWLIST=//p' "$ODM_CONFIG_FILE" | tail -n 1)"
+  case "$ODM_EXISTING_SMTP_PLAIN_ALLOWLIST" in
+    *[!A-Za-z0-9._,:-]*) ;;
+    *) ODM_SMTP_PLAIN_ALLOWLIST="$ODM_EXISTING_SMTP_PLAIN_ALLOWLIST" ;;
   esac
 fi
 {
@@ -296,14 +387,27 @@ fi
   printf 'OPEN_DACHS_WEB_INTERVAL=0.75\n'
   printf 'OPEN_DACHS_HISTORY_INTERVAL=0\n'
   printf 'OPEN_DACHS_MAINTENANCE_LIVE_WRITES=%s\n' "$ODM_MAINTENANCE_LIVE_WRITES"
+  printf 'OPEN_DACHS_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED=%s\n' \
+    "$ODM_SERVICE_RESET_TEMPERATURE_POLICY_APPROVED"
+  printf 'OPEN_DACHS_SMTP_PRIVATE_ALLOWLIST=%s\n' "$ODM_SMTP_PRIVATE_ALLOWLIST"
+  printf 'OPEN_DACHS_SMTP_PLAIN_ALLOWLIST=%s\n' "$ODM_SMTP_PLAIN_ALLOWLIST"
 } >"$ODM_CONFIG_TEMP"
 install -m 0640 -o root -g "$ODM_SERVICE_USER" "$ODM_CONFIG_TEMP" "$ODM_CONFIG_FILE"
 
 install -m 0644 "$ODM_PROJECT_DIR/systemd/$ODM_SERIAL_SERVICE" "/etc/systemd/system/$ODM_SERIAL_SERVICE"
 install -m 0644 "$ODM_PROJECT_DIR/systemd/$ODM_WEB_SERVICE" "/etc/systemd/system/$ODM_WEB_SERVICE"
+install -m 0644 "$ODM_PROJECT_DIR/systemd/$ODM_UPDATE_PATH" "/etc/systemd/system/$ODM_UPDATE_PATH"
+install -m 0644 "$ODM_PROJECT_DIR/systemd/$ODM_UPDATE_SERVICE" "/etc/systemd/system/$ODM_UPDATE_SERVICE"
+install -m 0755 -o root -g root "$ODM_PROJECT_DIR/scripts/open-dachs-update-helper.py" \
+  /usr/local/libexec/open-dachs-update-helper
+install -d -m 0755 -o root -g root /usr/local/share/open-dachs-manager
+install -m 0644 -o root -g root \
+  "$ODM_PROJECT_DIR/src/open_dachs_manager/data/update_release_public_key.pem" \
+  /usr/local/share/open-dachs-manager/update_release_public_key.pem
 systemctl daemon-reload
 
 if ((ODM_NO_START)); then
+  systemctl enable "$ODM_UPDATE_PATH" >/dev/null
   printf '\nOpen Dachs Manager wurde installiert, die Dienste wurden nicht gestartet.\n'
   printf 'Später starten mit: systemctl enable --now %s %s\n' "$ODM_SERIAL_SERVICE" "$ODM_WEB_SERVICE"
   if [[ -n "$ODM_CALLER" && "$ODM_CALLER" != "root" ]]; then
@@ -335,7 +439,7 @@ if command -v fuser >/dev/null 2>&1 && fuser "$ODM_RESOLVED_SERIAL" >/dev/null 2
   die "das serielle Gerät wird noch von einem anderen Prozess verwendet"
 fi
 
-systemctl enable "$ODM_SERIAL_SERVICE" "$ODM_WEB_SERVICE" >/dev/null
+systemctl enable "$ODM_SERIAL_SERVICE" "$ODM_WEB_SERVICE" "$ODM_UPDATE_PATH" >/dev/null
 if ! systemctl start "$ODM_SERIAL_SERVICE"; then
   journalctl -u "$ODM_SERIAL_SERVICE" -n 30 --no-pager >&2 || true
   die "Serialworker konnte nicht gestartet werden"
@@ -346,6 +450,7 @@ if ! systemctl start "$ODM_WEB_SERVICE"; then
   journalctl -u "$ODM_WEB_SERVICE" -n 30 --no-pager >&2 || true
   die "Webdienst konnte nicht gestartet werden"
 fi
+systemctl start "$ODM_UPDATE_PATH"
 
 systemctl is-active --quiet "$ODM_SERIAL_SERVICE" || die "Serialworker ist nicht aktiv"
 systemctl is-active --quiet "$ODM_WEB_SERVICE" || die "Webdienst ist nicht aktiv"

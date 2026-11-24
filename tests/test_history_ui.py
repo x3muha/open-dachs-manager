@@ -63,9 +63,9 @@ class HistoryUITests(unittest.TestCase):
         self.assertIn('aria-label="Motorstatus aus Block 24 als Zeitband;', self.index)
         self.assertIn('id="motorStatusChart" class="chart motor-status-chart" height="112" tabindex="0"', self.index)
         self.assertIn('api(`/api/motor-status-history?${selection.query}`)', self.app)
-        self.assertIn('["temperature", "motor", "motorStatus", "exhaust"]', self.app)
+        self.assertIn('["temperature", "motor", "motorStatus", "frequency", "exhaust"]', self.app)
         self.assertIn('bindChartZoom($("motorStatusChart"), "motorStatus")', self.app)
-        self.assertIn('["temperatureChart", "motorChart", "motorStatusChart", "exhaustChart"]', self.app)
+        self.assertIn('["temperatureChart", "motorChart", "motorStatusChart", "frequencyChart", "exhaustChart"]', self.app)
         self.assertNotIn("drawChartRunBands(ctx, colors, start, end, left, top, plotW, plotH);\n  const segments", self.app)
         for variable in (
             "--motor-status-off",

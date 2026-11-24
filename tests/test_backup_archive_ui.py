@@ -62,7 +62,6 @@ class BackupArchiveUITests(unittest.TestCase):
         load_end = self.app.index("\nfunction backupImageText", load_start)
         load = self.app[load_start:load_end]
         self.assertIn('$("restoreWriteEnabled").checked = false', load)
-        self.assertIn('$("restoreConfirmation").value = ""', load)
         self.assertIn('$("restorePass4").value = ""', load)
         self.assertIn("renderRestoreBlockList();", load)
         self.assertIn("Kein Ziel ist ausgewählt; Dry-Run bleibt", load)
