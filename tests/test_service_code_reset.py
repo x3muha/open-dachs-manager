@@ -516,18 +516,19 @@ class ServiceResetTests(unittest.TestCase):
 
     def test_token_expiring_during_intent_commit_aborts_before_auth(self):
         preview = self.preview()
-        clock = {"now": 100.0}
+        issued_expires = float(self.app._service_reset_token["expires_at"])
+        clock = {"now": issued_expires - 10.0}
         original_consume = self.app._consume_service_reset_token
         original_begin = self.app.store.begin_service_reset_write_intent
 
         def consume_with_deadline(*args, **kwargs):
             preimage = original_consume(*args, **kwargs)
-            preimage["expires_at"] = 101.0
+            preimage["expires_at"] = clock["now"] + 1.0
             return preimage
 
         def begin_then_expire(*args, **kwargs):
             original_begin(*args, **kwargs)
-            clock["now"] = 102.0
+            clock["now"] += 2.0
 
         with patch(
             "open_dachs_manager.web.time.monotonic",
