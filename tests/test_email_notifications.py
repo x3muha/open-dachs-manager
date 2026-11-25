@@ -1315,7 +1315,7 @@ class EmailNotificationUITests(unittest.TestCase):
         self.assertIn("crypto.randomUUID()", app)
         self.assertIn('$("emailSmtpPassword").value = ""', app)
         self.assertIn(".email-notification-form", css)
-        self.assertIn('static/app.js?v=71', html)
+        self.assertIn('static/app.js?v=72', html)
         self.assertIn('static/style.css?v=50', html)
 
 

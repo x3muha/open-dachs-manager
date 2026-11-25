@@ -1,5 +1,15 @@
 # Änderungsverlauf
 
+## V3 1.8.19 - 2026-11-25
+
+- Die Netzfrequenzachse bleibt dynamisch, hält 50,000 Hz jedoch unabhängig vom
+  ausgewählten Zeitraum exakt in ihrer Mitte. Die größere sichtbare Abweichung
+  nach oben oder unten plus 0,050 Hz Rand bestimmt beide symmetrischen Grenzen;
+  ein Mindesthalbbereich von 0,100 Hz verhindert nervöses Überzoomen. Raster
+  und Kurve verwenden dieselbe nach außen gerundete Schrittweite.
+- Die Änderung betrifft ausschließlich die Darstellung vorhandener Historienwerte.
+  Sie erzeugt keinen zusätzlichen seriellen Zugriff und keinen Reglerwrite.
+
 ## V3 1.8.18 - 2026-11-24
 
 - Der Installer nimmt `curl` jetzt ausdrücklich in Systempaket- und

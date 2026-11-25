@@ -24,7 +24,7 @@ class RepositoryLayoutTests(unittest.TestCase):
             project["tool"]["setuptools"]["dynamic"]["version"],
             {"attr": "open_dachs_manager.__version__"},
         )
-        self.assertEqual(__version__, "1.8.18")
+        self.assertEqual(__version__, "1.8.19")
         self.assertEqual(DachsRequestHandler.server_version, f"OpenDachsManager/{__version__}")
         scripts = project["project"]["scripts"]
         self.assertEqual(scripts["open-dachs"], "open_dachs_manager.cli:main")
@@ -490,7 +490,7 @@ class RepositoryLayoutTests(unittest.TestCase):
         self.assertIn('id="displayStatusHistory"', system_panel)
         self.assertLess(system_panel.index('id="systemStateCards"'), system_panel.index('id="displayStatusHistory"'))
         self.assertLess(system_panel.index('id="displayStatusHistory"'), system_panel.index('id="sootRegenerationCards"'))
-        self.assertIn('static/app.js?v=71', html)
+        self.assertIn('static/app.js?v=72', html)
         self.assertIn('static/style.css?v=50', html)
 
         overview_start = app.index("function renderOverview()")

@@ -410,7 +410,7 @@ const sandbox={console,URLSearchParams,Intl,Date,Number,Math,JSON,Set,Map,WeakMa
  window:{devicePixelRatio:1,matchMedia:()=>({matches:false}),addEventListener:()=>{}},
  getComputedStyle:()=>({getPropertyValue:()=>''})};
 vm.createContext(sandbox); vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),sandbox);
-console.log(vm.runInContext('JSON.stringify({frequency:frequencyScale([50.013,50.018]),frequencyTicks:frequencyTicks(frequencyScale([50.013,50.018])),live:frequencyScale([49.925,50.067]),liveTicks:frequencyTicks(frequencyScale([49.925,50.067])),emptyTicks:frequencyTicks(frequencyScale([])),outlier:frequencyScale([49.1,50.013,51.2]),tick:formatAxisTick(50.013,.05,"frequency"),value:chartValueText(50.013,"Hz"),negativeInput:lowerBoundScale([-1.77,4.61],6,false),positive:lowerBoundScale([0,4.61],6,false)})',sandbox));
+console.log(vm.runInContext('JSON.stringify({frequency:frequencyScale([50.013,50.018]),frequencyTicks:frequencyTicks(frequencyScale([50.013,50.018])),live:frequencyScale([49.925,50.067]),liveTicks:frequencyTicks(frequencyScale([49.925,50.067])),emptyTicks:frequencyTicks(frequencyScale([])),highOnly:frequencyScale([50.120]),lowOnly:frequencyScale([49.720]),outlier:frequencyScale([49.1,50.013,51.2]),tick:formatAxisTick(50.013,.05,"frequency"),value:chartValueText(50.013,"Hz"),negativeInput:lowerBoundScale([-1.77,4.61],6,false),positive:lowerBoundScale([0,4.61],6,false)})',sandbox));
 """
         completed = subprocess.run(
             ["node", "-e", script, str(self.root / "src/open_dachs_manager/web/app.js")],
@@ -418,19 +418,25 @@ console.log(vm.runInContext('JSON.stringify({frequency:frequencyScale([50.013,50
         )
         result = json.loads(completed.stdout)
         scale = result["frequency"]
-        # Keep at least ±0.100 Hz around the data, but align limits and labels
-        # to the same exact tick step used by the curve renderer.
-        self.assertEqual(scale, {"min": 49.9, "max": 50.15, "step": 0.05})
+        # The larger deviation from 50 Hz plus 0.050 Hz headroom controls both
+        # limits. This keeps 50 Hz exactly centred while the selected window
+        # still determines a readable dynamic range.
+        self.assertEqual(scale, {"min": 49.9, "max": 50.1, "step": 0.05})
+        self.assertEqual(result["frequencyTicks"], [50.1, 50.05, 50.0, 49.95, 49.9])
+        self.assertAlmostEqual((scale["min"] + scale["max"]) / 2, 50.0)
+        self.assertGreaterEqual(scale["max"], 50.018 + 0.05)
+        self.assertLessEqual(scale["min"], 50.0 - (50.018 - 50.0) - 0.05)
+        self.assertEqual(result["live"], {"min": 49.85, "max": 50.15, "step": 0.05})
         self.assertEqual(
-            result["frequencyTicks"],
-            [50.15, 50.1, 50.05, 50.0, 49.95, 49.9],
+            result["liveTicks"],
+            [50.15, 50.1, 50.05, 50.0, 49.95, 49.9, 49.85],
         )
-        self.assertLessEqual(scale["min"], 50.013 - 0.1)
-        self.assertGreaterEqual(scale["max"], 50.018 + 0.1)
-        self.assertEqual(result["live"], {"min": 49.8, "max": 50.2, "step": 0.1})
-        self.assertEqual(result["liveTicks"], [50.2, 50.1, 50.0, 49.9, 49.8])
         self.assertEqual(result["emptyTicks"], [50.1, 50.05, 50.0, 49.95, 49.9])
-        self.assertEqual(result["outlier"], {"min": 49.0, "max": 51.5, "step": 0.5})
+        self.assertEqual(result["highOnly"], {"min": 49.8, "max": 50.2, "step": 0.1})
+        self.assertEqual(result["lowOnly"], {"min": 49.6, "max": 50.4, "step": 0.2})
+        self.assertEqual(result["outlier"], {"min": 48.5, "max": 51.5, "step": 0.5})
+        for key in ("frequency", "live", "highOnly", "lowOnly", "outlier"):
+            self.assertAlmostEqual((result[key]["min"] + result[key]["max"]) / 2, 50.0)
         self.assertEqual(result["tick"], "50.013")
         self.assertRegex(result["value"], r"50[,.]013 Hz")
         self.assertEqual(result["negativeInput"]["min"], 0)

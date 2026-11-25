@@ -474,7 +474,7 @@ hat, nicht dass sie im Zielpostfach zugestellt wurde.
 
 ## Reifegrad
 
-Version 1.8.18 basiert auf dem ersten stabilen öffentlichen Stand und wird ohne
+Version 1.8.19 basiert auf dem ersten stabilen öffentlichen Stand und wird ohne
 Garantie bereitgestellt. Gerätevarianten und Packstände können abweichen.
 Leseergebnisse und Feldlagen am tatsächlichen Zielgerät verifizieren, bevor
 Schreibvorgänge freigegeben werden.

@@ -3742,18 +3742,23 @@ function dynamicScale(values) {
 }
 
 function frequencyScale(values = []) {
+  const centre = 50;
+  const padding = .05;
   const numbers = values.filter((value) => Number.isFinite(value));
-  if (!numbers.length) return { min: 49.9, max: 50.1, step: .05 };
-  const paddedMin = Math.min(...numbers) - .1;
-  const paddedMax = Math.max(...numbers) + .1;
-  // Aim for roughly six divisions, then align both limits to that exact
-  // tick step. The former implementation returned a nice step but rendered
-  // four unrelated fractions between unaligned limits (for example 50.167,
-  // 50.082, 49.996 …), so curve and labels looked inconsistent.
-  const step = niceStep((paddedMax - paddedMin) / 6);
-  const min = Math.round((Math.floor(paddedMin / step + 1e-9) * step) * 1000) / 1000;
-  const max = Math.round((Math.ceil(paddedMax / step - 1e-9) * step) * 1000) / 1000;
-  return { min, max, step };
+  const deviation = numbers.length
+    ? Math.max(...numbers.map((value) => Math.abs(value - centre)))
+    : 0;
+  // Keep 50 Hz at the exact vertical centre. The larger excursion on either
+  // side plus 0.050 Hz headroom defines both symmetric limits, rounded out to
+  // a shared readable tick step used by labels and curve geometry alike.
+  const requiredHalfSpan = Math.max(.1, deviation + padding);
+  const step = niceStep((requiredHalfSpan * 2) / 6);
+  const halfSpan = Math.ceil(requiredHalfSpan / step - 1e-9) * step;
+  return {
+    min: Math.round((centre - halfSpan) * 1000) / 1000,
+    max: Math.round((centre + halfSpan) * 1000) / 1000,
+    step,
+  };
 }
 
 function frequencyTicks(scale) {
