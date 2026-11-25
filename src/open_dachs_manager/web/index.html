@@ -988,7 +988,7 @@
       <div class="changelog-list">
         <article class="changelog-entry current">
           <header><strong>V3 __OPEN_DACHS_VERSION__</strong><time datetime="2026-11-25">25.11.2026</time><span>Aktuell</span></header>
-          <ul><li>Die Netzfrequenzachse bleibt dynamisch, hält 50,000 Hz aber exakt mittig; die größere sichtbare Abweichung plus 0,050 Hz Rand bestimmt beide symmetrischen Grenzen.</li><li>Das Prozessbild zeigt die Betriebsfreigabe und bietet Administratoren die getrennten, bestätigungspflichtigen Aktionen „Dachs Ein“ und „Dachs Aus“.</li><li>Ein bedeutet Automatikfreigabe und erzwingt keinen Start; Aus fordert den regulären Stopp an und ist kein Not-Aus.</li><li>Entstören bleibt ein eigener Vorgang. Beide Pfade lesen den Zustand frisch, nutzen feste serverseitige Adressen, Auth-Level 3, höchstens ein Schreibtelegramm, strenge Rücklesung und Abmeldung auf Auth-Level 0.</li><li>Betriebsstunden je Start stammen jetzt direkt aus Block 38 des Reglers statt aus einer ODM-Berechnung der Block-22-Lebenszeitzähler.</li><li>System → E-Mail bietet deaktivierte SMTP-Benachrichtigungen für Wartung, Fehler, ohne bestätigte ODM-Entstörung verschwundene Fehler und frei konfigurierte Temperaturgrenzen. Texte sind je Kategorie bearbeitbar.</li></ul>
+          <ul><li>Netzfrequenz-Raster, Kurve und Hoverpunkt verwenden jetzt exakt dieselbe dynamische Achsenspanne; Werte unter 50 Hz werden nicht mehr optisch nach oben zusammengedrückt.</li><li>Die Netzfrequenzachse bleibt dynamisch, hält 50,000 Hz aber exakt mittig; die größere sichtbare Abweichung plus 0,050 Hz Rand bestimmt beide symmetrischen Grenzen.</li><li>Das Prozessbild zeigt die Betriebsfreigabe und bietet Administratoren die getrennten, bestätigungspflichtigen Aktionen „Dachs Ein“ und „Dachs Aus“.</li><li>Ein bedeutet Automatikfreigabe und erzwingt keinen Start; Aus fordert den regulären Stopp an und ist kein Not-Aus.</li><li>Entstören bleibt ein eigener Vorgang. Beide Pfade lesen den Zustand frisch, nutzen feste serverseitige Adressen, Auth-Level 3, höchstens ein Schreibtelegramm, strenge Rücklesung und Abmeldung auf Auth-Level 0.</li><li>Betriebsstunden je Start stammen jetzt direkt aus Block 38 des Reglers statt aus einer ODM-Berechnung der Block-22-Lebenszeitzähler.</li><li>System → E-Mail bietet deaktivierte SMTP-Benachrichtigungen für Wartung, Fehler, ohne bestätigte ODM-Entstörung verschwundene Fehler und frei konfigurierte Temperaturgrenzen. Texte sind je Kategorie bearbeitbar.</li></ul>
         </article>
         <article class="changelog-entry">
           <header><strong>V3 1.7.0</strong><time datetime="2026-08-24">24.08.2026</time></header>
@@ -1095,6 +1095,6 @@
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="static/app.js?v=72"></script>
+  <script src="static/app.js?v=73"></script>
 </body>
 </html>

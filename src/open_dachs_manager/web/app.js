@@ -3812,6 +3812,15 @@ function chartValueText(value, unit) {
   return `${text}${unit ? ` ${unit}` : ""}`;
 }
 
+function chartAxisSpan(axis) {
+  const span = Number(axis?.max) - Number(axis?.min);
+  return Number.isFinite(span) && span > 0 ? span : 1;
+}
+
+function chartAxisY(axis, value, top, plotH) {
+  return top + ((Number(axis.max) - Number(value)) / chartAxisSpan(axis)) * plotH;
+}
+
 function drawChartHover(ctx, pointer, visibleSeries, dataById, start, end, left, top, plotW, plotH, width, height, group, axisConfig, leftScale, rightScale) {
   if (!pointer || !Number.isFinite(pointer.hoverX) || pointer.hoverX < left || pointer.hoverX > left + plotW) return;
   const hoverTime = start + ((pointer.hoverX - left) / Math.max(1, plotW)) * (end - start);
@@ -3820,7 +3829,7 @@ function drawChartHover(ctx, pointer, visibleSeries, dataById, start, end, left,
     const point = nearestChartPoint(dataById.get(item.id) || [], hoverTime);
     if (!point) continue;
     const axis = axisConfig && axisConfig.right.ids.includes(item.id) ? rightScale : leftScale;
-    const y = top + ((axis.max - point.number) / Math.max(1, axis.max - axis.min)) * plotH;
+    const y = chartAxisY(axis, point.number, top, plotH);
     samples.push({ item, point, y });
   }
   if (!samples.length) return;
@@ -3952,7 +3961,7 @@ function drawChart(canvas, series, rangeHours, group, requestedWindow = null) {
     if (!data.length) continue;
     const axis = dualAxis && axisConfig.right.ids.includes(item.id) ? rightScale : leftScale;
     ctx.strokeStyle=item.color; ctx.lineWidth=2.2; ctx.beginPath();
-    data.forEach((point,index)=>{const x=left+((point.time-start)/Math.max(1,end-start))*plotW;const y=top+((axis.max-point.number)/Math.max(1,axis.max-axis.min))*plotH;if(index)ctx.lineTo(x,y);else ctx.moveTo(x,y);}); ctx.stroke();
+    data.forEach((point,index)=>{const x=left+((point.time-start)/Math.max(1,end-start))*plotW;const y=chartAxisY(axis,point.number,top,plotH);if(index)ctx.lineTo(x,y);else ctx.moveTo(x,y);}); ctx.stroke();
   }
   if (noStoredPoints || !visibleSeries.length || !visible.length) { ctx.fillStyle=colors.ink; ctx.font="13px system-ui"; ctx.textAlign="center"; ctx.fillText(noStoredPoints ? "Noch keine gespeicherten Messwerte" : "Alle Werte ausgeblendet", left+plotW/2, top+plotH/2); ctx.textAlign="left"; }
   ctx.fillStyle=colors.ink; ctx.textAlign="left"; ctx.fillText(chartTimeLabel(start, end - start),left,height-8); ctx.textAlign="right"; ctx.fillText(chartTimeLabel(end, end - start),left+plotW,height-8); ctx.textAlign="left";

@@ -1,5 +1,14 @@
 # Änderungsverlauf
 
+## V3 1.8.20 - 2026-11-25
+
+- Netzfrequenz-Raster, Kurve und Hoverpunkt teilen nun exakt dieselbe reale
+  Achsenspanne. Die Zeichenroutine erzwang zuvor auch bei einer 0,300-Hz-Skala
+  einen Nenner von mindestens 1 Hz; dadurch wurden Kurve und Hovermarkierung
+  nach oben zusammengedrückt, obwohl Beschriftung und Tooltip korrekt waren.
+- Ein Projektions-Regressionscheck prüft obere Grenze, 50-Hz-Mitte und einen
+  Wert unter 50 Hz pixelgenau. Der Asset-Cache-Key wurde erneut erhöht.
+
 ## V3 1.8.19 - 2026-11-25
 
 - Die Netzfrequenzachse bleibt dynamisch, hält 50,000 Hz jedoch unabhängig vom

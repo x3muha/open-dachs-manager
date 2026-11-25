@@ -410,7 +410,7 @@ const sandbox={console,URLSearchParams,Intl,Date,Number,Math,JSON,Set,Map,WeakMa
  window:{devicePixelRatio:1,matchMedia:()=>({matches:false}),addEventListener:()=>{}},
  getComputedStyle:()=>({getPropertyValue:()=>''})};
 vm.createContext(sandbox); vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),sandbox);
-console.log(vm.runInContext('JSON.stringify({frequency:frequencyScale([50.013,50.018]),frequencyTicks:frequencyTicks(frequencyScale([50.013,50.018])),live:frequencyScale([49.925,50.067]),liveTicks:frequencyTicks(frequencyScale([49.925,50.067])),emptyTicks:frequencyTicks(frequencyScale([])),highOnly:frequencyScale([50.120]),lowOnly:frequencyScale([49.720]),outlier:frequencyScale([49.1,50.013,51.2]),tick:formatAxisTick(50.013,.05,"frequency"),value:chartValueText(50.013,"Hz"),negativeInput:lowerBoundScale([-1.77,4.61],6,false),positive:lowerBoundScale([0,4.61],6,false)})',sandbox));
+console.log(vm.runInContext('JSON.stringify({frequency:frequencyScale([50.013,50.018]),frequencyTicks:frequencyTicks(frequencyScale([50.013,50.018])),live:frequencyScale([49.925,50.067]),liveTicks:frequencyTicks(frequencyScale([49.925,50.067])),emptyTicks:frequencyTicks(frequencyScale([])),highOnly:frequencyScale([50.120]),lowOnly:frequencyScale([49.720]),outlier:frequencyScale([49.1,50.013,51.2]),axisTop:chartAxisY({min:49.85,max:50.15},50.15,20,180),axisCentre:chartAxisY({min:49.85,max:50.15},50.0,20,180),axisLower:chartAxisY({min:49.85,max:50.15},49.95,20,180),tick:formatAxisTick(50.013,.05,"frequency"),value:chartValueText(50.013,"Hz"),negativeInput:lowerBoundScale([-1.77,4.61],6,false),positive:lowerBoundScale([0,4.61],6,false)})',sandbox));
 """
         completed = subprocess.run(
             ["node", "-e", script, str(self.root / "src/open_dachs_manager/web/app.js")],
@@ -437,6 +437,12 @@ console.log(vm.runInContext('JSON.stringify({frequency:frequencyScale([50.013,50
         self.assertEqual(result["outlier"], {"min": 48.5, "max": 51.5, "step": 0.5})
         for key in ("frequency", "live", "highOnly", "lowOnly", "outlier"):
             self.assertAlmostEqual((result[key]["min"] + result[key]["max"]) / 2, 50.0)
+        # Regression: renderer and hover must divide by the actual 0.300-Hz
+        # axis span, not by the former hard minimum of 1 Hz.
+        self.assertAlmostEqual(result["axisTop"], 20.0)
+        self.assertAlmostEqual(result["axisCentre"], 110.0)
+        self.assertAlmostEqual(result["axisLower"], 140.0)
+        self.assertNotIn("Math.max(1,axis.max-axis.min)", self.app_js.replace(" ", ""))
         self.assertEqual(result["tick"], "50.013")
         self.assertRegex(result["value"], r"50[,.]013 Hz")
         self.assertEqual(result["negativeInput"]["min"], 0)
